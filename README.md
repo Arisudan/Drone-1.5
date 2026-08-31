@@ -41,7 +41,8 @@ Progress log for setting up a Pixhawk 6X flight controller and Intel RealSense D
 
 **Screenshot — QGroundControl connected, live status:**
 
-![QGroundControl connected showing vehicle messages and status](images/qgc-connected-status.png)
+![QGroundControl connected showing vehicle messages and status]<img width="1920" height="1080" alt="qgc-connected-status" src="https://github.com/user-attachments/assets/8daf4c9b-3b80-407f-93bf-23c89757baec" />
+
 
 #### ✅ Step 2: D435i camera → Laptop
 - Connected D435i to a USB 3.0 port.
@@ -102,7 +103,8 @@ Rather than assume the WiFi relay is "flawless," ran actual measurements:
    - `ATTITUDE`: **92.0 Hz** (well above the typical 10–20Hz default — strong signal the relay is keeping up)
    - `HIGHRES_IMU`: 46.0 Hz, `LOCAL_POSITION_NED` / `ODOMETRY`: 27.6 Hz — all steady, no dropouts
 
-   ![MAVLink Inspector showing ATTITUDE at 92.0Hz with live roll/pitch/yaw data](images/mavlink-inspector-attitude-92hz.png)
+   ![MAVLink Inspector showing ATTITUDE at 92.0Hz with live roll/pitch/yaw data]<img width="1920" height="1080" alt="mavlink-inspector-attitude-92hz" src="https://github.com/user-attachments/assets/ac3e2a87-0b61-4a08-82d1-0034ee82b978" />
+
 
 2. **Raw WiFi latency** (`ping -c 30 <radxa_ip>` from the laptop):
    - `rtt min/avg/max/mdev = 7.642/63.268/729.604/158.832 ms`
@@ -132,7 +134,7 @@ Rather than assume the WiFi relay is "flawless," ran actual measurements:
 
 ## Known Issues / In Progress
 
-- [ ] Confirm WiFi power-save disabled on **both** Radxa and laptop, then re-run latency test
+- [x] Confirm WiFi power-save disabled on **both** Radxa and laptop, then re-run latency test
 - [ ] Improve WiFi signal quality (currently -65 dBm / 45-70 link quality on the Radxa)
 - [ ] Make `mavlink-router` auto-start on Radxa boot via `systemd`
 - [ ] Decide on approach for streaming D435i data off the Radxa (not yet started)
