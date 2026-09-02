@@ -1,53 +1,35 @@
 # RTAB-Map Stereo-Inertial 2D Occupancy Grid for Indoor Drone (ROS2 Jazzy + Intel RealSense D435i)
 
-This package provides a complete visual-inertial SLAM and 2D occupancy grid mapping pipeline tuned specifically for indoor autonomous drone navigation using an Intel RealSense D435i camera and RTAB-Map on ROS2 Jazzy.
+This package (`rtabmap_drone_pkg`) provides a complete visual-inertial SLAM and 2D occupancy grid mapping pipeline tuned specifically for indoor autonomous drone navigation using an Intel RealSense D435i camera and RTAB-Map on ROS2 Jazzy.
 
 ---
 
-## Features
+## 📋 Quick Start Guide (For a Fresh Machine / PC)
 
-- **Stereo-Inertial Odometry**: Hardware-synchronized infrared stereo (IR1 & IR2) + IMU fusion for robust 6-DOF tracking.
-- **3D Point Cloud & 2D Occupancy Grid**: Dense OctoMap-based 2D occupancy grid publishing on `/map`.
-- **Drone Height Band Filtering**: Configurable obstacle height limits (`min_obstacle_height` and `max_obstacle_height`) to filter out ground/ceiling planes relative to the flight level.
-- **Ray Tracing**: Clears free space along optical rays to maintain accurate obstacle and open space representation.
-- **RViz2 Integration**: Includes a pre-configured top-down orthographic tracking viewport (`rtabmap_drone.rviz`).
+Follow these exact steps when cloning this repository onto a new computer:
 
----
+### Step 1: Install Dependencies & Prerequisites
 
-## Prerequisites
-
-- **OS**: Ubuntu 24.04 LTS (Noble)
-- **ROS Version**: ROS2 Jazzy
-- **Hardware**: Intel RealSense D435i connected via **USB 3.2 SuperSpeed**
+1. Ensure **ROS2 Jazzy** is installed on Ubuntu 24.04.
+2. Plug the **Intel RealSense D435i** into a **USB 3.0/3.2 SuperSpeed** port.
+3. Install required ROS2 packages:
+   ```bash
+   sudo apt update
+   sudo apt install -y ros-jazzy-realsense2-camera ros-jazzy-rtabmap-ros
+   ```
 
 ---
 
-## Installation
+### Step 2: Clone & Build in ROS2 Workspace
 
-Install required ROS2 Jazzy packages via `apt`:
-
-```bash
-sudo apt update
-sudo apt install -y ros-jazzy-realsense2-camera ros-jazzy-rtabmap-ros
-```
-
-If python helper nodes or vision scripts are used, install dependencies:
-
-```bash
-pip install opencv-python numpy
-```
-
----
-
-## Building the Workspace
-
-1. Clone or copy this repository into your ROS2 workspace source folder:
+1. Create a ROS2 workspace (if not already existing) and clone this repository:
    ```bash
    mkdir -p ~/ros2_ws/src
    cd ~/ros2_ws/src
+   git clone https://github.com/Arisudan/Drone-1.5.git
    ```
 
-2. Build `rtabmap_drone_pkg`:
+2. Build the workspace package:
    ```bash
    cd ~/ros2_ws
    colcon build --packages-select rtabmap_drone_pkg --symlink-install
@@ -56,18 +38,20 @@ pip install opencv-python numpy
 
 ---
 
-## Running the Pipeline
+### Step 3: Run the Complete Occupancy Grid Pipeline
 
-Bring up the complete pipeline (Camera → Stereo Odometry → RTAB-Map SLAM → RViz2):
+Launch the entire pipeline (Camera → Stereo Odometry → RTAB-Map 2D Occupancy Grid SLAM → Top-Down Tracking RViz2 Viewport) in a single command:
 
 ```bash
 source ~/ros2_ws/install/setup.bash
 ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py
 ```
 
-### Overridable Launch Arguments:
+---
 
-You can pass custom parameters to tune height bands and grid resolution for your room:
+## ⚙️ Customizing Height Limits & Resolution
+
+You can adjust the obstacle height band and cell resolution directly from the launch command:
 
 ```bash
 ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py \
@@ -77,28 +61,29 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py \
   launch_rviz:=true
 ```
 
-| Argument | Default | Description |
+### Parameter Reference:
+
+| Parameter | Default | Description |
 | :--- | :--- | :--- |
 | `min_obstacle_height` | `0.1` | Minimum obstacle height threshold (meters) relative to drone link |
 | `max_obstacle_height` | `2.0` | Maximum obstacle height threshold (meters) relative to drone link |
-| `cell_size` | `0.05` | Resolution of the occupancy grid cells (meters) |
-| `launch_rviz` | `true` | Whether to launch RViz2 automatically |
+| `cell_size` | `0.05` | Resolution of grid cells in meters (5 cm cells) |
+| `launch_rviz` | `true` | Whether to auto-start RViz2 with top-down tracking view |
 
 ---
 
-## Physical Walk-Test Guidance
+## 🚶 Physical Mapping & Walk-Test Instructions
 
-1. **Boot Initialization**: Keep the camera completely stationary for **2–3 seconds** immediately after launching to initialize IMU bias calibration.
-2. **Translation Speed**: Move the camera smoothly at speeds below **0.5 m/s**.
-3. **Rotations**: Avoid rapid yaw or pitch rotation jerks to prevent feature tracking loss.
-4. **Distance & Lighting**: Keep obstacles and surfaces within **0.3 m – 3.5 m** range with adequate ambient room lighting.
+1. **Boot Calibration**: Keep the camera completely still for **2–3 seconds** immediately after launch for IMU bias initialization.
+2. **Movement Speed**: Move smoothly (under 0.5 m/s). Avoid abrupt yaw/pitch rotations.
+3. **Sensor Range**: Maintain 0.3 m to 3.5 m distance from walls and obstacles under normal ambient room lighting.
 
 ---
 
-## Published ROS2 Topics
+## 📡 Published ROS2 Topics
 
-- `/map` (`nav_msgs/OccupancyGrid`): Flattened 2D occupancy grid map
-- `/cloud_map` (`sensor_msgs/PointCloud2`): Accumulated 3D dense map
-- `/odom` (`nav_msgs/Odometry`): Stereo-inertial odometry pose estimate
-- `/camera/infra1/image_rect_raw` & `/camera/infra2/image_rect_raw`: Infrared stereo image streams
-- `/camera/imu`: Hardware-united accel + gyro stream
+- `/map` (`nav_msgs/OccupancyGrid`): Live 2D occupancy grid map
+- `/cloud_map` (`sensor_msgs/PointCloud2`): Dense 3D point cloud
+- `/odom` (`nav_msgs/Odometry`): Visual-inertial odometry pose estimate
+- `/camera/infra1/image_rect_raw` & `/camera/infra2/image_rect_raw`: Hardware time-synced IR stereo image streams
+- `/camera/imu`: 200Hz fused accel/gyro stream

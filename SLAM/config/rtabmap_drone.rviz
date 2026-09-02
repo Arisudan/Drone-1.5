@@ -10,17 +10,23 @@ Panels:
         - /TF1
         - /PointCloud21
       Splitter Ratio: 0.5
-    Tree Height: 775
+    Tree Height: 557
+  - Class: rviz_common/Views
+    Name: Views
+    Property Tree Widget:
+      Expanded:
+        - /TopDown 2D (Free Pan)1
+      Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.699999988079071
+    - Alpha: 0.7
       Cell Size: 1
       Class: rviz_default_plugins/Grid
       Color: 160; 160; 160
       Enabled: true
       Line Style:
-        Line Width: 0.029999999329447746
+        Line Width: 0.03
         Value: Lines
       Name: Grid
       Normal Cell Count: 0
@@ -32,7 +38,7 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-    - Alpha: 0.699999988079071
+    - Alpha: 0.7
       Binary representation: false
       Binary threshold: 100
       Class: rviz_default_plugins/Map
@@ -62,60 +68,13 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        camera_accel_frame:
-          Value: true
-        camera_accel_optical_frame:
-          Value: true
-        camera_aligned_depth_to_infra1_frame:
-          Value: true
-        camera_camera_link:
-          Value: true
-        camera_gyro_frame:
-          Value: true
-        camera_gyro_optical_frame:
-          Value: true
-        camera_imu_frame:
-          Value: true
-        camera_imu_optical_frame:
-          Value: true
-        camera_infra1_frame:
-          Value: true
-        camera_infra1_optical_frame:
-          Value: true
-        camera_infra2_frame:
-          Value: true
-        camera_infra2_optical_frame:
-          Value: true
-        map:
-          Value: true
-        odom:
-          Value: true
       Marker Scale: 0.5
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
       Tree:
-        map:
-          odom:
-            camera_camera_link:
-              camera_accel_frame:
-                camera_accel_optical_frame:
-                  {}
-              camera_aligned_depth_to_infra1_frame:
-                camera_infra1_optical_frame:
-                  {}
-              camera_gyro_frame:
-                camera_gyro_optical_frame:
-                  {}
-                camera_imu_frame:
-                  camera_imu_optical_frame:
-                    {}
-              camera_infra1_frame:
-                {}
-              camera_infra2_frame:
-                camera_infra2_optical_frame:
-                  {}
+        {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -140,7 +99,7 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.029999999329447746
+      Size (m): 0.03
       Style: Points
       Topic:
         Depth: 5
@@ -157,7 +116,12 @@ Visualization Manager:
     Fixed Frame: map
     Frame Rate: 30
   Name: Default Scene
-  Tools: ~
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
   Transformation:
     Current:
       Class: rviz_default_plugins/TF
@@ -167,21 +131,21 @@ Visualization Manager:
       Angle: 0
       Class: rviz_default_plugins/TopDownOrtho
       Invert Z Axis: false
-      Name: Current
+      Name: TopDown 2D (Free Pan)
       Near Clip Distance: 0.01
       Scale: 50
-      Target Frame: camera_camera_link
+      Target Frame: map
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0
       Y: 0
-    Saved: ~
-Window Geometry:
-  Displays:
-    collapsed: false
-  Height: 1011
-  Hide Left Dock: false
-  Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000001000000000000015600000395fc0200000001fb000000100044006900730070006c006100790073010000003f00000395000000cc00ffffff000005e20000039500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
-  Width: 1854
-  X: 66
-  Y: 32
+    Saved:
+      - Angle: 0
+        Class: rviz_default_plugins/TopDownOrtho
+        Invert Z Axis: false
+        Name: Follow Drone 2D
+        Near Clip Distance: 0.01
+        Scale: 50
+        Target Frame: camera_camera_link
+        Value: TopDownOrtho (rviz_default_plugins)
+        X: 0
+        Y: 0
