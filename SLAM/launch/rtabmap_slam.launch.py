@@ -3,6 +3,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     min_obstacle_height_arg = DeclareLaunchArgument(
@@ -59,11 +60,11 @@ def generate_launch_description():
                 'Grid/FromDepth': 'false',          # Generate 3D point cloud grid from stereo
                 'Grid/RayTracing': 'true',          # Ray tracing to mark free space cleanly
                 'Grid/3D': 'true',                  # OctoMap 3D filtering -> 2D projection
-                'Grid/CellSize': LaunchConfiguration('cell_size'),
-                'Grid/MinObstacleHeight': LaunchConfiguration('min_obstacle_height'),
-                'Grid/MaxObstacleHeight': LaunchConfiguration('max_obstacle_height'),
-                'Grid/RangeMin': LaunchConfiguration('range_min'),
-                'Grid/RangeMax': LaunchConfiguration('range_max'),
+                'Grid/CellSize': ParameterValue(LaunchConfiguration('cell_size'), value_type=str),
+                'Grid/MinObstacleHeight': ParameterValue(LaunchConfiguration('min_obstacle_height'), value_type=str),
+                'Grid/MaxObstacleHeight': ParameterValue(LaunchConfiguration('max_obstacle_height'), value_type=str),
+                'Grid/RangeMin': ParameterValue(LaunchConfiguration('range_min'), value_type=str),
+                'Grid/RangeMax': ParameterValue(LaunchConfiguration('range_max'), value_type=str),
 
                 # Map Sparsification & Point Cloud Voxelization Parameters
                 'Grid/VoxelSize': '0.08',                  # 8 cm 3D voxel downsampling for sparse uniform grid
