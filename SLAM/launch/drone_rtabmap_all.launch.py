@@ -11,6 +11,11 @@ def generate_launch_description():
     rviz_config_path = os.path.join(pkg_share, 'config', 'rtabmap_drone.rviz')
 
     # Launch arguments
+    range_max_arg = DeclareLaunchArgument(
+        'range_max',
+        default_value='3.5',
+        description='Max range for grid ray tracing (meters)'
+    )
     min_obstacle_height_arg = DeclareLaunchArgument(
         'min_obstacle_height',
         default_value='0.1',
@@ -25,6 +30,16 @@ def generate_launch_description():
         'cell_size',
         default_value='0.05',
         description='Occupancy grid cell resolution (meters)'
+    )
+    inflation_radius_arg = DeclareLaunchArgument(
+        'inflation_radius_m',
+        default_value='0.6',
+        description='Wall boundary inflation radius (meters)'
+    )
+    min_contour_area_arg = DeclareLaunchArgument(
+        'min_contour_area',
+        default_value='10.0',
+        description='Minimum contour area threshold (grid cells)'
     )
     launch_rviz_arg = DeclareLaunchArgument(
         'launch_rviz',
@@ -58,12 +73,35 @@ def generate_launch_description():
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(pkg_share, 'launch', 'rtabmap_slam.launch.py')
-                )
+                ),
+                launch_arguments={
+                    'range_max': LaunchConfiguration('range_max'),
+                    'min_obstacle_height': LaunchConfiguration('min_obstacle_height'),
+                    'max_obstacle_height': LaunchConfiguration('max_obstacle_height'),
+                    'cell_size': LaunchConfiguration('cell_size'),
+                }.items()
             )
         ]
     )
 
-    # Step 4: Launch RViz2 (delay 8 seconds)
+    # Step 4: Launch Wall Boundary Node (delay 7 seconds)
+    boundary_node = TimerAction(
+        period=7.0,
+        actions=[
+            Node(
+                package='rtabmap_drone_pkg',
+                executable='wall_boundary_node.py',
+                name='wall_boundary_node',
+                output='screen',
+                parameters=[{
+                    'inflation_radius_m': LaunchConfiguration('inflation_radius_m'),
+                    'min_contour_area': LaunchConfiguration('min_contour_area'),
+                }]
+            )
+        ]
+    )
+
+    # Step 5: Launch RViz2 (delay 8 seconds)
     rviz_node = TimerAction(
         period=8.0,
         actions=[
@@ -78,12 +116,16 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        range_max_arg,
         min_obstacle_height_arg,
         max_obstacle_height_arg,
         cell_size_arg,
+        inflation_radius_arg,
+        min_contour_area_arg,
         launch_rviz_arg,
         camera_launch,
         odom_launch,
         slam_launch,
+        boundary_node,
         rviz_node,
     ])

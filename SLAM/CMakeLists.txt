@@ -14,4 +14,9 @@ install(DIRECTORY
   OPTIONAL
 )
 
+install(PROGRAMS
+  scripts/wall_boundary_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

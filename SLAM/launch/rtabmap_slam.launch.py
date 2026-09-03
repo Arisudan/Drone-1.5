@@ -3,17 +3,21 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
+    range_max_arg = DeclareLaunchArgument(
+        'range_max',
+        default_value='3.5',
+        description='Max range for grid ray tracing (meters)'
+    )
     min_obstacle_height_arg = DeclareLaunchArgument(
         'min_obstacle_height',
-        default_value='0.2',
+        default_value='0.1',
         description='Minimum obstacle height for 2D grid map (meters)'
     )
     max_obstacle_height_arg = DeclareLaunchArgument(
         'max_obstacle_height',
-        default_value='1.8',
+        default_value='2.0',
         description='Maximum obstacle height for 2D grid map (meters)'
     )
     cell_size_arg = DeclareLaunchArgument(
@@ -21,23 +25,12 @@ def generate_launch_description():
         default_value='0.05',
         description='Occupancy grid cell resolution (meters)'
     )
-    range_min_arg = DeclareLaunchArgument(
-        'range_min',
-        default_value='0.4',
-        description='Minimum depth range sensor cutoff (meters)'
-    )
-    range_max_arg = DeclareLaunchArgument(
-        'range_max',
-        default_value='3.3',
-        description='Maximum depth range sensor cutoff (meters to eliminate D435i far noise)'
-    )
 
     return LaunchDescription([
+        range_max_arg,
         min_obstacle_height_arg,
         max_obstacle_height_arg,
         cell_size_arg,
-        range_min_arg,
-        range_max_arg,
         Node(
             package='rtabmap_slam',
             executable='rtabmap',
@@ -56,31 +49,17 @@ def generate_launch_description():
                 'approx_sync_max_interval': 0.02,
                 'sync_queue_size': 30,
 
-                # High-Quality 2D Occupancy Grid Parameters (Filtered & Sparsified for Drone SLAM)
-                'Grid/FromDepth': 'false',          # Generate 3D point cloud grid from stereo
-                'Grid/RayTracing': 'true',          # Ray tracing to mark free space cleanly
-                'Grid/3D': 'true',                  # OctoMap 3D filtering -> 2D projection
-                'Grid/CellSize': ParameterValue(LaunchConfiguration('cell_size'), value_type=str),
-                'Grid/MinObstacleHeight': ParameterValue(LaunchConfiguration('min_obstacle_height'), value_type=str),
-                'Grid/MaxObstacleHeight': ParameterValue(LaunchConfiguration('max_obstacle_height'), value_type=str),
-                'Grid/RangeMin': ParameterValue(LaunchConfiguration('range_min'), value_type=str),
-                'Grid/RangeMax': ParameterValue(LaunchConfiguration('range_max'), value_type=str),
-
-                # Map Sparsification & Point Cloud Voxelization Parameters
-                'Grid/VoxelSize': '0.08',                  # 8 cm 3D voxel downsampling for sparse uniform grid
-                'Grid/DepthDecimation': '2',               # 2x decimation to sparsify stereo input cloud
-                'Grid/Scan2dUnknownSpaceFilled': 'false',   # Do NOT fill unknown space; keep map sparse & clean
-                'Grid/MapCleanup': 'true',                 # Clean up outdated / unobserved grid nodes
-
-                # Strict Noise Filtering & Surface Normal Segmentation
-                'Grid/NoiseFilteringRadius': '0.15',       # 15 cm radius sphere for noise check
-                'Grid/NoiseFilteringMinNeighbors': '8',    # Require 8 points inside sphere to keep
-                'Grid/ClusterRadius': '0.1',                # Cluster points to reject single noise specks
-                'Grid/MaxGroundAngle': '30.0',             # Surfaces steeper than 30 deg are obstacles
-                'Grid/NormalsSegmentation': 'true',        # Separate ground/floor plane from vertical walls
-                'Grid/FlatObstacleDetected': 'false',      # Do not treat flat floors/rugs as obstacles
-
-                'Reg/Force3DoF': 'false',           # Full 6-DOF drone motion model
+                # SLAM & 2D Occupancy Grid Parameters for Indoor Drone
+                'Grid/FromDepth': 'false',          # Generate grid from stereo point cloud
+                'Grid/RayTracing': 'true',          # Mark free space using ray tracing
+                'Grid/3D': 'true',                  # Build 3D OctoMap / 2D projection
+                'Grid/CellSize': LaunchConfiguration('cell_size'),
+                'Grid/RangeMax': LaunchConfiguration('range_max'),
+                'Grid/MinObstacleHeight': LaunchConfiguration('min_obstacle_height'),
+                'Grid/MaxObstacleHeight': LaunchConfiguration('max_obstacle_height'),
+                'Grid/NoiseFilteringRadius': '0.05',
+                'Grid/NoiseFilteringMinNeighbors': '5',
+                'Reg/Force3DoF': 'false',           # 3D motion model for drone
                 'Reg/Strategy': '0',                # Visual registration
                 'Rtabmap/DetectionRate': '2.0',
                 'Mem/IncrementalMemory': 'true',
