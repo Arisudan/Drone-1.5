@@ -1,28 +1,47 @@
 # RTAB-Map Stereo-Inertial 2D Occupancy Grid for Indoor Drone (ROS2 Jazzy + Intel RealSense D435i)
 
-This package (`rtabmap_drone_pkg`) provides a complete visual-inertial SLAM and 2D occupancy grid mapping pipeline tuned specifically for indoor autonomous drone navigation using an Intel RealSense D435i camera and RTAB-Map on ROS2 Jazzy.
+This package (`rtabmap_drone_pkg`) provides a high-definition visual-inertial SLAM and 2D occupancy grid mapping pipeline tuned specifically for indoor autonomous drone navigation using an Intel RealSense D435i camera and RTAB-Map on ROS2 Jazzy.
+
+---
+
+## 🌟 Key Features & Advanced Algorithms
+
+1. **High-Definition 2.5cm Occupancy Grid (`rtabmap_slam`)**:
+   - **Cell Size**: 2.5 cm resolution (`0.025`m) with 3D surface normal segmentation (`Grid/NormalsSegmentation: true`).
+   - **Obstacle Height Band**: `0.30`m to `2.0`m (filters out carpet edges, baseboards, and low furniture underneath drone flight path).
+   - **Depth Decimation**: Factor `2` spatial downsampling to retain sharp room corners.
+
+2. **Stateful Hysteresis Wall Locking ($P \ge 80\%$) & Glass Protection**:
+   - Locks structural wall boundaries, frames, and mullions into state memory once occupancy confidence reaches $\ge 80\%$.
+   - Prevents ray-tracing rays passing through glass or specular reflections from erasing or flickering valid wall lines.
+   - Requires at least 15 consecutive clear observations before releasing a locked wall.
+
+3. **Phantom Noise Purging (<1% Noise, 2D LiDAR Quality)**:
+   - Uses connected component analysis (`cv2.connectedComponentsWithStats`) in `map_thinning_node.py` to identify and purge isolated black noise blobs smaller than 20 pixels.
+   - Applies morphological gap closing and Zhang-Suen skeletonization to publish a crisp, single-pixel wide wall outline on `/map_thin`.
+
+4. **Freeze-Free Auto-Restart & USB Driver Recovery**:
+   - Configured with `respawn=True` and `respawn_delay=5.0` to allow the Linux V4L2 USB subsystem to release hardware descriptors cleanly during reconnects, preventing SBC kernel lockups.
 
 ---
 
 ## 📋 Quick Start Guide (For a Fresh Machine / PC)
 
-Follow these exact steps when cloning this repository onto a new computer:
-
 ### Step 1: Install Dependencies & Prerequisites
 
 1. Ensure **ROS2 Jazzy** is installed on Ubuntu 24.04.
 2. Plug the **Intel RealSense D435i** into a **USB 3.0/3.2 SuperSpeed** port.
-3. Install required ROS2 packages:
+3. Install required ROS2 dependencies:
    ```bash
    sudo apt update
-   sudo apt install -y ros-jazzy-realsense2-camera ros-jazzy-rtabmap-ros
+   sudo apt install -y ros-jazzy-realsense2-camera ros-jazzy-rtabmap-ros python3-opencv python3-numpy
    ```
 
 ---
 
 ### Step 2: Clone & Build in ROS2 Workspace
 
-1. Create a ROS2 workspace (if not already existing) and clone this repository:
+1. Create a ROS2 workspace and clone this repository:
    ```bash
    mkdir -p ~/ros2_ws/src
    cd ~/ros2_ws/src
@@ -40,7 +59,7 @@ Follow these exact steps when cloning this repository onto a new computer:
 
 ### Step 3: Run the Complete Occupancy Grid Pipeline
 
-Launch the entire pipeline (Camera → Stereo Odometry → RTAB-Map 2D Occupancy Grid SLAM → Top-Down Tracking RViz2 Viewport) in a single command:
+Launch the entire pipeline (Camera → Stereo Odometry → RTAB-Map SLAM → Map Thinning Node → Top-Down RViz2 Viewport) in a single command:
 
 ```bash
 source ~/ros2_ws/install/setup.bash
@@ -49,41 +68,36 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py
 
 ---
 
-## ⚙️ Customizing Height Limits & Resolution
+## 📡 Published ROS2 Topics
 
-You can adjust the obstacle height band and cell resolution directly from the launch command:
+| Topic | Message Type | Description |
+| :--- | :--- | :--- |
+| `/map` | `nav_msgs/OccupancyGrid` | High-definition 2.5cm raw RTAB-Map occupancy grid |
+| `/map_thin` | `nav_msgs/OccupancyGrid` | **Single-pixel LiDAR-quality wall outline map** (post-processed with wall lock & noise purger) |
+| `/odom` | `nav_msgs/Odometry` | Real-time stereo-inertial odometry pose estimate |
+| `/cloud_map` | `sensor_msgs/PointCloud2` | Dense 3D point cloud map (disabled by default in RViz for performance) |
+| `/camera/infra1/image_rect_raw` | `sensor_msgs/Image` | Left infra stereo camera stream |
+| `/camera/infra2/image_rect_raw` | `sensor_msgs/Image` | Right infra stereo camera stream |
+| `/camera/imu` | `sensor_msgs/Imu` | 200Hz fused IMU accelerometer/gyroscope stream |
+
+---
+
+## ⚙️ Customizing Launch Parameters
+
+You can adjust height limits and cell resolution directly via command line arguments:
 
 ```bash
 ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py \
-  min_obstacle_height:=0.1 \
+  min_obstacle_height:=0.30 \
   max_obstacle_height:=2.0 \
-  cell_size:=0.05 \
+  cell_size:=0.025 \
   launch_rviz:=true
 ```
-
-### Parameter Reference:
-
-| Parameter | Default | Description |
-| :--- | :--- | :--- |
-| `min_obstacle_height` | `0.1` | Minimum obstacle height threshold (meters) relative to drone link |
-| `max_obstacle_height` | `2.0` | Maximum obstacle height threshold (meters) relative to drone link |
-| `cell_size` | `0.05` | Resolution of grid cells in meters (5 cm cells) |
-| `launch_rviz` | `true` | Whether to auto-start RViz2 with top-down tracking view |
 
 ---
 
 ## 🚶 Physical Mapping & Walk-Test Instructions
 
-1. **Boot Calibration**: Keep the camera completely still for **2–3 seconds** immediately after launch for IMU bias initialization.
-2. **Movement Speed**: Move smoothly (under 0.5 m/s). Avoid abrupt yaw/pitch rotations.
-3. **Sensor Range**: Maintain 0.3 m to 3.5 m distance from walls and obstacles under normal ambient room lighting.
-
----
-
-## 📡 Published ROS2 Topics
-
-- `/map` (`nav_msgs/OccupancyGrid`): Live 2D occupancy grid map
-- `/cloud_map` (`sensor_msgs/PointCloud2`): Dense 3D point cloud
-- `/odom` (`nav_msgs/Odometry`): Visual-inertial odometry pose estimate
-- `/camera/infra1/image_rect_raw` & `/camera/infra2/image_rect_raw`: Hardware time-synced IR stereo image streams
-- `/camera/imu`: 200Hz fused accel/gyro stream
+1. **Boot Calibration**: Keep the camera stationary for **2–3 seconds** immediately after launch for IMU bias initialization.
+2. **Movement Speed**: Move smoothly (under 0.5 m/s). Avoid abrupt high-speed yaw rotations.
+3. **Sensor Range**: Maintain 0.3 m to 3.5 m distance from walls and obstacles under normal indoor lighting.
