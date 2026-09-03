@@ -9,8 +9,12 @@ def generate_launch_description():
             executable='realsense2_camera_node',
             name='camera',
             namespace='',
+            respawn=True,           # Auto-restarts node if it exits or crashes
+            respawn_delay=5.0,      # 5-second non-blocking delay (prevents USB kernel lockup)
             parameters=[{
                 'initial_reset': True,
+                'reconnect_timeout': 6.0,
+                'wait_for_device_timeout': 10.0,
                 'tf_prefix': '',
                 'enable_infra1': True,
                 'enable_infra2': True,
@@ -25,6 +29,12 @@ def generate_launch_description():
                 'accel_fps': 200,
                 'publish_tf': True,
                 'base_frame_id': 'camera_link',
+
+                # RealSense Option 2 Filters: Disparity & Hole Filling for Glass/Smooth Surfaces
+                'disparity_filter.enable': True,
+                'spatial_filter.enable': True,
+                'temporal_filter.enable': True,
+                'hole_filling_filter.enable': True,
             }],
             output='screen'
         )

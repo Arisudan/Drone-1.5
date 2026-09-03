@@ -7,16 +7,16 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 
+install(PROGRAMS
+  scripts/map_thinning_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY
   launch
   config
   DESTINATION share/${PROJECT_NAME}
   OPTIONAL
-)
-
-install(PROGRAMS
-  scripts/wall_boundary_node.py
-  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()
