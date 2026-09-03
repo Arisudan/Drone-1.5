@@ -5,32 +5,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    range_max_arg = DeclareLaunchArgument(
-        'range_max',
-        default_value='3.5',
-        description='Max range for grid ray tracing (meters)'
-    )
-    min_obstacle_height_arg = DeclareLaunchArgument(
-        'min_obstacle_height',
-        default_value='0.1',
-        description='Minimum obstacle height for 2D grid map (meters)'
-    )
-    max_obstacle_height_arg = DeclareLaunchArgument(
-        'max_obstacle_height',
-        default_value='2.0',
-        description='Maximum obstacle height for 2D grid map (meters)'
-    )
-    cell_size_arg = DeclareLaunchArgument(
-        'cell_size',
-        default_value='0.05',
-        description='Occupancy grid cell resolution (meters)'
-    )
-
     return LaunchDescription([
-        range_max_arg,
-        min_obstacle_height_arg,
-        max_obstacle_height_arg,
-        cell_size_arg,
         Node(
             package='rtabmap_slam',
             executable='rtabmap',
@@ -49,14 +24,14 @@ def generate_launch_description():
                 'approx_sync_max_interval': 0.02,
                 'sync_queue_size': 30,
 
-                # SLAM & 2D Occupancy Grid Parameters for Indoor Drone
+                # SLAM & 2D Occupancy Grid Parameters for Indoor Drone (Must be strings for RTAB-Map)
                 'Grid/FromDepth': 'false',          # Generate grid from stereo point cloud
                 'Grid/RayTracing': 'true',          # Mark free space using ray tracing
                 'Grid/3D': 'true',                  # Build 3D OctoMap / 2D projection
-                'Grid/CellSize': LaunchConfiguration('cell_size'),
-                'Grid/RangeMax': LaunchConfiguration('range_max'),
-                'Grid/MinObstacleHeight': LaunchConfiguration('min_obstacle_height'),
-                'Grid/MaxObstacleHeight': LaunchConfiguration('max_obstacle_height'),
+                'Grid/CellSize': '0.05',
+                'Grid/RangeMax': '3.5',
+                'Grid/MinObstacleHeight': '0.1',
+                'Grid/MaxObstacleHeight': '2.0',
                 'Grid/NoiseFilteringRadius': '0.05',
                 'Grid/NoiseFilteringMinNeighbors': '5',
                 'Reg/Force3DoF': 'false',           # 3D motion model for drone

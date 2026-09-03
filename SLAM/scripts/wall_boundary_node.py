@@ -19,7 +19,7 @@ class WallBoundaryNode(Node):
         self.sub_map = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
         self.pub_boundaries = self.create_publisher(MarkerArray, '/wall_boundaries', 10)
         
-        self.get_logger().info("Wall Boundary Node initialized (subscribing to /map, publishing to /wall_boundaries).")
+        self.get_logger().info("Wall Boundary Node initialized (extracting safe drone flight boundary).")
 
     def map_callback(self, msg: OccupancyGrid):
         inflation_radius_m = self.get_parameter('inflation_radius_m').get_parameter_value().double_value
@@ -34,34 +34,33 @@ class WallBoundaryNode(Node):
         if width == 0 or height == 0 or resolution <= 0.0:
             return
 
-        # 1. Convert grid data to 2D numpy array (shape: height x width)
+        # 1. Convert grid data array to 2D numpy array (shape: height x width)
         grid_data = np.array(msg.data, dtype=np.int8).reshape((height, width))
         
-        # 2. Threshold: cells >= 65 (occupied) become 255, others become 0
-        binary_mask = np.zeros((height, width), dtype=np.uint8)
-        binary_mask[grid_data >= 65] = 255
+        # 2. Extract Free Space mask (cells with value between 0 and 49)
+        free_mask = np.zeros((height, width), dtype=np.uint8)
+        free_mask[(grid_data >= 0) & (grid_data < 50)] = 255
 
-        # 3. Morphological cleanup: CLOSE then OPEN with 3x3 ellipse kernel
+        # 3. Morphological closing to fill small unmapped gaps within free space
         kernel_3x3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel_3x3)
-        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel_3x3)
+        cleaned_free = cv2.morphologyEx(free_mask, cv2.MORPH_CLOSE, kernel_3x3)
+        cleaned_free = cv2.morphologyEx(cleaned_free, cv2.MORPH_OPEN, kernel_3x3)
 
-        # 4. Inflate obstacles using cv2.dilate based on inflation_radius_m
+        # 4. Erode the free space by safety inflation radius (keeps boundary 0.6m inside walls)
         k_radius = int(round(inflation_radius_m / resolution))
         if k_radius > 0:
             k_size = 2 * k_radius + 1
-            dilation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
-            inflated_mask = cv2.dilate(cleaned_mask, dilation_kernel)
+            erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+            safe_flight_mask = cv2.erode(cleaned_free, erosion_kernel)
         else:
-            inflated_mask = cleaned_mask
+            safe_flight_mask = cleaned_free
 
-        # 5. Find external contours
-        contours, _ = cv2.findContours(inflated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 5. Find external contours outlining the safe flight boundaries
+        contours, _ = cv2.findContours(safe_flight_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # 6. Build MarkerArray output
         marker_array = MarkerArray()
         
-        # Add DELETEALL action first to clear old boundaries
         delete_marker = Marker()
         delete_marker.action = Marker.DELETEALL
         marker_array.markers.append(delete_marker)
@@ -69,10 +68,14 @@ class WallBoundaryNode(Node):
         stamp = self.get_clock().now().to_msg()
         marker_id = 0
 
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < min_contour_area:
-                continue
+        # Sort contours by area descending
+        valid_contours = [c for c in contours if cv2.contourArea(c) >= min_contour_area]
+        valid_contours.sort(key=cv2.contourArea, reverse=True)
+
+        for cnt in valid_contours:
+            # Smooth contour using polygon approximation for a clean line
+            epsilon = max(1.0, 0.005 * cv2.arcLength(cnt, True))
+            smoothed_cnt = cv2.approxPolyDP(cnt, epsilon, True)
 
             marker = Marker()
             marker.header.frame_id = 'map'
@@ -82,13 +85,13 @@ class WallBoundaryNode(Node):
             marker_id += 1
             marker.type = Marker.LINE_STRIP
             marker.action = Marker.ADD
-            marker.scale.x = 0.03  # Line width
+            marker.scale.x = 0.04  # Red boundary line thickness (0.04m)
             marker.color.r = 1.0
             marker.color.g = 0.0
             marker.color.b = 0.0
             marker.color.a = 1.0  # Solid red
 
-            for pt in cnt:
+            for pt in smoothed_cnt:
                 col = pt[0][0]
                 row = pt[0][1]
                 map_x = origin_x + col * resolution
@@ -97,17 +100,17 @@ class WallBoundaryNode(Node):
                 p = Point()
                 p.x = float(map_x)
                 p.y = float(map_y)
-                p.z = 0.0
+                p.z = 0.02  # Slightly above grid plane for crisp RViz rendering
                 marker.points.append(p)
 
             # Close boundary loop
-            if len(cnt) > 0:
-                first_col = cnt[0][0][0]
-                first_row = cnt[0][0][1]
+            if len(smoothed_cnt) > 0:
+                first_col = smoothed_cnt[0][0][0]
+                first_row = smoothed_cnt[0][0][1]
                 p_first = Point()
                 p_first.x = float(origin_x + first_col * resolution)
                 p_first.y = float(origin_y + first_row * resolution)
-                p_first.z = 0.0
+                p_first.z = 0.02
                 marker.points.append(p_first)
 
             marker_array.markers.append(marker)
