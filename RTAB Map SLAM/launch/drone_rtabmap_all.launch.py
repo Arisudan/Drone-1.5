@@ -32,6 +32,21 @@ def generate_launch_description():
         default_value='true',
         description='Whether to launch RViz2'
     )
+    enable_px4_bridge_arg = DeclareLaunchArgument(
+        'enable_px4_bridge',
+        default_value='true',
+        description='Whether to stream external vision pose to Pixhawk MAVLink'
+    )
+    pixhawk_device_arg = DeclareLaunchArgument(
+        'pixhawk_device',
+        default_value='/dev/pixhawk',
+        description='Serial port device path connected to Pixhawk MAVLink'
+    )
+    baud_arg = DeclareLaunchArgument(
+        'baud',
+        default_value='921600',
+        description='Serial port baudrate for MAVLink connection'
+    )
 
     # Step 1: Launch D435i Camera Node
     camera_launch = IncludeLaunchDescription(
@@ -40,9 +55,9 @@ def generate_launch_description():
         )
     )
 
-    # Step 2: Launch Stereo Odometry Node (delay 3 seconds for camera stream init)
+    # Step 2: Launch Stereo Odometry Node (delay 5 seconds for camera stream & TF init)
     odom_launch = TimerAction(
-        period=3.0,
+        period=5.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -52,9 +67,29 @@ def generate_launch_description():
         ]
     )
 
-    # Step 3: Launch RTAB-Map SLAM Node (delay 6 seconds for odom init)
-    slam_launch = TimerAction(
+    # Step 3: Launch PX4 Vision Bridge Node (delay 6 seconds for odom stream init)
+    px4_bridge_node = TimerAction(
         period=6.0,
+        actions=[
+            Node(
+                package='rtabmap_drone_pkg',
+                executable='px4_vision_bridge.py',
+                name='px4_vision_bridge',
+                output='screen',
+                parameters=[{
+                    'device': LaunchConfiguration('pixhawk_device'),
+                    'baud': LaunchConfiguration('baud'),
+                    'odom_topic': '/odom',
+                    'use_ned_conversion': True
+                }],
+                condition=IfCondition(LaunchConfiguration('enable_px4_bridge'))
+            )
+        ]
+    )
+
+    # Step 4: Launch RTAB-Map SLAM Node (delay 8 seconds for odom init)
+    slam_launch = TimerAction(
+        period=8.0,
         actions=[
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -64,9 +99,35 @@ def generate_launch_description():
         ]
     )
 
-    # Step 4: Launch RViz2 (delay 8 seconds)
+    # Step 5: Launch Map Thinning & Noise Purging Node (delay 9 seconds)
+    map_thinning_node = TimerAction(
+        period=9.0,
+        actions=[
+            Node(
+                package='rtabmap_drone_pkg',
+                executable='map_thinning_node.py',
+                name='map_thinning_node',
+                output='screen'
+            )
+        ]
+    )
+
+    # Step 6: Launch Wall Boundary Extractor Node (delay 9.5 seconds)
+    wall_boundary_node = TimerAction(
+        period=9.5,
+        actions=[
+            Node(
+                package='rtabmap_drone_pkg',
+                executable='wall_boundary_node.py',
+                name='wall_boundary_node',
+                output='screen'
+            )
+        ]
+    )
+
+    # Step 7: Launch RViz2 (delay 10 seconds)
     rviz_node = TimerAction(
-        period=8.0,
+        period=10.0,
         actions=[
             Node(
                 package='rviz2',
@@ -84,8 +145,14 @@ def generate_launch_description():
         max_obstacle_height_arg,
         cell_size_arg,
         launch_rviz_arg,
+        enable_px4_bridge_arg,
+        pixhawk_device_arg,
+        baud_arg,
         camera_launch,
         odom_launch,
+        px4_bridge_node,
         slam_launch,
+        map_thinning_node,
+        wall_boundary_node,
         rviz_node,
     ])

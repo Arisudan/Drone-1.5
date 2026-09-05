@@ -12,10 +12,11 @@ def generate_launch_description():
             respawn=True,           # Auto-restarts node if it exits or crashes
             respawn_delay=5.0,      # 5-second non-blocking delay (prevents USB kernel lockup)
             parameters=[{
-                'initial_reset': True,
+                'initial_reset': False,
                 'reconnect_timeout': 6.0,
                 'wait_for_device_timeout': 10.0,
                 'tf_prefix': '',
+                'enable_sync': True,
                 'enable_infra1': True,
                 'enable_infra2': True,
                 'enable_color': False,

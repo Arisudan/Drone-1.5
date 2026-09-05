@@ -9,6 +9,8 @@ find_package(ament_cmake REQUIRED)
 
 install(PROGRAMS
   scripts/map_thinning_node.py
+  scripts/wall_boundary_node.py
+  scripts/px4_vision_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
