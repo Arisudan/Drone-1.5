@@ -22,8 +22,10 @@ def generate_launch_description():
                 'Odom/Strategy': '0',        # 0=Frame-to-Map
                 'Odom/FeatureType': '8',     # 8=ORB / 6=GFTT
                 'Odom/FillInfoData': 'true',
+                'Odom/ResetCountdown': '1',  # Auto-reset odometry when tracking is lost so it re-locks immediately
                 'Vis/MaxDepth': '8.0',
                 'Vis/MinInliers': '10',
+                'Vis/MaxFeatures': '1000',   # Increase feature count for low-contrast scenes
             }],
             remappings=[
                 ('left/image_rect', '/camera/infra1/image_rect_raw'),
