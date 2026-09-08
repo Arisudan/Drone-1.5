@@ -20,6 +20,7 @@ install(PROGRAMS
   scripts/diagnostics/live_status.py
   scripts/diagnostics/apply_ekf2_params.py
   scripts/diagnostics/px4_control.py
+  scripts/diagnostics/drone_gcs_gui.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
