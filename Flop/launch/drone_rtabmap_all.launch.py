@@ -24,7 +24,7 @@ def generate_launch_description():
     )
     cell_size_arg = DeclareLaunchArgument(
         'cell_size',
-        default_value='0.05',
+        default_value='0.025',
         description='Occupancy grid cell resolution (meters)'
     )
     launch_rviz_arg = DeclareLaunchArgument(
@@ -39,8 +39,8 @@ def generate_launch_description():
     )
     pixhawk_device_arg = DeclareLaunchArgument(
         'pixhawk_device',
-        default_value='/dev/pixhawk',
-        description='Serial port device path connected to Pixhawk MAVLink'
+        default_value='tcp:127.0.0.1:5760',
+        description='Serial port device path or mavlink-router TCP endpoint connected to Pixhawk MAVLink'
     )
     baud_arg = DeclareLaunchArgument(
         'baud',
@@ -120,24 +120,8 @@ def generate_launch_description():
                 output='screen',
                 parameters=[{
                     'occupancy_threshold': 60,
-                    'min_wall_cluster_size': 20,  # Discards all scattered noise specks outside room bounds
+                    'min_wall_area_pixels': 20,  # Discards all scattered noise specks outside room bounds
                 }]
-            )
-        ]
-    )
-
-    # Step 5.5: Launch Obstacle-Distance Bridge (delay 9.2 seconds - needs /odom,
-    # up since step 2, and /map, up since step 4). Feeds px4_control.py's obstacle/EV
-    # safety layer (its --obstacle-port) with a real OBSTACLE_DISTANCE ring raycast
-    # against RTAB-Map's own occupancy grid.
-    obstacle_distance_bridge = TimerAction(
-        period=9.2,
-        actions=[
-            Node(
-                package='rtabmap_drone_pkg',
-                executable='obstacle_distance_bridge.py',
-                name='obstacle_distance_bridge',
-                output='screen',
             )
         ]
     )
@@ -183,7 +167,6 @@ def generate_launch_description():
         px4_bridge_node,
         slam_launch,
         map_thinning_node,
-        obstacle_distance_bridge,
         wall_boundary_node,
         rviz_node,
     ])

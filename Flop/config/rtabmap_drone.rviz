@@ -10,9 +10,12 @@ Panels:
         - /TF1
         - /PointCloud21
       Splitter Ratio: 0.5
-    Tree Height: 775
+    Tree Height: 423
   - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
     Name: Views
+    Splitter Ratio: 0.5
 Visualization Manager:
   Class: ""
   Displays:
@@ -34,7 +37,7 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-    - Alpha: 0.7
+    - Alpha: 0.699999988079071
       Binary representation: false
       Binary threshold: 100
       Class: rviz_default_plugins/Map
@@ -57,7 +60,7 @@ Visualization Manager:
         Value: /map_updates
       Use Timestamp: false
       Value: true
-    - Alpha: 1.0
+    - Alpha: 1
       Binary representation: false
       Binary threshold: 100
       Class: rviz_default_plugins/Map
@@ -175,7 +178,7 @@ Visualization Manager:
         Value: /cloud_map
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -189,25 +192,49 @@ Visualization Manager:
     - Class: rviz_default_plugins/Select
     - Class: rviz_default_plugins/FocusCamera
     - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
     - Class: rviz_default_plugins/SetInitialPose
-      Topic: /initialpose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
     - Class: rviz_default_plugins/SetGoal
-      Topic: /goal_pose
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose
     - Class: rviz_default_plugins/PublishPoint
       Single click: true
-      Topic: /clicked_point
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
   Transformation:
     Current:
       Class: rviz_default_plugins/TF
   Value: true
   Views:
     Current:
-      Angle: 0
+      Angle: -0.049999989569187164
       Class: rviz_default_plugins/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
       Invert Z Axis: false
-      Name: Current
-      Near Clip Distance: 0.01
-      Scale: 80
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Scale: 167.4273681640625
       Target Frame: map
       Value: TopDownOrtho (rviz_default_plugins)
       X: 0
@@ -219,6 +246,9 @@ Window Geometry:
   Height: 1011
   Hide Left Dock: false
   Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd00000001000000000000019b0000039dfc0200000002fb000000100044006900730070006c006100790073010000003b00000230000000c700fffffffb0000000a00560069006500770073010000027100000167000000a000ffffff0000059d0000039d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Views:
+    collapsed: false
   Width: 1854
   X: 66
   Y: 32

@@ -25,10 +25,7 @@ def generate_launch_description():
             'Grid/FromDepth': 'false',          # Generate grid from stereo point cloud
             'Grid/RayTracing': 'true',          # Mark free space using ray tracing
             'Grid/3D': 'true',                  # Build 3D OctoMap / 2D projection
-            'Grid/CellSize': '0.05',            # 5 cm - was 2.5cm; 4x fewer cells to rasterize per
-                                                 # update (cell count scales as 1/CellSize^2), still
-                                                 # finer than obstacle_distance_bridge.py's own 5cm
-                                                 # ray step so nothing downstream loses precision
+            'Grid/CellSize': '0.025',           # 2.5 cm ultra-fine cell resolution
             'Grid/MinObstacleHeight': '0.30',    # Filters out low floor furniture/baseboards (<30cm)
             'Grid/MaxObstacleHeight': '2.0',
             'Grid/NormalsSegmentation': 'true', # Filter out ground noise (vertical walls only)
@@ -61,20 +58,13 @@ def generate_launch_description():
             'Grid/Scan2dUnknownSpaceFilled': 'true',
 
             # Global Loop Closure Map Correction
-            # False (was true): a full recompute costs more as the map grows - confirmed
-            # live, /map's own publish gaps stretched from 0.6s to 4.9s over one session.
-            # Incremental updates stay cheap regardless of map size; a loop closure still
-            # corrects the map, just without a full grid rebuild on every single publish.
-            'Grid/GlobalFullUpdate': 'false',
+            'Grid/GlobalFullUpdate': 'true',
             'Optimizer/Strategy': '1',
 
             # SLAM Registration Tuning
             'Reg/Force3DoF': 'false',
             'Reg/Strategy': '0',
-            # Raised from 2.0 now that CellSize/GlobalFullUpdate above cut the per-update
-            # cost - the old 2.0 was already a throttle below what was actually publishing
-            # (~0.6-1 Hz), so this alone wouldn't have helped without those other two.
-            'Rtabmap/DetectionRate': '3.0',
+            'Rtabmap/DetectionRate': '2.0',
             'Mem/IncrementalMemory': 'true',
         }],
         arguments=['--delete_db_on_start'],

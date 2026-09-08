@@ -75,6 +75,7 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py
 | :--- | :--- | :--- |
 | `/map` | `nav_msgs/OccupancyGrid` | High-definition 2.5cm raw RTAB-Map occupancy grid |
 | `/map_thin` | `nav_msgs/OccupancyGrid` | **Single-pixel LiDAR-quality wall outline map** (post-processed with wall lock & noise purger) |
+| `/wall_boundaries` | `visualization_msgs/MarkerArray` | Vectorized safe flight polygon boundaries (0.6m interior wall offset) |
 | `/odom` | `nav_msgs/Odometry` | Real-time stereo-inertial odometry pose estimate |
 | `/cloud_map` | `sensor_msgs/PointCloud2` | Dense 3D point cloud map (disabled by default in RViz for performance) |
 | `/camera/infra1/image_rect_raw` | `sensor_msgs/Image` | Left infra stereo camera stream |
@@ -147,14 +148,12 @@ source ~/ros2_ws/install/setup.bash
 
 ### 4. Launch the full pipeline
 ```bash
-ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py pixhawk_device:=tcp:127.0.0.1:5760 launch_rviz:=true
+ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py
 ```
-- `pixhawk_device:=tcp:127.0.0.1:5760` — routes through `mavlink-router` instead of
-  fighting it for the raw USB port directly. Always use this value.
-- `launch_rviz:=true` — opens the visual map window. Set to `false` if you don't need to
-  see it (saves resources).
-- This one command starts everything: camera, SLAM, the PX4 vision bridge, obstacle
-  detection, wall boundaries.
+- `pixhawk_device` defaults to `tcp:127.0.0.1:5760` (routed via `mavlink-router` without serial port contention).
+- `cell_size` defaults to `0.025` (2.5 cm high-definition grid).
+- `launch_rviz` defaults to `true` (set `launch_rviz:=false` for headless SBC flight).
+- Starts: camera, stereo odometry, 2.5cm RTAB-Map SLAM, PX4 vision bridge, map thinning node, and wall boundary extraction (obstacle detection decoupled for maximum mapping fidelity).
 
 ### 5. Get real tracking going
 Right after launch, the camera is standing still, so tracking won't lock on yet. Pick up
@@ -505,6 +504,25 @@ documented, not silently forgotten.
   All 6 pipeline processes (camera, stereo odometry, RTAB-Map, the bridge itself, map
   thinning, obstacle bridge, wall boundary) kept the exact same PIDs throughout - nothing
   crashed, nothing needed `ros2 launch` to restart anything.
+
+### 17. High-Definition 2.5cm Occupancy Grid & Thinning Restoration (Obstacle Detection Decoupled)
+- **Problem**: The 2D occupancy grid in `Flop` appeared degraded, fragmented, and blurry in RViz compared to the reference `SLAM` pipeline, and `/map_thin` frequently failed to publish or render any output.
+- **Root Cause Analysis**:
+  1. **Grid Resolution Mismatch (`Grid/CellSize: 0.05` vs `0.025`)**: In an earlier attempt to reduce CPU load for raycasting in `obstacle_distance_bridge.py`, cell size was doubled to 5.0 cm. In `map_thinning_node.py`, the noise filter discards clusters smaller than `min_wall_area_pixels = 20`. At 5.0 cm, 20 pixels equals $0.05 \text{ m}^2$ (a $22 \times 22 \text{ cm}$ cluster). Real continuous walls separated by small stereo occlusions fell below this threshold and were purged as noise, causing walls to vanish. Surface normal estimation (`Grid/NormalsSegmentation: true`) was also degraded at 5 cm.
+  2. **Incremental Update Starvation (`Grid/GlobalFullUpdate: false`)**: RTAB-Map stopped republishing the global `/map` on each cycle, switching to incremental patches on `/map_updates`. However, `map_thinning_node.py` and `wall_boundary_node.py` only subscribe to `/map`. As a result, the thinning node was starved of input data and never executed.
+  3. **ROS 2 QoS Durability Mismatch**: `rtabmap` publishes `/map` with `TRANSIENT_LOCAL` durability (latched). `map_thinning_node.py` and `wall_boundary_node.py` subscribed with `VOLATILE` durability (ROS 2 default for queue depth). Because `map_thinning_node` was delayed by 9 seconds, the initial `/map` arrived before subscription, causing the node to miss the latched map entirely.
+  4. **CPU Contention**: Running the 72-sector raycasting loop in `obstacle_distance_bridge.py` on the Radxa ARM cores drove CPU usage up, which was the original reason `CellSize` and `GlobalFullUpdate` were compromised.
+  5. **Launch Parameter Typo**: `drone_rtabmap_all.launch.py` passed `min_wall_cluster_size: 20` instead of `min_wall_area_pixels: 20`, which ROS 2 silently ignored.
+- **Fixes Applied**:
+  1. **Restored 2.5 cm Resolution & Global Updates**: In `rtabmap_slam.launch.py`, set `'Grid/CellSize': '0.025'`, `'Grid/GlobalFullUpdate': 'true'`, and `'Rtabmap/DetectionRate': '2.0'`.
+  2. **Decoupled Obstacle Detection**: Removed `obstacle_distance_bridge.py` from `drone_rtabmap_all.launch.py`, eliminating raycast compute overhead and dedicating all SBC processing power to high-resolution SLAM and thinning.
+  3. **QoS Profile Fixed**: Configured both `map_thinning_node.py` and `wall_boundary_node.py` with `QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)` for both their `/map` subscriptions and `/map_thin` / `/wall_boundaries` publishers.
+  4. **Launch Defaults & Parameter Corrected**: Set launch parameter `'min_wall_area_pixels': 20`, default `cell_size: 0.025`, and default `pixhawk_device: tcp:127.0.0.1:5760`.
+- **Live Hardware Verification**:
+  - `/map`: Verified at `0.0250 m` (2.5 cm) resolution, `350 x 326` grid, `4,303` occupied cells, `57,729` free cells with active ray-traced clearing.
+  - `/map_thin`: Verified at `0.0250 m` resolution, publishing `1,262` single-pixel skeleton cells with noise purged.
+  - `/wall_boundaries`: Verified publishing 5 polygon boundary marker arrays outlining clean room borders in RViz.
+  - Tracking: `stereo_odometry` maintained quality > 200, and Pixhawk EKF2 confirmed vision lock (`Localization: ON, vision ~30-100ms old`).
 
 ### Known, unaddressed loose ends (for future reference)
 - `drone_rtabmap_all.launch.py` declares `min_obstacle_height` / `max_obstacle_height` /

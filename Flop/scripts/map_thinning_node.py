@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import cv2
@@ -14,16 +15,21 @@ class MapThinningNode(Node):
         self.declare_parameter('min_wall_area_pixels', 20)
         self.declare_parameter('unlock_miss_count', 15)
         
+        map_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE
+        )
         self.sub = self.create_subscription(
             OccupancyGrid,
             '/map',
             self.map_callback,
-            10
+            map_qos
         )
         self.pub = self.create_publisher(
             OccupancyGrid,
             '/map_thin',
-            10
+            map_qos
         )
         
         # Stateful Hysteresis Wall Lock Buffer

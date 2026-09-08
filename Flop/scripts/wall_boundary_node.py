@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
@@ -15,9 +16,14 @@ class WallBoundaryNode(Node):
         self.declare_parameter('inflation_radius_m', 0.6)
         self.declare_parameter('min_contour_area', 10.0)
         
+        map_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE
+        )
         # Subscriber & Publisher
-        self.sub_map = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
-        self.pub_boundaries = self.create_publisher(MarkerArray, '/wall_boundaries', 10)
+        self.sub_map = self.create_subscription(OccupancyGrid, '/map', self.map_callback, map_qos)
+        self.pub_boundaries = self.create_publisher(MarkerArray, '/wall_boundaries', map_qos)
         
         self.get_logger().info("Wall Boundary Node initialized (extracting safe drone flight boundary).")
 
