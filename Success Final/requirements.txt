@@ -1,0 +1,43 @@
+# ==============================================================================
+# Python Dependencies for Drone SLAM Pipeline & Ground Control Station (GCS)
+# ==============================================================================
+# Installation:
+#   pip install -r requirements.txt
+#
+# On Ubuntu 24.04 / Debian systems with externally managed environments:
+#   pip install --break-system-packages -r requirements.txt
+#   OR install inside a python virtual environment (venv)
+# ==============================================================================
+
+# Core Numerical & Array Processing (Occupancy Grids, Pose & Path Matrices)
+numpy>=1.24.0
+
+# Computer Vision (Map Thinning, Skeletonization, Connected Components, Noise Purging)
+# Note: Either opencv-contrib-python or opencv-python provides 'cv2'
+opencv-contrib-python>=4.8.0
+
+# Autopilot / Pixhawk MAVLink Protocol & Serial Telemetry
+pymavlink>=2.4.30
+pyserial>=3.5
+
+# Scientific Computing & Spatial Math (A* Path Planning, Coordinate Transforms)
+scipy>=1.10.0
+
+# Desktop Ground Control Station (GCS) UI Framework
+PyQt5>=5.15.10
+PyQt5-sip>=12.13.0
+
+# System Monitoring & Telemetry (Radxa SBC & Host CPU, RAM, Thermal Monitoring)
+psutil>=5.9.0
+
+# Image & Frame Handling (Icons, HUD, Visual Assets)
+Pillow>=9.0.0
+
+# Configuration & YAML Parsing
+PyYAML>=6.0
+
+# Network & WebSocket Streaming (TCP Map Streaming & Web Bridges)
+websockets>=10.4
+
+# Intel RealSense Python SDK (Direct camera stream access outside ROS 2)
+pyrealsense2>=2.54.0; sys_platform != "darwin"

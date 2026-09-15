@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# ROS build artifacts
+build/
+install/
+log/
+
+# OS/editor cruft
+.DS_Store
+*.swp
