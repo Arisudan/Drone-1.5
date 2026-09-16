@@ -9,6 +9,31 @@ For the *why* behind design decisions, real-hardware numbers, and the full troub
 history, see [`gotalldone.md`](gotalldone.md) and [`Progress.md`](Progress.md) instead —
 this file is purely a navigation aid.
 
+## Start here
+
+If you only open two files in this whole repo, make it these:
+
+- **[`launch/drone_rtabmap_all.launch.py`](#launch)** — the one command that brings up the entire onboard pipeline (camera, SLAM, video streamer, everything) on the Radxa.
+- **[`scripts/gcs/drone_gcs.py`](#scriptsgcs-top-level)** (launched via `run_drone_gcs.sh`) — the actual Ground Control Station app you run on the laptop.
+
+Everything else in this guide is reference material for once those two are running.
+
+## Table of contents
+
+- [Folder tree](#folder-tree)
+- [What each file does](#what-each-file-does)
+  - [`config/`](#config)
+  - [`launch/`](#launch)
+  - [`scratch/`](#scratch)
+  - [`scripts/diagnostics/`](#scriptsdiagnostics)
+  - [`scripts/gcs/core/`](#scriptsgcscore)
+  - [`scripts/gcs/protocol/`](#scriptsgcsprotocol)
+  - [`scripts/gcs/ui/`](#scriptsgcsui)
+  - [`scripts/gcs/` (top level)](#scriptsgcs-top-level)
+  - [`scripts/network/`](#scriptsnetwork)
+  - [`scripts/` (top level)](#scripts-top-level)
+  - [Root](#root)
+
 ## Folder tree
 
 ```

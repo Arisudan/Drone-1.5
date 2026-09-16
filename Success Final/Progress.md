@@ -645,6 +645,32 @@ Confirmed via the real `rtabmap_ros` source (`CoreWrapper.cpp`) that `/rtabmap/r
 - Ran the full chain through the actual `DroneGCSMainWindow` (fake map state → simulated confirmed click → real worker → canvas cleared, button re-enabled) and confirmed the armed-state gate correctly disables/enables the button.
 
 ---
+
+## Milestone: Third Network Preset (`DroneNet`) & File-Structure Guide
+
+1. **`DroneNet` preset** added to the GCS header's Network dropdown ([scripts/gcs/ui/top_status_strip.py](file:///home/radxa/Flop/scripts/gcs/ui/top_status_strip.py)) — a NetworkManager connection-sharing/hotspot link where the Radxa is always the gateway at `10.42.0.1`. Pure data-driven change: one new tuple in `KNOWN_NETWORKS`, no backend wiring needed since the existing `network_changed(ip)` signal already fans any preset out to MAVLink, the TCP map bridge, and the FPV stream together. Verified offscreen: dropdown lists all four options and `DroneNet` correctly fills `10.42.0.1`.
+2. **`help.md`** created — a full file-by-file guide to the repo: a real `tree`-generated folder structure (build artifacts excluded) followed by a one-line, source-verified description of every one of the ~57 real files, grouped to mirror the tree. Purely a navigation aid for a new reader; no other docs were touched.
+
+## Milestone: RGB Codec Split → Merge-Back Exercise (Verified Live Both Directions)
+
+At the operator's request, the JPEG-encode/frame-extraction logic in [scripts/d435i_video_streamer.py](file:///home/radxa/Flop/scripts/d435i_video_streamer.py) was split into a standalone `scripts/rgb_frame_codec.py` (zero ROS dependency, two functions: `extract_bgr_frame()` and `encode_jpeg()`), then — same day, on a follow-up request — merged straight back into the single original file. Both directions were verified for real, not just compiled:
+- **Split**: unit-tested the new module (rgb8/bgr8 channel handling, unsupported-encoding rejection, row-padding tolerance, JPEG round-trip decode), rebuilt the ROS package, then ran the **full real pipeline on actual hardware** — live numbers unchanged (~21-24 FPS, ~34 kB/frame, ~6 Mbit/s).
+- **Merge-back**: reverted the file, deleted the codec module, reverted the `CMakeLists.txt` entry, rebuilt, and re-ran the full real pipeline again — live numbers still unchanged (~22-24 FPS, ~36.5 kB/frame, ~7 Mbit/s), confirming the merge changed nothing behaviorally.
+- **Conclusion carried forward**: one file vs. two files is purely a code-organization/shareability choice — runtime cost is identical either way (same functions, same process; the only difference is one extra one-time module `import` at startup).
+- **Process-management slip caught mid-test**: after the merge-back, a shutdown attempt sent `SIGINT` to the wrong PID (the `nohup` bash wrapper, not the real `ros2 launch` process), leaving orphaned nodes holding port 8080 and triggering a respawn-loop on the next launch. Caught via `ss`/`ps` inspection, fully cleaned up, relaunched once cleanly.
+
+## Milestone: Real-Hardware C2 (Command & Control) Round-Trip Validation
+
+Verified the actual production command path end-to-end — **GCS laptop (real Wi-Fi) → Radxa `mavlink-router` → Pixhawk (USB) → reply back the same way** — using this project's own diagnostic tools plus a new instrumented latency test, rather than assuming it works because telemetry is visible in the UI.
+
+1. **`duplex_check.py`** (run from the laptop against `udpout:172.16.101.84:14550`): downlink **PROVEN** (real PX4 `sys=1` heartbeat), uplink **PROVEN** (`AUTOPILOT_VERSION` request answered). Captured a full live rate table: 197.1 Hz total telemetry, ~11.7 KB/s.
+2. **`c2_validate.py`** (with `--arm`, bench-safe — no battery/motors attached): **4/4 commands acknowledged** — LOITER `ACCEPTED`, RTL `ACCEPTED`, a deliberately-undefined command correctly `UNSUPPORTED`, and an arm attempt correctly `TEMPORARILY_REJECTED` (proves the reply path, not just the send path, since PX4 had to actually answer).
+3. **New instrumented round-trip latency test** (neither existing tool times individual commands, so one was written for this): `PARAM_REQUEST_READ → PARAM_VALUE` 15/15 received, 49-261 ms (avg 136 ms); `COMMAND_LONG → COMMAND_ACK` 15/15 received, 60-162 ms (avg 109 ms).
+4. **Bug caught in the test script itself** — the same "wrong system targeting" class already documented elsewhere in this project (`px4_control.py`, `verify_ekf2_params.py`): a bare `wait_heartbeat()` latched `sys=0/comp=0` instead of the real Pixhawk, causing one dropped reply and a 1245 ms outlier. Fixed by filtering for a genuine autopilot heartbeat instead of trusting the first one seen — after the fix, both tests went to a clean 15/15 with tight, consistent timing.
+5. **Real (non-code) finding**: baseline `ping` to the laptop over `HTIC_RND` showed 137-289 ms RTT, matching the corrected command-latency numbers — genuine current Wi-Fi latency, not a bug. Still well inside PX4's OFFBOARD 2 Hz (500 ms) setpoint deadline, so no functional risk today, but flagged as the first thing to check if commands ever start feeling laggy.
+6. **Gap acknowledged**: no `sudo` access in-session, so `mavlink-router`'s own internal log couldn't be checked directly for silent drops — conclusions rest on 100% application-level ACK rates across two independent tools plus the new test, not router-internal packet accounting.
+
+---
 *Report compiled and validated by Antigravity Autonomous Systems Engineering Team.*
 
 
