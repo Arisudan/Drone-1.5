@@ -43,12 +43,16 @@ from PyQt5.QtWidgets import (
 
 from core.telemetry import TelemetrySnapshot
 
-# The only two networks this rig is ever actually deployed on. Picking one here just
-# fills in the IP - port and protocol are independent axes (same MAVLink/map/video ports
-# apply on either network) and are left for the operator to choose separately.
+# The networks this rig is actually deployed on. Picking one here just fills in the
+# IP - port and protocol are independent axes (same MAVLink/map/video ports apply on
+# any of these networks) and are left for the operator to choose separately.
 KNOWN_NETWORKS = [
     ("HTIC_RND", "172.16.101.84"),
     ("DroneBridge5", "192.168.1.2"),
+    # DroneNet: a NetworkManager connection-sharing/hotspot link - Radxa is always the
+    # shared-connection gateway at 10.42.0.1 (the laptop gets a lease like 10.42.0.200,
+    # but that's not needed here since the GCS only ever connects out to the Radxa).
+    ("DroneNet", "10.42.0.1"),
 ]
 
 

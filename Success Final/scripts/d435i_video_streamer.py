@@ -58,6 +58,7 @@ for _ros_path in [
 
 import numpy as np
 import cv2
+
 try:
     import rclpy
     from rclpy.node import Node
