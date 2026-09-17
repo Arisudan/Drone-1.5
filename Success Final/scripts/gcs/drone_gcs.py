@@ -133,6 +133,19 @@ class DroneGCSMainWindow(QMainWindow):
         # Bench Force Arm tracking state
         self._last_arm_was_forced: bool = False
 
+        # Safety state machine: when `disarm` is issued while genuinely
+        # airborne, it's redirected to AUTO.LAND instead of an instant motor
+        # cutoff. This flag tracks that a real disarm is still owed once
+        # PX4's own landed_state confirms touchdown - checked every telemetry
+        # update in _on_telemetry_updated.
+        self._pending_autodisarm_after_land: bool = False
+        # Sane bounds for operator-entered command values - guards against a
+        # typo or fat-fingered altitude/displacement being sent as a real
+        # flight command. Adjust for your actual room/airframe if needed.
+        self.TAKEOFF_ALT_MIN_M: float = 0.2
+        self.TAKEOFF_ALT_MAX_M: float = 3.0
+        self.MOVE_MAX_DELTA_M: float = 3.0
+
         # Autonomous Waypoint Navigation & Safety Interlocks
         self.active_waypoints: List[Tuple[float, float]] = []
         self.current_wpt_idx: int = 0
@@ -409,7 +422,7 @@ class DroneGCSMainWindow(QMainWindow):
 
         self.combo_modes = QComboBox(self)
         self.combo_modes.addItems(PX4_MODES_LIST)
-        self.combo_modes.setCurrentText("OFFBOARD")
+        self.combo_modes.setCurrentText("STABILIZED")
         self.combo_modes.setMinimumHeight(30)
         row5.addWidget(self.combo_modes, 1)
 
@@ -615,6 +628,17 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_slam.update_pose(t.x, t.y, t.heading)
         self.page_slam.set_armed_state(t.armed)
         self.page_motors.update_pwms(t.motor_pwms)
+
+        # Safety state machine: a mid-flight `disarm` was redirected to
+        # AUTO.LAND (see _cmd_disarm) - watch for PX4's own landed_state to
+        # confirm real touchdown before actually cutting power.
+        if self._pending_autodisarm_after_land and t.landed_state == 1:
+            self._pending_autodisarm_after_land = False
+            self.console.log_success("Landing detected (ON_GROUND) - disarming now.")
+            self.page_terminal.log_success("Landing detected (ON_GROUND) - disarming now.")
+            self.toast.show_message("Landed - disarming", "#238636", 3000)
+            if self.worker and self.worker.isRunning():
+                self.worker.disarm(force=False)
 
     # -------------------------------------------------------------------------
     # UI Periodic Tick (30 Hz)
@@ -841,13 +865,34 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_slam.set_executing_state(False, paused=False)
         self.page_slam.canvas.clear_goal()
 
+        t = self.last_telemetry
+        if t.is_airborne:
+            # `disarm` while genuinely airborne must never be an instant
+            # motor cutoff - that free-falls the vehicle. Redirect to PX4's
+            # own AUTO.LAND (a real, tested controlled descent using the
+            # rangefinder/optical-flow height fusion already enabled -
+            # EKF2_RNG_CTRL/EKF2_OF_CTRL), and only send the real disarm once
+            # landed_state confirms touchdown (see _on_telemetry_updated).
+            # `kill` remains the true, unconditional emergency cutoff.
+            msg = "DISARM requested while airborne - redirecting to AUTO.LAND for a safe controlled descent (will disarm automatically on touchdown). Use KILL for an immediate cutoff instead."
+            self.console.log_warning(msg)
+            self.page_terminal.log_warning(msg)
+            self.toast.show_message("Airborne - landing safely, will disarm on touchdown", "#d29922", 5000)
+            self.worker.set_mode("AUTO.LAND")
+            self._pending_autodisarm_after_land = True
+            self.exec_tracker.start_tracking(
+                "land-then-disarm", t.x, t.y, t.z,
+                cur_armed=t.armed, cur_mode=t.flight_mode
+            )
+            return
+
         self.console.log_cmd("Dispatching DISARM...")
         self.page_terminal.log_cmd("Dispatching DISARM...")
         self.worker.disarm(force=True)
         self.toast.show_message("Dispatching: DISARM", "#da3633")
         self.exec_tracker.start_tracking(
-            "disarm", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode
+            "disarm", t.x, t.y, t.z,
+            cur_armed=t.armed, cur_mode=t.flight_mode
         )
 
     def _cmd_takeoff_from_ui(self):
@@ -862,14 +907,44 @@ class DroneGCSMainWindow(QMainWindow):
             self.console.log_error("Cannot takeoff: Not connected")
             self.page_terminal.log_error("Cannot takeoff: Not connected")
             return
-        self.console.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
-        self.page_terminal.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
-        self.worker.takeoff(altitude)
-        self.toast.show_message(f"Takeoff Initiated ({altitude:.1f}m)", "#1f6feb")
+
+        t = self.last_telemetry
+        if not t.armed:
+            msg = "Cannot takeoff: drone is disarmed - arm first."
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Cannot takeoff: disarmed", "#da3633", 4000)
+            return
+        if not (self.TAKEOFF_ALT_MIN_M <= altitude <= self.TAKEOFF_ALT_MAX_M):
+            msg = (f"Cannot takeoff: {altitude:.2f}m is outside the allowed range "
+                   f"[{self.TAKEOFF_ALT_MIN_M:.1f}, {self.TAKEOFF_ALT_MAX_M:.1f}]m.")
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Takeoff altitude out of range", "#da3633", 4000)
+            return
+
+        if t.is_airborne:
+            # Already flying - "takeoff <alt>" here means "go to and hold at
+            # this altitude," which may mean ascending OR descending from the
+            # current height. PX4's native NAV_TAKEOFF is a ground-takeoff
+            # maneuver and doesn't handle descending, so use a pure-Z OFFBOARD
+            # position-hold setpoint instead (same mechanism move/yaw use),
+            # which naturally auto-holds once the target altitude is reached.
+            self.console.log_cmd(f"Already airborne - repositioning to altitude {altitude:.1f}m and holding...")
+            self.page_terminal.log_cmd(f"Already airborne - repositioning to altitude {altitude:.1f}m and holding...")
+            if t.flight_mode != "OFFBOARD":
+                self.worker.set_mode("OFFBOARD")
+            self.worker.move_to_waypoint(t.x, t.y, z=-abs(altitude))
+            self.toast.show_message(f"Altitude hold: {altitude:.1f}m", "#1f6feb")
+        else:
+            self.console.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
+            self.page_terminal.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
+            self.worker.takeoff(altitude)
+            self.toast.show_message(f"Takeoff Initiated ({altitude:.1f}m)", "#1f6feb")
+
         self.exec_tracker.start_tracking(
-            f"takeoff {altitude}",
-            self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode
+            f"takeoff {altitude}", t.x, t.y, t.z,
+            cur_armed=t.armed, cur_mode=t.flight_mode
         )
 
     def _cmd_move_from_ui(self):
@@ -887,6 +962,18 @@ class DroneGCSMainWindow(QMainWindow):
         if not self.worker or not self.worker.isRunning():
             self.console.log_error("Cannot move: Disconnected")
             self.page_terminal.log_error("Cannot move: Disconnected")
+            return
+        if not self.last_telemetry.is_airborne:
+            msg = "Cannot move: not airborne - arm and takeoff first."
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Cannot move: not airborne", "#da3633", 4000)
+            return
+        if max(abs(dx), abs(dy), abs(dz)) > self.MOVE_MAX_DELTA_M:
+            msg = f"Cannot move: displacement exceeds the {self.MOVE_MAX_DELTA_M:.1f}m safety bound per command."
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Move rejected: too large", "#da3633", 4000)
             return
 
         # Ensure OFFBOARD mode before dispatching setpoints, alerting the operator
@@ -922,6 +1009,12 @@ class DroneGCSMainWindow(QMainWindow):
         if not self.worker or not self.worker.isRunning():
             self.console.log_error("Cannot rotate yaw: Disconnected")
             self.page_terminal.log_error("Cannot rotate yaw: Disconnected")
+            return
+        if not self.last_telemetry.is_airborne:
+            msg = "Cannot rotate yaw: not airborne - arm and takeoff first."
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Cannot yaw: not airborne", "#da3633", 4000)
             return
 
         # Ensure OFFBOARD mode before dispatching yaw setpoint, alerting the operator
