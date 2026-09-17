@@ -930,10 +930,18 @@ class DroneGCSMainWindow(QMainWindow):
             # maneuver and doesn't handle descending, so use a pure-Z OFFBOARD
             # position-hold setpoint instead (same mechanism move/yaw use),
             # which naturally auto-holds once the target altitude is reached.
+            # Mode switching is never done silently on the operator's behalf -
+            # OFFBOARD must already be active (set explicitly via the Mode
+            # dropdown + SET MODE) before this will do anything.
+            if t.flight_mode != "OFFBOARD":
+                msg = (f"Cannot hold altitude: current mode is {t.flight_mode or 'UNKNOWN'}, not OFFBOARD. "
+                       "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
+                self.console.log_error(msg)
+                self.page_terminal.log_error(msg)
+                self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
+                return
             self.console.log_cmd(f"Already airborne - repositioning to altitude {altitude:.1f}m and holding...")
             self.page_terminal.log_cmd(f"Already airborne - repositioning to altitude {altitude:.1f}m and holding...")
-            if t.flight_mode != "OFFBOARD":
-                self.worker.set_mode("OFFBOARD")
             self.worker.move_to_waypoint(t.x, t.y, z=-abs(altitude))
             self.toast.show_message(f"Altitude hold: {altitude:.1f}m", "#1f6feb")
         else:
@@ -976,17 +984,17 @@ class DroneGCSMainWindow(QMainWindow):
             self.toast.show_message("Move rejected: too large", "#da3633", 4000)
             return
 
-        # Ensure OFFBOARD mode before dispatching setpoints, alerting the operator
+        # OFFBOARD is never engaged silently on the operator's behalf - it
+        # must already be active (Mode dropdown -> SET MODE) before a move
+        # will be dispatched.
         if self.last_telemetry.flight_mode != "OFFBOARD":
             curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
-            self.console.log_warning(
-                f"[MODE] Current mode is {curr_mode}. Switching to OFFBOARD to execute move..."
-            )
-            self.page_terminal.log_warning(
-                f"[MODE] Current mode is {curr_mode}. Switching to OFFBOARD to execute move..."
-            )
-            self.toast.show_message("Switching to OFFBOARD to execute move", "#d29922", 2500)
-            self.worker.set_mode("OFFBOARD")
+            msg = (f"Cannot move: current mode is {curr_mode}, not OFFBOARD. "
+                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
+            return
 
         self.console.log_cmd(f"Dispatching translation: dx={dx:+.2f}m, dy={dy:+.2f}m, dz={dz:+.2f}m")
         self.page_terminal.log_cmd(f"Dispatching translation: dx={dx:+.2f}m, dy={dy:+.2f}m, dz={dz:+.2f}m")
@@ -1017,17 +1025,17 @@ class DroneGCSMainWindow(QMainWindow):
             self.toast.show_message("Cannot yaw: not airborne", "#da3633", 4000)
             return
 
-        # Ensure OFFBOARD mode before dispatching yaw setpoint, alerting the operator
+        # OFFBOARD is never engaged silently on the operator's behalf - it
+        # must already be active (Mode dropdown -> SET MODE) before a yaw
+        # rotation will be dispatched.
         if self.last_telemetry.flight_mode != "OFFBOARD":
             curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
-            self.console.log_warning(
-                f"[MODE] Current mode is {curr_mode}. Switching to OFFBOARD to rotate yaw..."
-            )
-            self.page_terminal.log_warning(
-                f"[MODE] Current mode is {curr_mode}. Switching to OFFBOARD to rotate yaw..."
-            )
-            self.toast.show_message("Switching to OFFBOARD to rotate yaw", "#d29922", 2500)
-            self.worker.set_mode("OFFBOARD")
+            msg = (f"Cannot rotate yaw: current mode is {curr_mode}, not OFFBOARD. "
+                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
+            return
 
         self.console.log_cmd(f"Rotating yaw by {angle_deg:+.1f}°...")
         self.page_terminal.log_cmd(f"Rotating yaw by {angle_deg:+.1f}°...")
@@ -1117,6 +1125,17 @@ class DroneGCSMainWindow(QMainWindow):
             self.toast.show_message("Cannot Execute: Drone is Disarmed!", "#da3633", 5000)
             return
 
+        # 1b. OFFBOARD Mode Interlock - never engaged silently on the
+        # operator's behalf; must already be active before a path is flown.
+        if self.last_telemetry.flight_mode != "OFFBOARD":
+            curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
+            msg = (f"Cannot execute path: current mode is {curr_mode}, not OFFBOARD. "
+                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
+            return
+
         # 2. VIO / Position Lock Interlock
         if not self.last_telemetry.d435i_vio_health and not self.last_telemetry.ekf2_vision_fused:
             self.console.log_warning(
@@ -1146,7 +1165,6 @@ class DroneGCSMainWindow(QMainWindow):
             self.path_in_progress = True
             self.page_slam.set_executing_state(True, paused=False)
 
-            self.worker.set_mode("OFFBOARD")
             self.worker.move_to_waypoint(
                 self.takeoff_hover_x, self.takeoff_hover_y, z=self.cruise_z, yaw_deg=self.last_telemetry.heading
             )
@@ -1161,7 +1179,6 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_terminal.log_cmd(
             f"[AIRBORNE] Executing path ({len(waypoints)} waypoints)..."
         )
-        self.worker.set_mode("OFFBOARD")
         self._dispatch_path_start(waypoints)
 
     def _dispatch_path_start(self, waypoints: list):
@@ -1294,9 +1311,20 @@ class DroneGCSMainWindow(QMainWindow):
                 self.toast.show_message(f"Cannot Resume: Blocked ({col_dist:.2f}m)!", "#da3633", 5000)
                 return
 
-        self.console.log_cmd("[RESUME] Switching to OFFBOARD...")
-        self.page_terminal.log_cmd("[RESUME] Switching to OFFBOARD...")
-        self.worker.set_mode("OFFBOARD")
+        # 3. OFFBOARD Mode Interlock - PAUSE puts PX4 into AUTO.LOITER; mode
+        # is never re-engaged silently, so the operator must switch back to
+        # OFFBOARD manually (Mode dropdown -> SET MODE) before resuming.
+        if self.last_telemetry.flight_mode != "OFFBOARD":
+            curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
+            msg = (f"Cannot resume path: current mode is {curr_mode}, not OFFBOARD. "
+                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
+            return
+
+        self.console.log_cmd("[RESUME] Resuming path...")
+        self.page_terminal.log_cmd("[RESUME] Resuming path...")
         self.path_in_progress = True
         self.path_paused = False
         self.page_slam.set_executing_state(True, paused=False)
