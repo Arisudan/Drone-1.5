@@ -92,6 +92,22 @@ class MAVLinkWorker(QThread):
         self._streams_configured: bool = False
 
         self.master: Optional[mavutil.mavfile] = None
+        # Dedup state for COMMAND_ACK, keyed per dispatch rather than per time window.
+        # PX4 (or the link) can re-transmit the same logical ACK as multiple genuinely
+        # distinct wire packets - different MAVLink sequence numbers each time, a real
+        # retransmission, not just a duplicated UDP datagram - observed live as ~70
+        # identical ACKs for one NAV_TAKEOFF. But a shared MAV_CMD id (e.g.
+        # MAV_CMD_SET_MESSAGE_INTERVAL=511) is also legitimately reused for several
+        # DIFFERENT dispatches close together (one _configure_streams() burst sends it
+        # ~7 times, once per telemetry stream), which a content+time-window dedup
+        # would incorrectly collapse into one. A monotonically bumped token per
+        # cmd_id, incremented right before each real send (see _begin_command_dispatch
+        # below), tells these apart: only the first ACK matching the *current* token
+        # for that cmd_id is reported; further ACKs against the same token are true
+        # retransmit duplicates and are suppressed, while a fresh dispatch of the same
+        # command type always gets its own fresh token and is reported once more.
+        self._ack_dispatch_token: dict = {}
+        self._ack_reported_token: dict = {}
         self.telemetry = TelemetrySnapshot()
         self.telemetry.system_id = 1
         self.telemetry.component_id = 1
@@ -122,6 +138,11 @@ class MAVLinkWorker(QThread):
         self.host = host.strip()
         self.port = int(port)
         self.protocol = protocol.lower().strip()
+
+    def _begin_command_dispatch(self, cmd_id: int):
+        """Call immediately before sending a MAV_CMD - see the dedup comment on
+        _ack_dispatch_token in __init__ for why this exists."""
+        self._ack_dispatch_token[cmd_id] = self._ack_dispatch_token.get(cmd_id, 0) + 1
 
     def connect_endpoint(self, host: str, port: int, protocol: str = "udp"):
         """Configure endpoint and start thread."""
@@ -405,6 +426,15 @@ class MAVLinkWorker(QThread):
                 res_code = self.telemetry.last_ack_result_code
                 cmd_name = self.telemetry.last_ack_cmd_name
                 res_str = self.telemetry.last_ack_result
+
+            # Suppress true retransmit duplicates for the dispatch currently in
+            # flight for this cmd_id, while still reporting the first ACK of every
+            # fresh dispatch (see _begin_command_dispatch / class docstring above).
+            token = self._ack_dispatch_token.get(cmd_id)
+            if token is not None and self._ack_reported_token.get(cmd_id) == token:
+                return
+            self._ack_reported_token[cmd_id] = token
+
             self.command_ack_received.emit(cmd_id, res_code, cmd_name, res_str)
 
         elif msg_type == "STATUSTEXT":
@@ -454,6 +484,7 @@ class MAVLinkWorker(QThread):
             return
         param2 = 21196 if force else 0
         try:
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
@@ -474,6 +505,7 @@ class MAVLinkWorker(QThread):
             return
         param2 = 21196 if force else 0
         try:
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
@@ -544,6 +576,7 @@ class MAVLinkWorker(QThread):
             sub_mode = (custom_mode >> 24) & 0xFF
             try:
                 # 1. Send via MAV_CMD_DO_SET_MODE to elicit real COMMAND_ACK from Pixhawk
+                self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_DO_SET_MODE)
                 self.master.mav.command_long_send(
                     self.target_system,
                     self.target_component,
@@ -571,6 +604,7 @@ class MAVLinkWorker(QThread):
             return
         try:
             # 1. Send PX4 standard takeoff command
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
@@ -646,6 +680,7 @@ class MAVLinkWorker(QThread):
 
         try:
             # 1. Primary effective motor cutoff: Force-disarm (param2=21196.0 bypasses in-air checks)
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
@@ -657,6 +692,7 @@ class MAVLinkWorker(QThread):
             )
 
             # 2. Secondary best-effort send: Flight termination (effective if circuit breaker allows)
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_DO_FLIGHTTERMINATION)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
