@@ -123,8 +123,13 @@ class SLAMMapCanvas(QWidget):
         self.heading: float = 0.0
         self._pose_initialized: bool = False
 
-        # Breadcrumb trail (up to 800 positions)
+        # Breadcrumb trail (up to 800 positions). Hidden and not recorded until
+        # the first Goal Pose is set - during ordinary manual flight the trail
+        # isn't meaningful and just adds visual clutter. Once shown, it stays
+        # visible (as a record of that goal run) even after arrival/abort, and
+        # only resets when the *next* goal is set - see set_goal().
         self.trail: deque = deque(maxlen=800)
+        self.trail_visible: bool = False
 
         # 2D Occupancy Grid Data - Dual Buffers for RViz-style Composite Overlay
         # 1. Raw Occupancy Grid (/map: free space + obstacle mass)
@@ -224,13 +229,15 @@ class SLAMMapCanvas(QWidget):
             self.heading = (self.heading + delta * alpha) % 360.0
 
         # Add to trail if drone has moved > 4cm (smoothed position, so the trail
-        # matches where the icon is actually drawn)
-        if not self.trail:
-            self.trail.append((self.drone_x, self.drone_y))
-        else:
-            lx, ly = self.trail[-1]
-            if (self.drone_x - lx)**2 + (self.drone_y - ly)**2 > 0.0016:
+        # matches where the icon is actually drawn) - only while a goal run has
+        # ever been started (see trail_visible in __init__ / set_goal()).
+        if self.trail_visible:
+            if not self.trail:
                 self.trail.append((self.drone_x, self.drone_y))
+            else:
+                lx, ly = self.trail[-1]
+                if (self.drone_x - lx)**2 + (self.drone_y - ly)**2 > 0.0016:
+                    self.trail.append((self.drone_x, self.drone_y))
 
         # Auto-follow camera tracking (smooth gliding), tracking the smoothed
         # position so the view doesn't glide toward a spot the icon isn't at.
@@ -338,11 +345,18 @@ class SLAMMapCanvas(QWidget):
     def set_goal(self, x: float, y: float):
         """Set goal pose in world coordinates and compute collision-free path."""
         self.goal_pose = (x, y)
+        # A new goal starts a fresh trail recording, replacing whatever was left
+        # on screen from the previous goal run (kept visible until now so it
+        # could be reviewed after arrival/abort - see trail_visible docstring).
+        self.trail.clear()
+        self.trail_visible = True
         self._replan_path()
         self.update()
 
     def clear_goal(self):
-        """Clear current goal pose and planned path."""
+        """Clear current goal pose and planned path. Deliberately leaves the
+        trail alone - it stays visible as a record of this run until the next
+        goal is set (see set_goal()) or it's cleared manually."""
         self.goal_pose = None
         self.planned_waypoints = []
         self.planned_distance = 0.0
@@ -353,6 +367,7 @@ class SLAMMapCanvas(QWidget):
 
     def clear_trail(self):
         self.trail.clear()
+        self.trail_visible = False
         self.update()
 
     def reset_view(self):
@@ -602,7 +617,7 @@ class SLAMMapCanvas(QWidget):
             p.drawImage(target_rect, self.map_thin_qimage)
 
     def _draw_trail(self, p: QPainter, cx: float, cy: float):
-        if len(self.trail) < 2:
+        if not self.trail_visible or len(self.trail) < 2:
             return
         p.save()
         p.setPen(QPen(QColor(100, 116, 139, 200), 2, Qt.DashLine))
@@ -1363,6 +1378,7 @@ class SLAMMapWidget(QWidget):
         self.canvas.map_thin_qimage = None
         self.canvas.occupancy_grid = None
         self.canvas.trail.clear()
+        self.canvas.trail_visible = False
         self.canvas.clear_goal()
         self.canvas._auto_fit_done = False
         self._has_raw_map = False

@@ -735,6 +735,35 @@ Discussed and resolved a real point of confusion about which machine needs a dis
 - **Noted for later, not yet implemented**: true hands-off operation (drone powers on, pipeline is already running, no SSH needed at all) would need this wrapped in a systemd service that starts on boot, mirroring how `mavlink-router` already auto-starts. Discussed as the natural next step but not yet built.
 
 ---
+
+## Milestone: Command Safety Redesign, RC/GCS Arbitration Hardening, and ELRS Failsafe Fix (Real Hardware, End-to-End Verified)
+
+Later the same day, pushed the code so far to the laptop and to `Arisudan/Drone-1.5` (`Success Final/` folder, commit `8d86354`) on GitHub, then continued into a real flight-safety hardening pass — driven by an unplanned finding that arming had effectively no safety net configured on the flight controller itself.
+
+### 1. Unexplained Radxa reboot mid-session
+- Found the pipeline had silently died; `uptime -s` showed the Radxa had rebooted only ~4 minutes earlier with no shutdown message in any log - cause undetermined.
+- Confirmed the Pixhawk's own parameters survived intact (separate power domain from the Radxa) before relaunching the pipeline and re-verifying the C2 link end-to-end.
+- Verified local ↔ laptop ↔ GitHub were all still in sync (clean `diff -rq` all around) despite a flaky WiFi link to the laptop dropping and reconnecting several times during the checks.
+
+### 2. Smarter takeoff/yaw/disarm command semantics (`drone_gcs.py`, `telemetry.py`, `mavlink_worker.py`)
+- **`takeoff <alt>`** now means "go to and hold this altitude," including *descending* if commanded below the current altitude while already airborne - not just climbing.
+- **`yaw <deg>`** locks in and holds the commanded heading afterward instead of a one-time rotation.
+- **`disarm` while airborne** is now redirected into a safe `AUTO.LAND` sequence and only actually disarms once PX4's own `EXTENDED_SYS_STATE`-derived `landed_state` confirms real touchdown (new `is_airborne` tracking, with an armed+altitude fallback if that message hasn't arrived yet). `kill` remains a separate, untouched instant-cutoff command.
+- Validated with unit tests covering every `landed_state` combination, then bench-verified live (props off) on the real Pixhawk: reject-takeoff-while-disarmed, reject-out-of-bounds altitude, valid takeoff correctly reaching `TAKEOFF`→`IN_AIR` per PX4's own land-detector, and the full `disarm`→`AUTO.LAND`→auto-disarm-on-landing chain confirmed end-to-end (GCS-side watcher fired at the correct moment, distinct from PX4's own native auto-disarm).
+
+### 3. Root-caused why arming had no real safety net, and fixed it
+- Found `COM_RC_IN_MODE=3` ("No RC Checks" - RC not required to arm at all) and `NAV_DLL_ACT=0` ("Disabled" - losing the GCS/WiFi datalink triggers no failsafe action whatsoever) - explains why every bench test all session could arm/fly with no radio transmitter involved.
+- Confirmed the RadioMaster/ELRS link is on a genuinely separate physical port (`TELEM1`) from the GCS link (the UART6 connection set up earlier) and is delivering real, live `RC_CHANNELS` data (`rssi=255`, 16 channels).
+- Fixed both: `COM_RC_IN_MODE` → `0` (RC transmitter now required to arm), `NAV_DLL_ACT` → `1` (mid-flight GCS/WiFi loss → Hold in place using vision-based position, no GPS needed).
+
+### 4. Found and fixed a genuine ELRS receiver failsafe bug
+- Powering off the RadioMaster transmitter left `RC_CHANNELS` frozen at stale values with `rssi=255` for 10+ seconds - not a PX4 detection failure, but the ELRS receiver itself configured to repeat the last known frame on signal loss instead of flagging failsafe.
+- Traced this live through the RadioMaster's EdgeTX menus (ExpressLRS Lua script → Other devices → the bound receiver's own settings page) to a `SBUS Failsafe` field (a legacy label ELRS reuses regardless of SBUS/CRSF) set to `Last Position` - changed to `No Pulses` and confirmed committed to the physical receiver.
+- Re-tested live: `RC_RECEIVER` health now correctly flips to `MISSING`/`FAIL` within ~0.1s of transmitter power-off, with channels freezing at PX4's own safe hold values - PX4 can now actually tell the difference between "RC present" and "RC gone."
+- **Confirmed via a live arm-while-RC-off attempt**: rejection during this pass was traced via `SYS_STATUS` to the already-known vision/heading-lock issue, not RC - `RC_RECEIVER` itself correctly read `ok`/`MISSING` in both states, isolating the RC arbitration fix as genuinely working end-to-end, independent of the unrelated vision precondition.
+- Copied the full project (excluding build artifacts) to `/home/radxa/radioslave drone` as a verified snapshot for the next work stream, leaving the original `Flop` folder untouched.
+
+---
 *Report compiled and validated by Antigravity Autonomous Systems Engineering Team.*
 
 

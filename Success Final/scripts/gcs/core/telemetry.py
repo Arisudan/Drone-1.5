@@ -81,6 +81,13 @@ MAV_RESULT_NAMES = {
     6: "CANCELLED",
 }
 
+# SYS_STATUS onboard_control_sensors_* bit for the RC receiver, used to detect
+# real RC signal loss (see TelemetrySnapshot.update_rc_health) - proven live
+# during this project's ELRS failsafe testing to be the only reliable signal:
+# RC_CHANNELS values otherwise freeze in place but keep being reported as if
+# nothing were wrong.
+MAV_SYS_STATUS_SENSOR_RC_RECEIVER = 1 << 16
+
 # Common MAV_CMD Mapping
 MAV_CMD_NAMES = {
     400: "ARM_DISARM",
@@ -185,12 +192,47 @@ class TelemetrySnapshot:
     last_cmd_received: str = ""
     last_cmd_timestamp: float = 0.0
 
+    # MAV_LANDED_STATE from EXTENDED_SYS_STATE: 0=UNDEFINED, 1=ON_GROUND,
+    # 2=IN_AIR, 3=TAKEOFF, 4=LANDING. Used to distinguish "armed but sitting
+    # on the ground" from "genuinely airborne" - the disarm-vs-land safety
+    # logic and the move/yaw preconditions both depend on this, not just on
+    # `armed` alone.
+    landed_state: int = 0
+
+    # RC Link (ExpressLRS receiver). rc_rssi follows the MAVLink RC_CHANNELS
+    # convention: 0-254 valid range, 255 = "not reported"/unknown - this specific
+    # receiver was confirmed live to always report 255 even on a fully healthy
+    # link, so rc_receiver_healthy (from SYS_STATUS, not rssi) is the trustworthy
+    # half of link status; rssi is shown only as a best-effort extra number.
+    rc_rssi: int = -1
+    rc_channel_count: int = 0
+    rc_receiver_present: bool = False
+    rc_receiver_healthy: bool = False
+    last_rc_time: float = 0.0
+
+    @property
+    def is_airborne(self) -> bool:
+        """True only when PX4 itself reports being off the ground. Falls back
+        to an altitude-based guess if landed_state has never been reported
+        (e.g. EXTENDED_SYS_STATE not yet received), so a stale UNDEFINED
+        state doesn't silently allow unsafe move/yaw commands."""
+        if self.landed_state in (2, 3, 4):  # IN_AIR, TAKEOFF, LANDING
+            return True
+        if self.landed_state == 1:  # ON_GROUND, reported explicitly
+            return False
+        # landed_state == 0 (UNDEFINED) - never received a real report yet.
+        return self.armed and abs(self.z) > 0.15
+
     def clone(self) -> TelemetrySnapshot:
         """Create a thread-safe shallow copy with cloned mutable lists."""
         import copy
         cp = copy.copy(self)
         cp.motor_pwms = list(self.motor_pwms)
         return cp
+
+    def update_extended_sys_state(self, msg) -> None:
+        """Update landed_state from EXTENDED_SYS_STATE."""
+        self.landed_state = getattr(msg, "landed_state", 0)
 
     def update_heartbeat(self, msg) -> None:
         now = time.time()
@@ -248,6 +290,23 @@ class TelemetrySnapshot:
             self.battery_current = msg.current_battery / 100.0
         if hasattr(msg, "battery_remaining") and msg.battery_remaining != -1:
             self.battery_percent = max(0, min(100, msg.battery_remaining))
+
+    def update_rc_health(self, msg) -> None:
+        """Decode the RC_RECEIVER bit out of SYS_STATUS's sensor health bitmask.
+        Call only for actual SYS_STATUS messages - BATTERY_STATUS has no such
+        field and would otherwise silently re-zero a previously-good reading."""
+        present = getattr(msg, "onboard_control_sensors_present", 0)
+        health = getattr(msg, "onboard_control_sensors_health", 0)
+        self.rc_receiver_present = bool(present & MAV_SYS_STATUS_SENSOR_RC_RECEIVER)
+        self.rc_receiver_healthy = (
+            bool(health & MAV_SYS_STATUS_SENSOR_RC_RECEIVER) if self.rc_receiver_present else False
+        )
+
+    def update_rc_channels(self, msg) -> None:
+        """Update RC receiver telemetry from RC_CHANNELS."""
+        self.rc_rssi = getattr(msg, "rssi", 255)
+        self.rc_channel_count = getattr(msg, "chancount", 0)
+        self.last_rc_time = time.time()
 
     def update_gps(self, msg) -> None:
         self.latitude = msg.lat / 1e7

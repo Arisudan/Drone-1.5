@@ -207,6 +207,15 @@ class TopStatusStrip(QFrame):
         telemetry_strip.addWidget(self.badge_vision_conf)
         self.badge_gps = self.badge_vision_conf  # Backward-compatible alias
 
+        # RC Link Badge (ExpressLRS receiver). Primary signal is the SYS_STATUS
+        # RC_RECEIVER health bit, proven live to be the only reliable RC-loss
+        # detector on this hardware - RC_CHANNELS.rssi is shown as a secondary
+        # best-effort number only when the receiver actually populates one
+        # (this ELRS receiver reports rssi=255/"unknown" even on a healthy link).
+        self.badge_rc = QLabel("RC: NO DATA", self)
+        self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        telemetry_strip.addWidget(self.badge_rc)
+
         # Left-aligned rather than centered (no leading stretch) - frees up the right
         # side of this row as a dedicated landing zone for the notification toast.
         row2.addLayout(telemetry_strip)
@@ -304,6 +313,18 @@ class TopStatusStrip(QFrame):
             self.badge_vision_conf.setText("EKF2: NO VISION")
             self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
 
+        # RC Link (ExpressLRS receiver) - see badge_rc creation comment for why
+        # rc_receiver_healthy (SYS_STATUS bit), not rssi, is the trusted signal.
+        if not t.rc_receiver_present:
+            self.badge_rc.setText("RC: NO DATA")
+            self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+        elif not t.rc_receiver_healthy:
+            self.badge_rc.setText("RC: LOST")
+            self.badge_rc.setStyleSheet("background-color: #da363322; color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+        else:
+            rssi_str = f" RSSI {t.rc_rssi}" if 0 <= t.rc_rssi < 255 else ""
+            self.badge_rc.setText(f"RC: OK{rssi_str}")
+            self.badge_rc.setStyleSheet("background-color: #23863622; color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
 
         # Mode
         self.badge_mode.setText(f"MODE: {t.flight_mode}")

@@ -206,10 +206,24 @@ class MAVLinkWorker(QThread):
         # ODOMETRY / VISION_POSITION_ESTIMATE: 10 Hz
         self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_ODOMETRY, 10.0)
         self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_VISION_POSITION_ESTIMATE, 10.0)
+        # EXTENDED_SYS_STATE: 2 Hz - landed_state drives the disarm-vs-land
+        # safety logic and the move/yaw airborne precondition.
+        self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, 2.0)
+        # RC_CHANNELS: 2 Hz - RC link status badge (rssi + SYS_STATUS health bit).
+        self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, 2.0)
         self._streams_configured = True
 
     def run(self):
-        """Worker thread entry point."""
+        """Worker thread entry point. Owns the reconnect loop: an initial connect
+        failure, a heartbeat timeout, or a dead socket during recv() all tear down
+        self.master and fall through to the reconnect branch below instead of
+        exiting the thread or spinning on a zombie socket - retrying every
+        RECONNECT_INTERVAL_S seconds until self.running is cleared. Without this,
+        a Wi-Fi drop to the Radxa (the actual recurring failure mode observed
+        against this link) left the thread alive but permanently unable to
+        recover without the operator manually hitting reconnect in the GUI."""
+        RECONNECT_INTERVAL_S = 2.0
+
         if str(self.host).startswith(("tcp:", "udp:", "udpout:", "udpin:")):
             conn_str = str(self.host)
         elif self.protocol in ("udp", "udpout"):
@@ -219,28 +233,49 @@ class MAVLinkWorker(QThread):
         else:
             conn_str = f"tcp:{self.host}:{self.port}"
 
-        self.connection_changed.emit(False, f"Connecting to {conn_str}...")
-
-        try:
-            self.master = mavutil.mavlink_connection(
-                conn_str,
-                source_system=self.source_system,
-                source_component=190 if self.source_system == 255 else 197,
-            )
-        except Exception as e:
-            self.connection_changed.emit(False, f"Socket error: {e}")
-            return
-
         self.running = True
+        self._connected = False
+        self.telemetry.connected = False
         self._streams_configured = False
+        self.master = None
         last_heartbeat_tx = 0.0
         last_setpoint_tx = 0.0
         self.rx_count = 0
         self.tx_count = 0
         self._last_rate_time = time.time()
+        last_connect_attempt = 0.0
+        first_attempt = True
 
         while self.running:
             now = time.time()
+
+            # 0. (Re)connect whenever we don't currently hold a live socket.
+            if self.master is None:
+                if now - last_connect_attempt < RECONNECT_INTERVAL_S:
+                    time.sleep(0.05)
+                    continue
+                last_connect_attempt = now
+                verb = "Connecting to" if first_attempt else "Reconnecting to"
+                first_attempt = False
+                self.connection_changed.emit(False, f"{verb} {conn_str}...")
+                try:
+                    self.master = mavutil.mavlink_connection(
+                        conn_str,
+                        source_system=self.source_system,
+                        source_component=190 if self.source_system == 255 else 197,
+                    )
+                    self._streams_configured = False
+                    self.rx_count = 0
+                    self.tx_count = 0
+                    self._last_rate_time = time.time()
+                    last_heartbeat_tx = 0.0
+                    last_setpoint_tx = 0.0
+                except Exception as e:
+                    self.master = None
+                    self.connection_changed.emit(
+                        False, f"Socket error: {e} - retrying in {RECONNECT_INTERVAL_S:.0f}s"
+                    )
+                continue
 
             # 1. Send 1 Hz GCS Heartbeat
             if now - last_heartbeat_tx >= 1.0:
@@ -262,12 +297,17 @@ class MAVLinkWorker(QThread):
                 self.tx_count = 0
                 self._last_rate_time = now
 
-                # Liveness check
+                # Liveness check - tear the socket down on timeout so the
+                # reconnect branch above rebuilds it fresh, instead of leaving
+                # a stale-but-still-"connected" master that never recovers.
                 if self._connected and (now - self.telemetry.last_heartbeat_time > 4.0):
+                    lost_for = now - self.telemetry.last_heartbeat_time
                     self._connected = False
                     self.telemetry.connected = False
                     self._streams_configured = False
-                    self.connection_changed.emit(False, f"Heartbeat lost ({now - self.telemetry.last_heartbeat_time:.1f}s ago)")
+                    self._close_connection()
+                    self.connection_changed.emit(False, f"Heartbeat lost ({lost_for:.1f}s ago) - reconnecting...")
+                    continue
 
             # 4. Receive incoming MAVLink packets (non-blocking slice)
             try:
@@ -281,8 +321,16 @@ class MAVLinkWorker(QThread):
                         print(f"[MAVLink Parse Error] {msg.get_type()}: {e}")
                 else:
                     time.sleep(0.005)
-            except Exception:
-                time.sleep(0.01)
+            except Exception as e:
+                # A genuinely dead socket (e.g. TCP RST / "Connection reset by
+                # peer") raises here on every subsequent poll if left alone -
+                # tear it down so the reconnect branch above rebuilds it instead
+                # of silently spinning forever.
+                self._connected = False
+                self.telemetry.connected = False
+                self._streams_configured = False
+                self._close_connection()
+                self.connection_changed.emit(False, f"Link error: {e} - reconnecting...")
 
         self._close_connection()
         self._connected = False
@@ -401,9 +449,25 @@ class MAVLinkWorker(QThread):
                 self.telemetry.update_servo_output(msg)
             self._emit_telemetry()
 
-        elif msg_type in ("SYS_STATUS", "BATTERY_STATUS"):
+        elif msg_type == "SYS_STATUS":
             with self.telemetry_lock:
                 self.telemetry.update_battery(msg)
+                self.telemetry.update_rc_health(msg)
+            self._emit_telemetry()
+
+        elif msg_type == "BATTERY_STATUS":
+            with self.telemetry_lock:
+                self.telemetry.update_battery(msg)
+            self._emit_telemetry()
+
+        elif msg_type == "RC_CHANNELS":
+            with self.telemetry_lock:
+                self.telemetry.update_rc_channels(msg)
+            self._emit_telemetry()
+
+        elif msg_type == "EXTENDED_SYS_STATE":
+            with self.telemetry_lock:
+                self.telemetry.update_extended_sys_state(msg)
             self._emit_telemetry()
 
         elif msg_type in ("GPS_RAW_INT", "GLOBAL_POSITION_INT"):
