@@ -23,6 +23,7 @@ Everything else in this guide is reference material for once those two are runni
 - [Folder tree](#folder-tree)
 - [What each file does](#what-each-file-does)
   - [`config/`](#config)
+  - [`docs/`](#docs)
   - [`launch/`](#launch)
   - [`scratch/`](#scratch)
   - [`scripts/diagnostics/`](#scriptsdiagnostics)
@@ -32,15 +33,21 @@ Everything else in this guide is reference material for once those two are runni
   - [`scripts/gcs/` (top level)](#scriptsgcs-top-level)
   - [`scripts/network/`](#scriptsnetwork)
   - [`scripts/` (top level)](#scripts-top-level)
+  - [`tests/`](#tests)
   - [Root](#root)
 
 ## Folder tree
 
 ```
 .
+├── .github
+│   └── workflows
+│       └── tests.yml
 ├── config
 │   ├── mavlink-router.conf
 │   └── rtabmap_drone.rviz
+├── docs
+│   └── slam_evaluation.md
 ├── launch
 │   ├── d435i_stereo_imu.launch.py
 │   ├── drone_rtabmap_all.launch.py
@@ -57,6 +64,8 @@ Everything else in this guide is reference material for once those two are runni
 │   │   ├── drone_gcs_gui.py
 │   │   ├── duplex_check.py
 │   │   ├── live_status.py
+│   │   ├── map_eval.py
+│   │   ├── map_recorder.py
 │   │   ├── px4_control.py
 │   │   ├── slam_health_monitor.py
 │   │   ├── test_udp_drone_control.py
@@ -64,6 +73,7 @@ Everything else in this guide is reference material for once those two are runni
 │   ├── gcs
 │   │   ├── core
 │   │   │   ├── execution_tracker.py
+│   │   │   ├── health.py
 │   │   │   ├── __init__.py
 │   │   │   ├── path_planner.py
 │   │   │   └── telemetry.py
@@ -94,6 +104,14 @@ Everything else in this guide is reference material for once those two are runni
 │   ├── px4_vision_bridge.py
 │   ├── tcp_map_streamer_node.py
 │   └── wall_boundary_node.py
+├── tests
+│   ├── _env.py
+│   ├── run_tests.sh
+│   ├── test_health.py
+│   ├── test_map_eval.py
+│   ├── test_path_planner.py
+│   ├── test_smoke.py
+│   └── test_telemetry.py
 ├── CMakeLists.txt
 ├── Drone_1.5.params
 ├── GetItCorrect.md
@@ -113,6 +131,9 @@ Everything else in this guide is reference material for once those two are runni
 - **mavlink-router.conf** — mavlink-router daemon config: TCP server on 5760, UART to the Pixhawk, a UDP endpoint for the GCS laptop (14550), and a local UDP endpoint (14541) for the vision/obstacle bridges.
 - **rtabmap_drone.rviz** — Saved RViz2 layout used by `rviz_embed_widget.py` for the embedded 3D SLAM/point-cloud view.
 
+### `docs/`
+- **slam_evaluation.md** — The map-quality acceptance protocol: what to measure on the 2.5 cm occupancy grid, how to capture a run, and the numeric pass/fail threshold for each metric. Read this before arguing about whether a map is "good".
+
 ### `launch/`
 - **d435i_stereo_imu.launch.py** — Starts the RealSense D435i driver (stereo IR + IMU + RGB color) with this project's exact profiles/topics.
 - **drone_rtabmap_all.launch.py** — The master launch file: brings up the whole pipeline in one command (camera, stereo odometry, RTAB-Map, video streamer, PX4 vision bridge, map thinning, wall boundary, TCP map streamer).
@@ -129,6 +150,8 @@ Everything else in this guide is reference material for once those two are runni
 - **c2_validate.py** — Pre-flight ground test confirming the GCS→FC command/ack uplink is alive (mode changes, arm/disarm, takeoff probe) — no real flight needed.
 - **drone_gcs_gui.py** — Earlier standalone Tkinter GCS prototype (dual send/receive mode + CLI); superseded by the PyQt5 app in `scripts/gcs/` but kept as a diagnostics fallback.
 - **duplex_check.py** — Verifies uplink (commands reaching the FC) and downlink (telemetry reaching the GCS) independently, without arming anything.
+- **map_eval.py** — Offline scorer for a recorded SLAM run: scale error, wall straightness, squareness, coverage, loop-closure drift, yaw drift and VIO health, each against its threshold, exiting non-zero on failure. Pure numpy — no ROS 2, no Qt. See [`docs/slam_evaluation.md`](docs/slam_evaluation.md).
+- **map_recorder.py** — Read-only ROS 2 node that captures one run (`/map`, `/map_thin`, `/odom`) into a self-describing artifact folder for `map_eval.py`. Safe to run during a real flight; it publishes and commands nothing.
 - **live_status.py** — Console-only live telemetry dashboard (position, attitude, battery, motor PWMs) with closed-loop execution verification — no GUI needed.
 - **px4_control.py** — Interactive PX4 flight REPL/CLI (arm, takeoff, move, yaw, goto, mission patterns); also usable as a scripted command runner.
 - **slam_health_monitor.py** — Live diagnostic table for SLAM/VIO tracking health (inlier counts, match ratio, IMU jitter) to pinpoint why tracking is failing.
@@ -136,6 +159,7 @@ Everything else in this guide is reference material for once those two are runni
 - **verify_ekf2_params.py** — Read-only audit of the Pixhawk's EKF2 sensor-fusion parameters (vision/GPS/optical-flow/height-reference config) — safe to run any time.
 
 ### `scripts/gcs/core/`
+- **health.py** — Liveness and latency bookkeeping for background workers: heartbeats, measured rate, p95 latency, and stall detection against a declared deadline. Wired into the OFFBOARD setpoint pump (whose 500 ms limit is PX4's, not a UI preference) and the map listener, so a dead worker surfaces instead of silently freezing the last good value on screen.
 - **execution_tracker.py** — Confirms a dispatched flight command was actually physically executed (not just ACKed) by watching real position displacement.
 - **\_\_init\_\_.py** — Marks `core` as a Python package (empty).
 - **path_planner.py** — Obstacle-aware A* path planner over the live occupancy grid with line-of-sight smoothing, used for click-to-navigate waypoints.
@@ -175,7 +199,17 @@ Everything else in this guide is reference material for once those two are runni
 - **tcp_map_streamer_node.py** — Streams the occupancy grid map (and handles the SLAM map reset command) over a raw TCP socket, as a fallback when native ROS 2 discovery over Wi-Fi is unreliable.
 - **wall_boundary_node.py** — Extracts vectorized wall/room-boundary polygons from the occupancy grid for flight-safety visualization.
 
+### `tests/`
+- **\_env.py** — Import-path and headless-Qt setup; every test module imports it first.
+- **run_tests.sh** — Runs the suite the way CI does (`./run_tests.sh hermetic` for the numpy-only subset).
+- **test_health.py** — Stall latching, recovery, rate/p95, registry and watchdog behaviour.
+- **test_map_eval.py** — Every SLAM metric against synthetic grids, plus the CLI's exit codes.
+- **test_path_planner.py** — A* over synthetic occupancy grids: doorways, sealed walls, inflation clearance, unknown-space policy, and the regression that a goal clicked inside a wall never becomes the final waypoint.
+- **test_smoke.py** — Import-level checks for the PyQt5 modules (skipped where PyQt5 is absent).
+- **test_telemetry.py** — PX4 mode decoding, the `landed_state` × `is_airborne` matrix behind the disarm-vs-land interlock, RC health from `SYS_STATUS`, and vision staleness.
+
 ### Root
+- **.github/workflows/tests.yml** — CI: a hermetic numpy-only job, a PyQt5 offscreen smoke job, and a pyflakes lint gate.
 - **CMakeLists.txt** — ROS 2 `ament_cmake` build file; lists every script that gets installed as an executable.
 - **Drone_1.5.params** — Exported Pixhawk parameter dump (full onboard parameter table) for this specific vehicle.
 - **GetItCorrect.md** — Short one-page summary of the system's sensor → SLAM → EKF2 data flow.

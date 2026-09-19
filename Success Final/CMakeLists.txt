@@ -23,6 +23,9 @@ install(PROGRAMS
   scripts/diagnostics/apply_ekf2_params.py
   scripts/diagnostics/px4_control.py
   scripts/diagnostics/drone_gcs_gui.py
+  scripts/diagnostics/map_recorder.py
+  scripts/diagnostics/map_eval.py
+  scripts/diagnostics/fix_accel2_bias.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

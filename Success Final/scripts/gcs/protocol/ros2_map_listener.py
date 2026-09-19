@@ -58,6 +58,14 @@ for _ros_path in [
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+# Make the gcs package root importable even when this module is loaded
+# directly (tests, diagnostics) rather than via drone_gcs.py.
+_GCS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _GCS_ROOT not in sys.path:
+    sys.path.insert(0, _GCS_ROOT)
+
+from core.health import EngineHealth, EngineStatus, get_registry
+
 # Safely test for rclpy availability
 ROS2_AVAILABLE = False
 try:
@@ -86,7 +94,9 @@ class ROS2MapListener(QThread):
     map_received = pyqtSignal(object, float, float, float, str)
     status_updated = pyqtSignal(str)
 
-    def __init__(self, tcp_host: str = "172.16.101.84", tcp_port: int = 5765, parent=None):
+    def __init__(self, tcp_host: str = "172.16.101.84", tcp_port: int = 5765,
+                 parent=None, stall_after_s: float = 20.0,
+                 degrade_after_s: float = 8.0):
         super().__init__(parent)
         self._running = False
         self._node = None
@@ -102,6 +112,20 @@ class ROS2MapListener(QThread):
         self._tcp_port = tcp_port
         self._tcp_thread: Optional[threading.Thread] = None
 
+        # Liveness bookkeeping. Without this a dead map feed is invisible:
+        # the canvas keeps painting the last good grid and looks identical
+        # to a live one. Thresholds are deliberately generous - RTAB-Map
+        # runs at Rtabmap/DetectionRate=2.0 Hz but only republishes the
+        # grid as the map actually changes, so a stationary drone can go
+        # quiet legitimately. 20 s of total silence means the link or the
+        # node is gone, not that nothing moved.
+        self.health = EngineHealth(
+            "MapListener",
+            stall_after_s=stall_after_s,
+            degrade_after_s=degrade_after_s,
+        )
+        get_registry().register(self.health)
+
     def set_tcp_host(self, host: str):
         """Update target IP for TCP streaming fallback (e.g. Radxa IP)."""
         self._tcp_host = host
@@ -109,10 +133,15 @@ class ROS2MapListener(QThread):
     def run(self):
         """Worker loop running ROS 2 executor and background TCP fallback."""
         self._running = True
+        self.health.set_status(EngineStatus.STARTING)
 
         # Always start background TCP fallback thread
         self._tcp_thread = threading.Thread(target=self._run_tcp_client, daemon=True)
         self._tcp_thread.start()
+
+        # READY the moment a transport is up. Whether maps actually arrive is
+        # what the heartbeats answer - this only says the listener is alive.
+        self.health.set_status(EngineStatus.READY)
 
         if not ROS2_AVAILABLE:
             self.status_updated.emit("ROS 2 (rclpy) not available on GCS. Using TCP Map Stream fallback.")
@@ -218,6 +247,7 @@ class ROS2MapListener(QThread):
                         break
 
                     # Item 19: Per-frame try/except isolation for decompression and array construction
+                    _t0 = time.perf_counter()
                     try:
                         source_name = meta.get("source", "map_thin")
                         is_thin = "thin" in source_name.lower()
@@ -261,6 +291,9 @@ class ROS2MapListener(QThread):
                         else:
                             self.latest_raw_map_info = map_info
 
+                        self.health.heartbeat()
+                        self.health.record_latency((time.perf_counter() - _t0) * 1000.0)
+
                         self.map_received.emit(
                             grid, meta["resolution"], meta["origin_x"], meta["origin_y"], source_name
                         )
@@ -298,6 +331,7 @@ class ROS2MapListener(QThread):
         self._process_and_emit(msg, "/map")
 
     def _process_and_emit(self, msg: OccupancyGrid, topic_name: str):
+        _t0 = time.perf_counter()
         width = msg.info.width
         height = msg.info.height
         res = msg.info.resolution
@@ -332,11 +366,17 @@ class ROS2MapListener(QThread):
             self.latest_raw_map_info = map_info
             self._last_emitted_raw_stamp = now
 
+        self.health.heartbeat()
+        self.health.record_latency((time.perf_counter() - _t0) * 1000.0)
+
         self.map_received.emit(grid, res, ox, oy, topic_name)
 
     def stop(self):
         """Request graceful shutdown of the worker."""
         self._running = False
+        # Deliberate shutdown - absence of heartbeats is expected from here
+        # on, so the watchdog must not report it as a stall.
+        self.health.set_status(EngineStatus.STOPPED)
         self.wait(1000)
 
     @property

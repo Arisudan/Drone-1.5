@@ -35,13 +35,13 @@ USAGE:
 from __future__ import annotations
 from typing import Optional
 
-from PyQt5.QtCore import pyqtSignal, Qt
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox
 )
 
 from core.telemetry import TelemetrySnapshot
+from ui.battery_badge import BatteryBadge
 
 # The networks this rig is actually deployed on. Picking one here just fills in the
 # IP - port and protocol are independent axes (same MAVLink/map/video ports apply on
@@ -77,28 +77,39 @@ class TopStatusStrip(QFrame):
         # between adjacent items is now the same size.
         SPACING = 14
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(6)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 6, 10, 6)
+        layout.setSpacing(18)
+
+        # 1. System Branding - occupies the full header height on the left
+        # rather than sharing row 1 with the connection controls. The brand is
+        # the one element that never changes, so it anchors the corner and the
+        # live readouts get the whole width to its right.
+        title_box = QVBoxLayout()
+        title_box.setSpacing(0)
+        title_box.setContentsMargins(0, 0, 0, 0)
+        self.title_lbl = QLabel("DRONE-GCS", self)
+        self.title_lbl.setObjectName("appTitle")
+        # "SYS 255" dropped: the MAVLink source ID is a protocol detail, not
+        # something an operator reads off the masthead.
+        self.sub_lbl = QLabel("AUTONOMOUS FLIGHT SYSTEM", self)
+        self.sub_lbl.setObjectName("appSubtitle")
+        title_box.addStretch()
+        title_box.addWidget(self.title_lbl)
+        title_box.addWidget(self.sub_lbl)
+        title_box.addStretch()
+        layout.addLayout(title_box)
+
+        brand_rule = QFrame(self)
+        brand_rule.setObjectName("vDivider")
+        brand_rule.setFixedWidth(1)
+        layout.addWidget(brand_rule)
+
+        rows = QVBoxLayout()
+        rows.setSpacing(6)
 
         row1 = QHBoxLayout()
         row1.setSpacing(SPACING)
-
-        # 1. System Branding - pinned to the left, not part of the centered block below
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        self.title_lbl = QLabel("DRONE-GCS", self)
-        self.title_lbl.setObjectName("appTitle")
-        self.sub_lbl = QLabel("AUTONOMOUS FLIGHT SYSTEM • SYS 255", self)
-        self.sub_lbl.setObjectName("appSubtitle")
-        title_box.addWidget(self.title_lbl)
-        title_box.addWidget(self.sub_lbl)
-        row1.addLayout(title_box)
-
-        # Stretch before AND after conn_box centers just the connection controls in the
-        # space between the brand (fixed left) and the mode/arm stack (fixed right),
-        # rather than pulling the brand out of its corner too.
-        row1.addStretch()
 
         # 2. Dynamic IP, Port, & Protocol Inputs
         conn_box = QHBoxLayout()
@@ -158,11 +169,19 @@ class TopStatusStrip(QFrame):
         # fully. A separate "CONNECTED"/"DISCONNECTED" badge used to sit next to it
         # saying the same thing in different words; dropped rather than kept as a
         # second thing to read for one piece of information.
-        self.btn_toggle = QPushButton("Connect", self)
+        # The button is a different kind of thing from the four fields before
+        # it - a dispatch, not a value - so it gets a wider gap than the
+        # uniform spacing between the fields themselves.
+        conn_box.addSpacing(SPACING)
+
+        self.btn_toggle = QPushButton("CONNECT", self)
         self.btn_toggle.setObjectName("btnConnect")
         self.btn_toggle.clicked.connect(self._handle_connect_toggle)
         conn_box.addWidget(self.btn_toggle)
 
+        # Left-aligned so the controls sit directly above the RX/TX and VIO NED
+        # readouts in row 2: what you configure and what it produces line up in
+        # the same column instead of sitting at opposite ends of the header.
         row1.addLayout(conn_box)
         row1.addStretch()
 
@@ -178,11 +197,19 @@ class TopStatusStrip(QFrame):
         mode_arm_box.addWidget(self.badge_arm)
 
         self.badge_mode = QLabel("MODE: DISCONNECTED", self)
-        self.badge_mode.setStyleSheet("background-color: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        # font-size matches QLabel#badgeArmed/#badgeDisarmed in styles.py so the
+        # pair reads as one control rather than two sizes of label.
+        self.badge_mode.setStyleSheet("background-color: rgba(31, 111, 235, 0.13); color: #58a6ff; border: 1px solid #1f6feb; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px; letter-spacing: 1px;")
         mode_arm_box.addWidget(self.badge_mode)
 
-        row1.addLayout(mode_arm_box)
-        layout.addLayout(row1)
+        # Battery in the very corner, laptop-style: voltage, cell, percentage.
+        # It is the value most often glanced at from across a room, so it gets
+        # the one position the eye finds without searching.
+        row1.addSpacing(SPACING)
+        self.battery = BatteryBadge(self)
+        row1.addWidget(self.battery)
+
+        rows.addLayout(row1)
 
         # Row 2: remaining live telemetry readouts (Battery, D435i VIO, EKF2, throughput)
         row2 = QHBoxLayout()
@@ -191,14 +218,9 @@ class TopStatusStrip(QFrame):
         telemetry_strip = QHBoxLayout()
         telemetry_strip.setSpacing(SPACING)
 
-        # Battery Badge
-        self.badge_batt = QLabel("BAT: --V (--%)", self)
-        self.badge_batt.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
-        telemetry_strip.addWidget(self.badge_batt)
-
         # D435i VIO Badge (LOCKED / LOST, matching the HUD's own wording)
         self.badge_vio = QLabel("VIO: LOST", self)
-        self.badge_vio.setStyleSheet("background-color: #161b22; color: #d29922; border: 1px solid #d29922; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
         telemetry_strip.addWidget(self.badge_vio)
 
         # Vision Confidence / Fusion Badge (Replaces dead GPS badge on GPS-denied airframe)
@@ -216,27 +238,21 @@ class TopStatusStrip(QFrame):
         self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
         telemetry_strip.addWidget(self.badge_rc)
 
-        # Left-aligned rather than centered (no leading stretch) - frees up the right
-        # side of this row as a dedicated landing zone for the notification toast.
+        # Badges left-aligned so they sit directly beneath the connection
+        # controls above them: one column of things you set, one column of
+        # things the vehicle reports back.
         row2.addLayout(telemetry_strip)
-        row2.addSpacing(SPACING)
+        row2.addStretch(1)
 
-        # 5. Throughput Rates
-        self.rates_lbl = QLabel("RX: 0.0 msg/s | TX: 0.0 msg/s", self)
-        self.rates_lbl.setStyleSheet("color: #8b949e; font-family: Consolas; font-size: 11px;")
-        row2.addWidget(self.rates_lbl)
+        # Arm state and flight mode sit on the second line, directly beneath the
+        # battery: the header's right-hand column is then "how is the vehicle",
+        # top to bottom, with the controls you operate on the left.
+        row2.addLayout(mode_arm_box)
 
-        row2.addSpacing(SPACING)
 
-        # 6. VIO NED Position - the HUD's own copy of this was dropped as a duplicate
-        # (see hud_widget.py); the header is now the one place it's shown.
-        self.ned_lbl = QLabel("VIO NED: (+0.00, +0.00, +0.00)m", self)
-        self.ned_lbl.setStyleSheet("color: #8b949e; font-family: Consolas; font-size: 11px;")
-        row2.addWidget(self.ned_lbl)
 
-        row2.addStretch()
-
-        layout.addLayout(row2)
+        rows.addLayout(row2)
+        layout.addLayout(rows, 1)
 
     def _on_network_selected(self, idx: int):
         ip = self.network_combo.currentData()
@@ -273,10 +289,10 @@ class TopStatusStrip(QFrame):
     def set_connection_state(self, connected: bool, message: str = ""):
         self.is_connected = connected
         if connected:
-            self.btn_toggle.setText("Disconnect")
+            self.btn_toggle.setText("DISCONNECT")
             self.btn_toggle.setObjectName("btnDisconnect")
         else:
-            self.btn_toggle.setText("Connect")
+            self.btn_toggle.setText("CONNECT")
             self.btn_toggle.setObjectName("btnConnect")
             self.badge_mode.setText("MODE: DISCONNECTED")
             self.badge_arm.setText("DISARMED")
@@ -285,30 +301,31 @@ class TopStatusStrip(QFrame):
         self.btn_toggle.setStyle(self.btn_toggle.style())
 
     def update_telemetry(self, t: TelemetrySnapshot):
-        # Battery
-        b_col = "#3fb950" if t.battery_percent > 35 else ("#d29922" if t.battery_percent > 20 else "#f85149")
-        self.badge_batt.setText(f"BAT: {t.battery_voltage:.1f}V ({t.battery_percent}%)")
-        self.badge_batt.setStyleSheet(f"background-color: #161b22; color: {b_col}; border: 1px solid {b_col}; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        # Battery - the widget owns its own colour thresholds and no-data state.
+        self.battery.set_state(t.battery_voltage, t.battery_percent, t.connected)
+
+        # Speed and altitude now live on the navigation rail - see
+        # SidebarNav.set_instruments, driven from drone_gcs's telemetry tick.
 
         # D435i VIO Raw Stream Badge - LOCKED (healthy) / LOST (stale or never seen),
         # matching the HUD widget's own "D435i VIO: LOCKED / NO DATA" wording.
         if t.d435i_vio_health and t.d435i_vio_age <= 3.0:
             self.badge_vio.setText(f"VIO: LOCKED ({t.d435i_vio_age:.1f}s)")
-            self.badge_vio.setStyleSheet("background-color: #23863622; color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vio.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
         else:
             self.badge_vio.setText("VIO: LOST" if t.last_vision_time > 0 else "VIO: NO DATA")
-            self.badge_vio.setStyleSheet("background-color: #da363322; color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
 
         # EKF2 Vision Confidence / Fusion Stat (GPS-denied indicator)
         if t.ekf2_vision_fused and t.d435i_vio_age < 1.0:
             self.badge_vision_conf.setText("EKF2: POS LOCK")
-            self.badge_vision_conf.setStyleSheet("background-color: #23863622; color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
         elif t.ekf2_vision_fused and t.d435i_vio_age <= 3.0:
             self.badge_vision_conf.setText(f"EKF2: DEGRADED ({t.d435i_vio_age:.1f}s)")
-            self.badge_vision_conf.setStyleSheet("background-color: #9e6a0322; color: #d29922; border: 1px solid #d29922; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: rgba(158, 106, 3, 0.13); color: #d29922; border: 1px solid #d29922; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
         elif t.last_vision_time > 0:
             self.badge_vision_conf.setText(f"EKF2: LOST ({t.d435i_vio_age:.0f}s)")
-            self.badge_vision_conf.setStyleSheet("background-color: #da363322; color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
         else:
             self.badge_vision_conf.setText("EKF2: NO VISION")
             self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
@@ -320,11 +337,11 @@ class TopStatusStrip(QFrame):
             self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
         elif not t.rc_receiver_healthy:
             self.badge_rc.setText("RC: LOST")
-            self.badge_rc.setStyleSheet("background-color: #da363322; color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_rc.setStyleSheet("background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
         else:
             rssi_str = f" RSSI {t.rc_rssi}" if 0 <= t.rc_rssi < 255 else ""
             self.badge_rc.setText(f"RC: OK{rssi_str}")
-            self.badge_rc.setStyleSheet("background-color: #23863622; color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_rc.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
 
         # Mode
         self.badge_mode.setText(f"MODE: {t.flight_mode}")
@@ -338,8 +355,11 @@ class TopStatusStrip(QFrame):
             self.badge_arm.setObjectName("badgeDisarmed")
         self.badge_arm.setStyle(self.badge_arm.style())
 
-        # VIO NED position
-        self.ned_lbl.setText(f"VIO NED: ({t.x:+.2f}, {t.y:+.2f}, {t.z:+.2f})m")
-
     def update_rates(self, rx: float, tx: float):
-        self.rates_lbl.setText(f"RX: {rx:.1f} msg/s | TX: {tx:.1f} msg/s")
+        """Retained so MAVLinkWorker's rates_updated wiring is unchanged.
+
+        Packet rates and the NED triple moved to the Diagnostics tab: both are
+        debugging detail rather than at-a-glance flight state, and the NED
+        readout was already duplicated by that tab's own position card.
+        """
+        return

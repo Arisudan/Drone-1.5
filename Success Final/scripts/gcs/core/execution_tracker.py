@@ -40,7 +40,7 @@ USAGE:
 from __future__ import annotations
 import math
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 
 
 class ExecutionTracker:
@@ -278,7 +278,7 @@ class ExecutionTracker:
             else:
                 if self.elapsed_time > 3.0:
                     self.status = "EXECUTED"
-                    self.status_msg = f"[EXECUTED] Yaw command dispatched"
+                    self.status_msg = "[EXECUTED] Yaw command dispatched"
                     self.active = False
 
         # 3. Closed-Loop Physical Displacement Verifications (move, takeoff, waypoint)

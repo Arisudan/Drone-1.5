@@ -169,8 +169,128 @@ class VideoCaptureThread(QThread):
         self.wait(1000)
 
 
+def bgr_to_pixmap(frame: np.ndarray, w: int, h: int) -> QPixmap:
+    """BGR ndarray -> QPixmap scaled into (w, h), aspect preserved."""
+    fh, fw, ch = frame.shape
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    qimg = QImage(rgb.data, fw, fh, ch * fw, QImage.Format_RGB888)
+    return QPixmap.fromImage(qimg).scaled(
+        max(32, w), max(32, h), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
+class VideoSink(QLabel):
+    """A passive viewport onto the FPV stream.
+
+    Several places want to see the camera at once - the cockpit, the SLAM
+    overlay, the FPV tab - but the Radxa's MJPEG stream costs ~8 Mbit/s and a
+    second HTTP connection would double that for no new information. So there
+    is exactly one capture thread (owned by VideoFeedWidget) and any number of
+    these sinks subscribing to the frames it already decoded.
+    """
+
+    def __init__(self, placeholder: str = "NO VIDEO FEED", parent=None):
+        super().__init__(parent)
+        self._placeholder = placeholder
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(160, 90)
+        self.setStyleSheet(
+            "background-color: #090d12; border: 1px solid #30363d;"
+            "border-radius: 6px; color: #6e7681; font-size: 10px;"
+            "font-weight: bold; letter-spacing: 1px;")
+        self.setText(placeholder)
+
+    def on_frame(self, frame: np.ndarray):
+        self.setPixmap(bgr_to_pixmap(frame, self.width(), self.height()))
+
+    def clear_feed(self):
+        self.setPixmap(QPixmap())
+        self.setText(self._placeholder)
+
+
+class FloatingVideoWindow(QWidget):
+    """Frameless always-on-top FPV window, draggable anywhere on the desktop.
+
+    A child overlay could only travel inside the GCS window; a tool window can
+    be parked on a second monitor or beside the map, which is the point of
+    having it while flying a route on the SLAM view.
+    """
+
+    closed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint |
+                         Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.resize(328, 220)
+        self._drag_offset = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(1, 1, 1, 1)
+        root.setSpacing(0)
+
+        shell = QFrame(self)
+        shell.setStyleSheet(
+            "QFrame { background-color: #161b22; border: 1px solid #30363d;"
+            " border-radius: 6px; }")
+        sl = QVBoxLayout(shell)
+        sl.setContentsMargins(6, 4, 6, 6)
+        sl.setSpacing(4)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+        title = QLabel("FPV", self)
+        title.setStyleSheet(
+            "color: #58a6ff; font-size: 9px; font-weight: bold;"
+            " letter-spacing: 1.6px; background: transparent;")
+        bar.addWidget(title)
+        hint = QLabel("drag to move", self)
+        hint.setStyleSheet(
+            "color: #6e7681; font-size: 8px; background: transparent;")
+        bar.addWidget(hint)
+        bar.addStretch()
+        btn_close = QPushButton("\u00d7", self)
+        btn_close.setFixedSize(18, 18)
+        btn_close.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #8b949e;"
+            " font-size: 14px; font-weight: bold; padding: 0; min-height: 0; }"
+            "QPushButton:hover { color: #f85149; }")
+        btn_close.clicked.connect(self._on_close_clicked)
+        bar.addWidget(btn_close)
+        sl.addLayout(bar)
+
+        self.sink = VideoSink("FPV - NO FEED", self)
+        sl.addWidget(self.sink, 1)
+        root.addWidget(shell)
+
+    def _on_close_clicked(self):
+        self.hide()
+        self.closed.emit()
+
+    # Frameless windows have no system title bar, so dragging is ours to do.
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._drag_offset = ev.globalPos() - self.frameGeometry().topLeft()
+            ev.accept()
+
+    def mouseMoveEvent(self, ev):
+        if self._drag_offset is not None and ev.buttons() & Qt.LeftButton:
+            self.move(ev.globalPos() - self._drag_offset)
+            ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        self._drag_offset = None
+
+
 class VideoFeedWidget(QWidget):
-    """Compound widget presenting live video viewport and camera controls."""
+    """Compound widget presenting live video viewport and camera controls.
+
+    Owns the single capture thread and re-emits its frames on
+    ``frame_broadcast`` so other views (cockpit, SLAM overlay) can render the
+    same stream without opening their own connection to the Radxa.
+    """
+
+    # Re-emitted decoded frames, for any VideoSink that wants to mirror them.
+    frame_broadcast = pyqtSignal(object)
 
     SRC_DRONE_FPV, SRC_TEST_PATTERN, SRC_CAM0, SRC_CAM1, SRC_CUSTOM = range(5)
 
@@ -310,6 +430,8 @@ class VideoFeedWidget(QWidget):
         scaled_pixmap = QPixmap.fromImage(qimg).scaled(lbl_w, lbl_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
         self.video_label.setPixmap(scaled_pixmap)
+        # Mirror to every other viewport on the same decoded frame.
+        self.frame_broadcast.emit(frame)
 
     def closeEvent(self, event):
         if self.cap_thread:

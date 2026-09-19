@@ -43,7 +43,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List
 
 
 # PX4 Custom Mode Mapping

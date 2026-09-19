@@ -178,7 +178,7 @@ class MotorWidget(QWidget):
                 self.lbl_status.setStyleSheet("color: #f85149; font-weight: bold;")
             elif max_pwm > 1150:
                 self.lbl_status.setText(f"MOTORS ACTIVE ({max_pwm} µs)")
-                self.lbl_status.setStyleSheet("color: #2ea043; font-weight: bold;")
+                self.lbl_status.setStyleSheet("color: #58a6ff; font-weight: bold;")
             else:
                 self.lbl_status.setText("ALL MOTORS IDLE (1000 µs)")
                 self.lbl_status.setStyleSheet("color: #8b949e; font-weight: bold;")

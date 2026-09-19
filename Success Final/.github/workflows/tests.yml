@@ -1,0 +1,95 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  hermetic:
+    # These four suites need numpy and nothing else - no PyQt5, no rclpy, no
+    # hardware. That is deliberate: the logic most likely to fly the drone into
+    # something (mode decoding, the airborne interlock, the A* planner, the map
+    # metrics) must be testable on any runner, not only on the GCS laptop.
+    name: hermetic tests (numpy only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install numpy
+        run: pip install "numpy>=1.24"
+
+      - name: Health / liveness
+        working-directory: tests
+        run: python -m unittest test_health -v
+
+      - name: Telemetry decoding + flight-state interlocks
+        working-directory: tests
+        run: python -m unittest test_telemetry -v
+
+      - name: A* path planner
+        working-directory: tests
+        run: python -m unittest test_path_planner -v
+
+      - name: SLAM map evaluation metrics
+        working-directory: tests
+        run: python -m unittest test_map_eval -v
+
+
+  gui:
+    # PyQt5 is installable on the runner, so the import-level smoke tests run
+    # too - offscreen, via QT_QPA_PLATFORM set in tests/_env.py. rclpy is NOT
+    # installed; ros2_map_listener is written to degrade to its TCP fallback
+    # when rclpy is missing, and this job proves that path still imports.
+    name: gui smoke tests (PyQt5, offscreen)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install GUI test dependencies
+        run: pip install "numpy>=1.24" "PyQt5>=5.15.10" "opencv-python-headless>=4.8" "pymavlink>=2.4.30" "scipy>=1.10"
+
+      - name: Import smoke tests
+        working-directory: tests
+        run: python -m unittest test_smoke -v
+
+      # Needs PyQt5 + pymavlink (MAVLinkWorker is a QThread), so it runs here
+      # rather than in the numpy-only hermetic job.
+      - name: STATUSTEXT reassembly + repeat suppression
+        working-directory: tests
+        run: python -m unittest test_statustext -v
+
+  lint:
+    name: lint (pyflakes via ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # --select F is pyflakes only: undefined names, unused imports, broken
+      # f-strings. Real bugs, no style opinions - so it can gate a merge
+      # without anyone arguing about line length.
+      - name: Pyflakes check
+        run: |
+          ruff check --select F \
+            scripts/gcs/core \
+            scripts/gcs/protocol \
+            scripts/diagnostics/map_eval.py \
+            scripts/diagnostics/map_recorder.py \
+            tests

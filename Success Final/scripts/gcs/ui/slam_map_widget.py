@@ -949,7 +949,7 @@ class SLAMMapWidget(QWidget):
         self.btn_pause_path.clicked.connect(self._handle_pause_path)
         r1.addWidget(self.btn_pause_path)
 
-        self.btn_abort_path = QPushButton("ABORT & LAND", self)
+        self.btn_abort_path = QPushButton("ABORT / LAND", self)
         self.btn_abort_path.setToolTip("Emergency abort path execution and Land immediately")
         self.btn_abort_path.setStyleSheet(
             "QPushButton { background-color: #da3633; color: #ffffff; font-weight: bold; "
@@ -1235,27 +1235,27 @@ class SLAMMapWidget(QWidget):
                 self.pill_status.setText("2D MAP: LIVE")
                 self.pill_status.setToolTip("Active composite: Raw Occupancy Grid (/map) + Red Skeleton Walls (/map_thin)")
                 self.pill_status.setStyleSheet(
-                    "background-color: #23863622; color: #3fb950; border: 1px solid #238636; "
+                    "background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             elif getattr(self, "_has_thin_map", False):
                 self.pill_status.setText("LIVE /map_thin")
                 self.pill_status.setToolTip("Active red skeleton walls (/map_thin)")
                 self.pill_status.setStyleSheet(
-                    "background-color: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb; "
+                    "background-color: rgba(31, 111, 235, 0.13); color: #58a6ff; border: 1px solid #1f6feb; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             elif getattr(self, "_has_raw_map", False):
                 self.pill_status.setText("LIVE /map")
                 self.pill_status.setToolTip("Active raw 2.5cm occupancy grid (/map)")
                 self.pill_status.setStyleSheet(
-                    "background-color: #23863622; color: #3fb950; border: 1px solid #238636; "
+                    "background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             elif self.map_source == "bench":
                 self.pill_status.setText("MAP: BENCH FLOORPLAN")
                 self.pill_status.setStyleSheet(
-                    "background-color: #9e6a0322; color: #d29922; border: 1px solid #d29922; "
+                    "background-color: rgba(158, 106, 3, 0.13); color: #d29922; border: 1px solid #d29922; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             else:
@@ -1269,19 +1269,19 @@ class SLAMMapWidget(QWidget):
             if self.rviz_status == "ACTIVE":
                 self.pill_status.setText("RVIZ2: ACTIVE")
                 self.pill_status.setStyleSheet(
-                    "background-color: #23863622; color: #3fb950; border: 1px solid #238636; "
+                    "background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             elif self.rviz_status == "LAUNCHING...":
                 self.pill_status.setText("RVIZ2: LAUNCHING...")
                 self.pill_status.setStyleSheet(
-                    "background-color: #9e6a0322; color: #d29922; border: 1px solid #d29922; "
+                    "background-color: rgba(158, 106, 3, 0.13); color: #d29922; border: 1px solid #d29922; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             elif any(err in self.rviz_status for err in ("ERROR", "TIMEOUT", "CRASHED")):
                 self.pill_status.setText(f"RVIZ2: {self.rviz_status}")
                 self.pill_status.setStyleSheet(
-                    "background-color: #da363322; color: #f85149; border: 1px solid #da3633; "
+                    "background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; "
                     "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
                 )
             else:

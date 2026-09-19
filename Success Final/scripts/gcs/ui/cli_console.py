@@ -90,27 +90,31 @@ class CLIConsoleWidget(QWidget):
         self.log_box.setMaximumBlockCount(1000)
         layout.addWidget(self.log_box)
 
-        # Bottom Input Bar
+        # Bottom Input Bar. This is the operator's primary text interface to the
+        # vehicle, so it is sized like one: a 30px-tall 14px monospaced field
+        # with real buttons, rather than the same dimensions as an incidental
+        # form control elsewhere in the app.
         input_bar = QHBoxLayout()
-        input_bar.setContentsMargins(0, 0, 0, 0)
-        input_bar.setSpacing(6)
+        input_bar.setContentsMargins(0, 4, 0, 2)
+        input_bar.setSpacing(10)
 
         prompt_lbl = QLabel("cmd>")
-        prompt_lbl.setStyleSheet("font-weight: bold; color: #58a6ff; font-family: Consolas; font-size: 13px;")
+        prompt_lbl.setObjectName("cliPrompt")
         input_bar.addWidget(prompt_lbl)
 
         self.cmd_input = CommandLineEdit(self)
         self.cmd_input.setObjectName("cliInput")
         self.cmd_input.setPlaceholderText("Type command: move 1 0 0 | takeoff 1.5 | arm force | mode offboard | help")
         self.cmd_input.returnPressed.connect(self._handle_send)
-        input_bar.addWidget(self.cmd_input)
+        input_bar.addWidget(self.cmd_input, 1)
 
         btn_send = QPushButton("Send")
-        btn_send.setStyleSheet("background-color: #1f6feb; color: #ffffff;")
+        btn_send.setObjectName("btnCliSend")
         btn_send.clicked.connect(self._handle_send)
         input_bar.addWidget(btn_send)
 
         btn_clear = QPushButton("Clear")
+        btn_clear.setObjectName("btnCliClear")
         btn_clear.clicked.connect(self.log_box.clear)
         input_bar.addWidget(btn_clear)
 
@@ -126,10 +130,24 @@ class CLIConsoleWidget(QWidget):
         self.command_submitted.emit(text)
 
     def _append_log(self, text: str, color_hex: str = "#c9d1d9"):
+        """Append one line and follow the tail.
+
+        moveCursor(End) alone moved the caret but left the viewport wherever it
+        was, so a busy console could scroll out from under the newest line.
+        This pins the scrollbar to the bottom - but only when it was already
+        there, so scrolling up to read an earlier message is not yanked away by
+        the next packet to arrive.
+        """
+        bar = self.log_box.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+
         ts = datetime.now().strftime("%H:%M:%S")
         html = f'<span style="color:#8b949e">[{ts}]</span> <span style="color:{color_hex}">{text}</span>'
         self.log_box.appendHtml(html)
-        self.log_box.moveCursor(QTextCursor.End)
+
+        if follow:
+            self.log_box.moveCursor(QTextCursor.End)
+            bar.setValue(bar.maximum())
 
     def log_info(self, msg: str):
         self._append_log(msg, "#c9d1d9")

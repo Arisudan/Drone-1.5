@@ -47,6 +47,8 @@ import sys
 import time
 from typing import Optional, List, Tuple
 
+import numpy as np
+
 # Auto-configure ROS 2 Jazzy dynamic library path before any C-extensions load
 if sys.platform.startswith("linux"):
     if "QT_QPA_PLATFORM" not in os.environ:
@@ -76,27 +78,33 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QDoubleValidator
+from PyQt5.QtGui import QDoubleValidator
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QFrame, QLabel, QPushButton, QStackedWidget,
-    QSplitter, QProgressBar, QMessageBox, QLineEdit, QComboBox, QCheckBox
+    QSplitter, QProgressBar, QMessageBox, QLineEdit, QComboBox,
+    QGroupBox
 )
 
 from core.telemetry import TelemetrySnapshot
+from core.health import EngineHealth, EngineStatus, get_registry
 from core.execution_tracker import ExecutionTracker
 from core.path_planner import AStarPathPlanner
 from protocol.mavlink_worker import MAVLinkWorker
 from protocol.ros2_map_listener import ROS2MapListener, SlamMapResetWorker
-from ui.styles import DARK_STYLESHEET
+from ui.styles import DARK_STYLESHEET, PALETTE
 from ui.toast import NotificationToast
 from ui.hud_widget import HUDWidget
 from ui.slam_map_widget import SLAMMapWidget
 from ui.cli_console import CLIConsoleWidget
 from ui.motor_widget import MotorWidget
-from ui.video_feed_widget import VideoFeedWidget
+from ui.video_feed_widget import VideoFeedWidget, FloatingVideoWindow
 from ui.top_status_strip import TopStatusStrip
 from ui.sidebar_nav import SidebarNav
+from ui.logs_tab import LogsTabWidget
+from ui.config_tab import ConfigTabWidget
+from core.flight_log import FlightLogger
+from core.settings import load_settings
 
 
 PX4_MODES_LIST = [
@@ -125,6 +133,11 @@ class DroneGCSMainWindow(QMainWindow):
         # comfortably fits every control - it was headroom, not a real usability need.
         self.setMinimumSize(1220, 700)
 
+        # Persisted settings and the flight recorder are built before the UI,
+        # because the Config and Logs workspaces are views onto them.
+        self.settings = load_settings()
+        self.flight_logger = FlightLogger()
+
         # Core Engines
         self.worker: Optional[MAVLinkWorker] = None
         self.exec_tracker = ExecutionTracker(tolerance=0.20, timeout_sec=14.0)
@@ -142,9 +155,9 @@ class DroneGCSMainWindow(QMainWindow):
         # Sane bounds for operator-entered command values - guards against a
         # typo or fat-fingered altitude/displacement being sent as a real
         # flight command. Adjust for your actual room/airframe if needed.
-        self.TAKEOFF_ALT_MIN_M: float = 0.2
-        self.TAKEOFF_ALT_MAX_M: float = 3.0
-        self.MOVE_MAX_DELTA_M: float = 3.0
+        self.TAKEOFF_ALT_MIN_M: float = self.settings.limits.takeoff_alt_min_m
+        self.TAKEOFF_ALT_MAX_M: float = self.settings.limits.takeoff_alt_max_m
+        self.MOVE_MAX_DELTA_M: float = self.settings.limits.move_max_delta_m
 
         # Autonomous Waypoint Navigation & Safety Interlocks
         self.active_waypoints: List[Tuple[float, float]] = []
@@ -169,6 +182,22 @@ class DroneGCSMainWindow(QMainWindow):
         self.offboard_pump_timer.setInterval(100)  # 100ms = 10 Hz
         self.offboard_pump_timer.timeout.connect(self._pump_active_waypoint_setpoint)
 
+        # Liveness watch on that pump. Its stall threshold is not a UI
+        # preference - PX4 drops OFFBOARD mode if setpoints stop arriving
+        # for 500 ms, so a stalled pump mid-path is a flight event. 250 ms
+        # (2.5 missed ticks at 10 Hz) is already degraded.
+        self.pump_health = EngineHealth(
+            "OffboardPump", stall_after_s=0.5, degrade_after_s=0.25)
+        get_registry().register(self.pump_health)
+        # The pump timer is started/stopped from nine different places; rather
+        # than touching each one, the UI tick mirrors its real state into the
+        # health object from a single site (see _on_ui_tick).
+        self._pump_was_live: bool = False
+        # True while the execution verifier is showing a live measurement, so
+        # the panel can be reset exactly once when tracking ends.
+        self._verifier_dirty: bool = False
+        self._last_health_sweep: float = 0.0
+
         # Build Industrial UI Shell
         self._init_ui()
 
@@ -186,6 +215,12 @@ class DroneGCSMainWindow(QMainWindow):
         self.map_listener.status_updated.connect(self._on_ros2_status_updated)
         self.map_listener.start()
 
+        # One capture thread, three viewports: the FPV tab's own label, the
+        # cockpit's centre panel, and the draggable SLAM overlay.
+        self.fpv_float = FloatingVideoWindow(self)
+        self.page_fpv.frame_broadcast.connect(self.hud.video.on_frame)
+        self.page_fpv.frame_broadcast.connect(self.fpv_float.sink.on_frame)
+
         # Auto-connect to default autopilot endpoint on launch (UDP 14550)
         self._connect_to_endpoint("172.16.101.84", 14550, protocol="udp")
 
@@ -196,6 +231,8 @@ class DroneGCSMainWindow(QMainWindow):
         root_layout.setContentsMargins(6, 6, 6, 6)
         root_layout.setSpacing(6)
 
+        # Footer built after the workspace (see _build_footer_bar), so the
+        # stacked pages keep their stretch and the bar stays a fixed strip.
         # 1. Aerospace Header Status Strip
         self.top_strip = TopStatusStrip(self)
         self.top_strip.connect_requested.connect(self._connect_to_endpoint)
@@ -212,6 +249,13 @@ class DroneGCSMainWindow(QMainWindow):
         self.sidebar = SidebarNav(self)
         self.sidebar.view_changed.connect(self._on_view_changed)
         workspace_box.addWidget(self.sidebar)
+
+        # Workspace column: pages above, vision toggles below. The footer lives
+        # here rather than at the window root so it begins where the navigation
+        # rail ends, instead of running underneath it.
+        work_col = QVBoxLayout()
+        work_col.setContentsMargins(0, 0, 0, 0)
+        work_col.setSpacing(6)
 
         # Stacked Pages
         self.stack = QStackedWidget(self)
@@ -248,11 +292,33 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_terminal.command_submitted.connect(self._execute_cli_command)
         self.stack.addWidget(self.page_terminal)
 
-        workspace_box.addWidget(self.stack, 1)
+        # Page 6: Flight Logs - history of every armed session
+        self.page_logs = LogsTabWidget(self.flight_logger, self)
+        self.stack.addWidget(self.page_logs)
+
+        # Page 7: Configuration - typed settings, validated and persisted
+        self.page_config = ConfigTabWidget(self.settings, self)
+        self.page_config.settings_saved.connect(self._on_settings_saved)
+        self.stack.addWidget(self.page_config)
+
+        work_col.addWidget(self.stack, 1)
+
+        # 3. Footer: vision-engine toggles, aligned to the workspace's left edge
+        self.footer_bar = self._build_footer_bar()
+        work_col.addWidget(self.footer_bar)
+
+        workspace_box.addLayout(work_col, 1)
         root_layout.addLayout(workspace_box, 1)
 
     def _build_cockpit_page(self) -> QWidget:
-        """Page 0: Aviation PFD side-by-side with Proven Control Dispatcher and Closed-Loop Verifier."""
+        """Page 0: Aviation PFD side-by-side with Proven Control Dispatcher and Closed-Loop Verifier.
+
+        The dispatcher is split into titled groups - COMMANDS, NAVIGATION,
+        FLIGHT MODE, SAFETY & OVERRIDE - rather than one undifferentiated stack
+        of rows. A titled frame states what a cluster of controls is for, and it
+        puts the irreversible actions in their own box at the bottom instead of
+        one tab-stop away from ARM.
+        """
         page = QWidget(self)
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -265,249 +331,466 @@ class DroneGCSMainWindow(QMainWindow):
         self.hud = HUDWidget(self)
         splitter.addWidget(self.hud)
 
-        # Right: Comprehensive Control Request & Output Panel (Matching drone_gcs_gui.py proven workflow)
+        # Right: Comprehensive Control Request & Output Panel
         right_panel = QWidget(self)
         rl = QVBoxLayout(right_panel)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(8)
 
-        # ---- Card 1: COMMAND DISPATCHER & CONTROL REQUEST ----
-        ctrl_card = QFrame(self)
-        ctrl_card.setProperty("class", "cardFrame")
+        # ---- COMMAND DISPATCHER ----
+        # Arm/Mode status used to be repeated here as its own pair of pills -
+        # dropped as a duplicate of the always-visible header badges. The HUD's
+        # own PFD banner stays: that one reads as a genuine flight instrument.
+        ctrl_card = QWidget(self)
         cl = QVBoxLayout(ctrl_card)
-        cl.setContentsMargins(10, 8, 10, 8)
+        cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(6)
 
-        # Section Header. Arm/Mode status used to be repeated here as its own pair of
-        # pills - dropped as a duplicate of the always-visible header badges (the top
-        # strip is the single source of truth now, since it's the only one of the three
-        # copies that was visible on every tab, not just this one). The HUD's own PFD
-        # banner stays - that one reads as a genuine flight instrument, not GUI chrome.
-        hdr_box = QHBoxLayout()
-        lbl_title = QLabel("COMMAND DISPATCHER (CONTROL REQUEST)", self)
-        lbl_title.setStyleSheet("font-weight: bold; color: #d29922; font-size: 11px; letter-spacing: 0.5px;")
-        hdr_box.addWidget(lbl_title)
-        hdr_box.addStretch()
-        cl.addLayout(hdr_box)
+        # ---- Primary commands ----
+        # No title: ARM / DISARM / HOLD / LAND already say what they are, and a
+        # caption over them spent a row restating it.
+        grp_commands = QFrame(self)
+        grp_commands.setProperty("class", "cardFrame")
+        gc = QVBoxLayout(grp_commands)
+        gc.setContentsMargins(10, 8, 10, 10)
+        gc.setSpacing(6)
 
-        # Row 1: Primary Flight Actions (ARM, DISARM, HOLD, LAND)
         actions_box = QHBoxLayout()
         actions_box.setSpacing(6)
 
         self.btn_arm = QPushButton("ARM", self)
         self.btn_arm.setObjectName("btnArm")
-        self.btn_arm.setMinimumHeight(32)
+        self.btn_arm.setMinimumHeight(34)
         self.btn_arm.clicked.connect(self._cmd_arm_from_ui)
         actions_box.addWidget(self.btn_arm, 1)
 
         self.btn_disarm = QPushButton("DISARM", self)
         self.btn_disarm.setObjectName("btnDisarm")
-        self.btn_disarm.setMinimumHeight(32)
+        self.btn_disarm.setMinimumHeight(34)
         self.btn_disarm.clicked.connect(self._cmd_disarm)
         actions_box.addWidget(self.btn_disarm, 1)
 
+        # HOLD and LAND move the aircraft, so they carry the navigation colour
+        # rather than a decorative one - LAND in particular used to be purple,
+        # which signalled nothing about what it does.
         self.btn_hold = QPushButton("HOLD", self)
-        self.btn_hold.setStyleSheet("background-color: #1f6feb; color: #ffffff; font-weight: bold;")
-        self.btn_hold.setMinimumHeight(32)
+        self.btn_hold.setObjectName("btnNav")
+        self.btn_hold.setMinimumHeight(34)
         self.btn_hold.clicked.connect(lambda: self._cmd_mode("AUTO.LOITER"))
         actions_box.addWidget(self.btn_hold, 1)
 
         self.btn_land = QPushButton("LAND", self)
-        self.btn_land.setStyleSheet("background-color: #8957e5; color: #ffffff; font-weight: bold;")
-        self.btn_land.setMinimumHeight(32)
+        self.btn_land.setObjectName("btnNav")
+        self.btn_land.setMinimumHeight(34)
         self.btn_land.clicked.connect(lambda: self._cmd_mode("AUTO.LAND"))
         actions_box.addWidget(self.btn_land, 1)
 
-        cl.addLayout(actions_box)
+        gc.addLayout(actions_box)
+        cl.addWidget(grp_commands)
 
-        # Row 2: Bench Force Override Checkbox (Bypass USB/Battery checks via param2=21196)
-        self.chk_force_arm = QCheckBox(
-            "Bench Force Override (Bypass USB/Battery Safety Locks via param2=21196)", self
-        )
-        self.chk_force_arm.setChecked(False)
-        self.chk_force_arm.setStyleSheet("color: #d29922; font-weight: 600; font-size: 11px;")
-        cl.addWidget(self.chk_force_arm)
+        # ---- NAVIGATION | FLIGHT MODE ----
+        # One frame, two halves, divided by a rule: both answer "where do I
+        # point the aircraft", and giving each its own bordered card made the
+        # panel read as four unrelated things instead of two.
+        flight_frame = QFrame(self)
+        flight_frame.setProperty("class", "cardFrame")
+        ff = QHBoxLayout(flight_frame)
+        ff.setContentsMargins(6, 0, 6, 6)
+        ff.setSpacing(12)
 
-        # Row 3: Takeoff Control (Altitude numeric box + Button)
-        takeoff_box = QHBoxLayout()
-        takeoff_box.setSpacing(6)
+        grp_nav = QGroupBox("NAVIGATION", self)
+        grp_nav.setObjectName("groupFlat")
+        gn = QGridLayout(grp_nav)
+        gn.setContentsMargins(4, 2, 4, 2)
+        gn.setHorizontalSpacing(8)
+        gn.setVerticalSpacing(6)
+        gn.setColumnStretch(1, 1)
+
+        FIELD_W = 70      # numeric entry
+        ACTION_W = 120    # dispatch button
+
         lbl_to = QLabel("Takeoff Alt (m):", self)
-        lbl_to.setStyleSheet("color: #c9d1d9; font-weight: 600; font-size: 11px;")
-        takeoff_box.addWidget(lbl_to)
+        lbl_to.setObjectName("fieldLabel")
+        gn.addWidget(lbl_to, 0, 0)
 
         self.ent_takeoff_alt = QLineEdit("1.0", self)
-        self.ent_takeoff_alt.setFixedWidth(55)
+        self.ent_takeoff_alt.setFixedWidth(FIELD_W)
         self.ent_takeoff_alt.setAlignment(Qt.AlignCenter)
         self.ent_takeoff_alt.setValidator(QDoubleValidator(0.2, 10.0, 2, self))
-        takeoff_box.addWidget(self.ent_takeoff_alt)
+        gn.addWidget(self.ent_takeoff_alt, 0, 1, Qt.AlignLeft)
 
         self.btn_takeoff = QPushButton("TAKEOFF", self)
-        self.btn_takeoff.setStyleSheet("background-color: #1f6feb; color: #ffffff; font-weight: bold;")
-        self.btn_takeoff.setMinimumHeight(30)
+        self.btn_takeoff.setObjectName("btnNav")
+        self.btn_takeoff.setFixedWidth(ACTION_W)
+        gn.addWidget(self.btn_takeoff, 0, 2)
         self.btn_takeoff.clicked.connect(self._cmd_takeoff_from_ui)
-        takeoff_box.addWidget(self.btn_takeoff)
 
-        takeoff_box.addStretch()
-        cl.addLayout(takeoff_box)
-
-        # Row 4: Relative Translation Group (dx, dy, dz)
-        move_box = QHBoxLayout()
-        move_box.setSpacing(4)
-        lbl_mv = QLabel("Move (m):", self)
-        lbl_mv.setStyleSheet("color: #c9d1d9; font-weight: 600; font-size: 11px;")
-        move_box.addWidget(lbl_mv)
-
-        lbl_dx = QLabel("dx:", self)
-        lbl_dx.setStyleSheet("color: #8b949e; font-size: 11px;")
-        move_box.addWidget(lbl_dx)
-        self.ent_dx = QLineEdit("0.5", self)
-        self.ent_dx.setFixedWidth(46)
-        self.ent_dx.setAlignment(Qt.AlignCenter)
-        self.ent_dx.setValidator(QDoubleValidator(-10.0, 10.0, 2, self))
-        move_box.addWidget(self.ent_dx)
-
-        lbl_dy = QLabel("dy:", self)
-        lbl_dy.setStyleSheet("color: #8b949e; font-size: 11px;")
-        move_box.addWidget(lbl_dy)
-        self.ent_dy = QLineEdit("0.0", self)
-        self.ent_dy.setFixedWidth(46)
-        self.ent_dy.setAlignment(Qt.AlignCenter)
-        self.ent_dy.setValidator(QDoubleValidator(-10.0, 10.0, 2, self))
-        move_box.addWidget(self.ent_dy)
-
-        lbl_dz = QLabel("dz:", self)
-        lbl_dz.setStyleSheet("color: #8b949e; font-size: 11px;")
-        move_box.addWidget(lbl_dz)
-        self.ent_dz = QLineEdit("0.0", self)
-        self.ent_dz.setFixedWidth(46)
-        self.ent_dz.setAlignment(Qt.AlignCenter)
-        self.ent_dz.setValidator(QDoubleValidator(-10.0, 10.0, 2, self))
-        move_box.addWidget(self.ent_dz)
-
-        self.btn_move = QPushButton("MOVE", self)
-        self.btn_move.setStyleSheet("background-color: #1f6feb; color: #ffffff; font-weight: bold;")
-        self.btn_move.setMinimumHeight(30)
-        self.btn_move.clicked.connect(self._cmd_move_from_ui)
-        move_box.addWidget(self.btn_move)
-
-        cl.addLayout(move_box)
-
-        # Row 5: Heading Control (Yaw) & Flight Mode Dropdown Selector
-        row5 = QHBoxLayout()
-        row5.setSpacing(6)
-
-        # Yaw
-        lbl_yaw = QLabel("Yaw (°):", self)
-        lbl_yaw.setStyleSheet("color: #c9d1d9; font-weight: 600; font-size: 11px;")
-        row5.addWidget(lbl_yaw)
+        lbl_yaw = QLabel("Yaw (\u00b0):", self)
+        lbl_yaw.setObjectName("fieldLabel")
+        gn.addWidget(lbl_yaw, 1, 0)
 
         self.ent_yaw = QLineEdit("90.0", self)
-        self.ent_yaw.setFixedWidth(50)
+        self.ent_yaw.setFixedWidth(FIELD_W)
         self.ent_yaw.setAlignment(Qt.AlignCenter)
         self.ent_yaw.setValidator(QDoubleValidator(-360.0, 360.0, 1, self))
-        row5.addWidget(self.ent_yaw)
+        gn.addWidget(self.ent_yaw, 1, 1, Qt.AlignLeft)
 
         self.btn_yaw = QPushButton("ROTATE YAW", self)
-        self.btn_yaw.setStyleSheet("background-color: #1f6feb; color: #ffffff; font-weight: bold;")
-        self.btn_yaw.setMinimumHeight(30)
+        self.btn_yaw.setObjectName("btnNav")
+        self.btn_yaw.setFixedWidth(ACTION_W)
+        gn.addWidget(self.btn_yaw, 1, 2)
         self.btn_yaw.clicked.connect(self._cmd_yaw_from_ui)
-        row5.addWidget(self.btn_yaw)
 
-        row5.addSpacing(8)
+        ff.addWidget(grp_nav, 3)
 
-        # Mode Dropdown
-        lbl_mode = QLabel("Mode:", self)
-        lbl_mode.setStyleSheet("color: #c9d1d9; font-weight: 600; font-size: 11px;")
-        row5.addWidget(lbl_mode)
+        divider = QFrame(self)
+        divider.setObjectName("vDivider")
+        divider.setFixedWidth(1)
+        ff.addWidget(divider)
+
+        grp_mode = QGroupBox("FLIGHT MODE", self)
+        grp_mode.setObjectName("groupFlat")
+        gm = QVBoxLayout(grp_mode)
+        gm.setContentsMargins(4, 2, 4, 2)
+        gm.setSpacing(6)
 
         self.combo_modes = QComboBox(self)
         self.combo_modes.addItems(PX4_MODES_LIST)
         self.combo_modes.setCurrentText("STABILIZED")
-        self.combo_modes.setMinimumHeight(30)
-        row5.addWidget(self.combo_modes, 1)
+        self.combo_modes.setMinimumHeight(28)
+        gm.addWidget(self.combo_modes)
 
+        # Neutral on purpose: a mode change is routine, and colouring it would
+        # dilute the three colours that do mean something here.
         self.btn_set_mode = QPushButton("SET MODE", self)
-        self.btn_set_mode.setStyleSheet("background-color: #238636; color: #ffffff; font-weight: bold;")
-        self.btn_set_mode.setMinimumHeight(30)
+        self.btn_set_mode.setMinimumHeight(28)
         self.btn_set_mode.clicked.connect(self._cmd_set_mode_from_ui)
-        row5.addWidget(self.btn_set_mode)
+        gm.addWidget(self.btn_set_mode)
 
-        cl.addLayout(row5)
+        ff.addWidget(grp_mode, 2)
+        cl.addWidget(flight_frame)
 
-        # Emergency Cutoff
-        self.btn_kill = QPushButton("⛔ EMERGENCY MOTOR KILL", self)
+        # ---- Override ----
+        # The two controls that bypass or cut flight safety live together, at
+        # the far end of the panel from ARM. Untitled: an amber warning
+        # checkbox above a red bar is not mistakable for anything else.
+        grp_safety = QFrame(self)
+        grp_safety.setProperty("class", "cardFrame")
+        gs = QVBoxLayout(grp_safety)
+        gs.setContentsMargins(10, 8, 10, 10)
+        gs.setSpacing(6)
+
+        # No glyph prefix: the U+26D4 "no entry" symbol has no coverage in the
+        # UI font here and rendered as a tofu box.
+        self.btn_kill = QPushButton("EMERGENCY KILL", self)
         self.btn_kill.setObjectName("btnKill")
         self.btn_kill.setMinimumHeight(32)
         self.btn_kill.clicked.connect(self._cmd_kill)
-        cl.addWidget(self.btn_kill)
+        gs.addWidget(self.btn_kill)
 
+        cl.addWidget(grp_safety)
         rl.addWidget(ctrl_card)
 
-        # ---- Card 2: CLOSED-LOOP PHYSICAL EXECUTION VERIFIER ----
-        verif_card = QFrame(self)
-        verif_card.setProperty("class", "cardFrame")
-        vl = QVBoxLayout(verif_card)
+        # ---- Execution verifier ----
+        # (6) No title: the badge states what this is at a glance, and a header
+        # over three lines of content was spending a row to say so in words.
+        # (7) Three compact rows instead of a caption/value tile grid - same
+        # four numbers, roughly half the vertical space.
+        grp_verif = QFrame(self)
+        grp_verif.setProperty("class", "cardFrame")
+        vl = QVBoxLayout(grp_verif)
         vl.setContentsMargins(10, 8, 10, 8)
-        vl.setSpacing(4)
+        vl.setSpacing(5)
 
-        vl_title = QLabel("CLOSED-LOOP PHYSICAL EXECUTION VERIFIER")
-        vl_title.setStyleSheet("font-weight: bold; color: #8957e5; font-size: 11px; letter-spacing: 0.5px;")
-        vl.addWidget(vl_title)
+        state_row = QHBoxLayout()
+        state_row.setSpacing(8)
+        self.lbl_exec_state = QLabel("IDLE", self)
+        self.lbl_exec_state.setObjectName("execBadgeIdle")
+        self.lbl_exec_state.setFixedWidth(84)
+        self.lbl_exec_state.setAlignment(Qt.AlignCenter)
+        state_row.addWidget(self.lbl_exec_state)
 
-        self.lbl_exec_val = QLabel("IDLE (holding position)", self)
-        self.lbl_exec_val.setStyleSheet("color: #f0f6fc; font-size: 12px; font-weight: bold;")
-        vl.addWidget(self.lbl_exec_val)
+        self.lbl_exec_val = QLabel("Holding position - no command in flight", self)
+        self.lbl_exec_val.setObjectName("execMessage")
+        state_row.addWidget(self.lbl_exec_val, 1)
 
-        self.lbl_exec_details = QLabel(
-            "Displacement: dx=+0.00m  dy=+0.00m  dz=+0.00m  |  Speed: 0.00 m/s", self
-        )
-        self.lbl_exec_details.setStyleSheet("color: #8b949e; font-size: 11px; font-family: monospace;")
-        vl.addWidget(self.lbl_exec_details)
+        self.lbl_exec_elapsed = QLabel("--", self)
+        self.lbl_exec_elapsed.setObjectName("valueMono")
+        self.lbl_exec_elapsed.setFixedWidth(52)
+        self.lbl_exec_elapsed.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        state_row.addWidget(self.lbl_exec_elapsed)
+        vl.addLayout(state_row)
+
+        # Four evenly-weighted columns rather than one padded string: each axis
+        # owns its own slot, so a value changing width cannot shunt the others
+        # sideways while you are watching them move.
+        read_row = QGridLayout()
+        read_row.setHorizontalSpacing(8)
+        read_row.setVerticalSpacing(0)
+        self.lbl_exec_axes = {}
+        for col, (key, axis) in enumerate(
+            (("dx", "\u0394X"), ("dy", "\u0394Y"), ("dz", "\u0394Z"), ("spd", "SPD"))
+        ):
+            # Caption and value stay welded together and the pair is centred in
+            # its column. Right-aligning the value inside a stretched cell put
+            # a gulf between "dX" and its number, so each label read as if it
+            # belonged to the figure on its left.
+            cell = QHBoxLayout()
+            cell.setSpacing(7)
+            cell.addStretch()
+            cap = QLabel(axis, self)
+            cap.setObjectName("execAxis")
+            cell.addWidget(cap)
+            val = QLabel("0.00" if key == "spd" else "+0.00", self)
+            val.setObjectName("execReadout")
+            val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            cell.addWidget(val)
+            cell.addStretch()
+            read_row.addLayout(cell, 0, col)
+            read_row.setColumnStretch(col, 1)
+            self.lbl_exec_axes[key] = val
+        vl.addLayout(read_row)
 
         self.progress_verif = QProgressBar(self)
-        self.progress_verif.setFixedHeight(12)
-        self.progress_verif.setTextVisible(False)
+        self.progress_verif.setFixedHeight(14)
+        self.progress_verif.setTextVisible(True)
+        self.progress_verif.setFormat("no displacement target")
         self.progress_verif.setValue(0)
         vl.addWidget(self.progress_verif)
 
-        rl.addWidget(verif_card)
+        rl.addWidget(grp_verif)
 
-        # ---- Card 3: Interactive Terminal / Console Bar ----
+        # ---- Interactive Terminal / Console Bar ----
         self.console = CLIConsoleWidget(self)
         self.console.command_submitted.connect(self._execute_cli_command)
         rl.addWidget(self.console, 1)
 
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        # 7:3 rather than 3:2 - the command column only ever holds fixed-height
+        # controls, so the extra width went to padding while the camera pane
+        # could use it.
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
+        right_panel.setMaximumWidth(640)
 
         layout.addWidget(splitter)
         return page
 
     def _build_diagnostics_page(self) -> QWidget:
-        """Page 4: Detailed Diagnostics & Bench Safety view."""
+        """Page 4: Detailed Diagnostics & Bench Safety view.
+
+        Nine cards, each a plain frame with its heading and a rule INSIDE the
+        border. QGroupBox paints its title across the top border line, which
+        left every heading straddling the edge of its own box - fine for one
+        group in a control panel, visually broken in a nine-card grid.
+        """
         page = QWidget(self)
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(10)
 
-        title = QLabel("SYSTEM DIAGNOSTICS & INTEL REALSENSE D435i VIO SENSOR HEALTH")
-        title.setStyleSheet("font-size: 14px; font-weight: bold; color: #58a6ff;")
-        layout.addWidget(title)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
 
-        self.diag_text = QLabel("Connecting to telemetry stream...", self)
-        self.diag_text.setFont(QFont("Consolas", 11))
-        self.diag_text.setStyleSheet("color: #c9d1d9;")
-        layout.addWidget(self.diag_text)
-        layout.addStretch()
+        # key -> QLabel, so the telemetry tick addresses fields by name instead
+        # of rebuilding a 25-line f-string 30 times a second.
+        self.diag_values: dict = {}
+
+        cards = [
+            ("PX4 AUTOPILOT", [
+                ("sysid", "System / Comp ID"), ("connected", "Link"),
+                ("arm_state", "Arm State"), ("flight_mode", "Flight Mode"),
+                ("flight_time", "Flight Time"),
+            ]),
+            ("LINK THROUGHPUT", [
+                ("rx", "RX rate"), ("tx", "TX rate"),
+            ]),
+            ("D435i VIO / EKF2", [
+                ("vio_health", "VIO Stream"), ("vio_age", "Last Vision Packet"),
+                ("ekf2", "EKF2 Fusion"),
+            ]),
+            ("LOCAL POSITION NED", [
+                ("pos_x", "North (x)"), ("pos_y", "East (y)"),
+                ("pos_z", "Down (z)"), ("alt", "Altitude AGL"),
+            ]),
+            ("BODY VELOCITIES", [
+                ("vx", "Vx"), ("vy", "Vy"), ("vz", "Vz"),
+                ("gspeed", "Ground Speed"),
+            ]),
+            ("MOTOR OUTPUTS", [
+                ("m1", "M1  FR CCW"), ("m2", "M2  RL CCW"),
+                ("m3", "M3  FL CW"), ("m4", "M4  RR CW"),
+            ]),
+            ("ATTITUDE / HEADING", [
+                ("roll", "Roll"), ("pitch", "Pitch"),
+                ("yaw", "Yaw"), ("heading", "Heading"),
+            ]),
+            ("POWER", [
+                ("volt", "Battery"), ("curr", "Current"), ("pct", "Remaining"),
+            ]),
+            ("GPS", [
+                ("sats", "Satellites"), ("hdop", "HDOP"), ("fix", "Fix Type"),
+            ]),
+        ]
+
+        for i, (card_title, rows) in enumerate(cards):
+            card = QFrame(self)
+            card.setProperty("class", "cardFrame")
+            cv = QVBoxLayout(card)
+            cv.setContentsMargins(12, 10, 12, 10)
+            cv.setSpacing(6)
+
+            heading = QLabel(card_title, self)
+            heading.setObjectName("cardHeading")
+            cv.addWidget(heading)
+
+            rule = QFrame(self)
+            rule.setObjectName("hDivider")
+            rule.setFixedHeight(1)
+            cv.addWidget(rule)
+
+            body = QGridLayout()
+            body.setHorizontalSpacing(8)
+            body.setVerticalSpacing(3)
+            body.setColumnStretch(1, 1)
+            for r, (key, caption) in enumerate(rows):
+                cap = QLabel(caption, self)
+                cap.setObjectName("fieldSubLabel")
+                body.addWidget(cap, r, 0)
+                val = QLabel("--", self)
+                val.setObjectName("diagValue")
+                val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                body.addWidget(val, r, 1)
+                self.diag_values[key] = val
+            cv.addLayout(body)
+            cv.addStretch()
+
+            grid.addWidget(card, i // 3, i % 3)
+
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        outer.addLayout(grid)
+        outer.addStretch()
         return page
+
+    def _build_footer_bar(self) -> QFrame:
+        """Vision-engine toggles, laid out as in the Walle GCS control row.
+
+        These four request perception overlays that this ground station does
+        not yet carry: detection, monocular depth, face recognition and human
+        tracking all live in the Walle codebase and need torch, RF-DETR,
+        Depth-Anything and InsightFace, none of which are installed here.
+
+        The switches are live and latch, so the requested set is real UI state
+        ready to drive an engine the moment one exists. What they must not do
+        is imply the overlay is running, so the footer note names every
+        requested-but-unavailable engine for as long as it is switched on.
+        """
+        bar = QFrame(self)
+        bar.setObjectName("footerBar")
+        fl = QHBoxLayout(bar)
+        fl.setContentsMargins(10, 5, 10, 5)
+        fl.setSpacing(8)
+
+        self.vision_buttons = {}
+        specs = [
+            ("detect", "Detect", "detect",
+             "Object detection (RF-DETR) - engine not installed on this station"),
+            ("depth", "Depth", "depth",
+             "Monocular depth overlay (Depth-Anything V2) - engine not installed"),
+            ("face", "Face Rec", "face",
+             "Face recognition (InsightFace SCRFD + ArcFace) - engine not installed"),
+            ("track", "Track", "track",
+             "Human tracking (YOLOv8-pose + DeepSort) - engine not installed"),
+        ]
+        for key, label, obj, tip in specs:
+            btn = QPushButton(label, self)
+            btn.setObjectName("btnVision")
+            btn.setProperty("visionRole", key)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda checked, k=key: self._on_vision_toggle(k, checked))
+            fl.addWidget(btn)
+            self.vision_buttons[key] = btn
+
+        fl.addStretch()
+
+        self.lbl_footer_note = QLabel(
+            "Vision engines unavailable - no onboard perception pipeline connected", self)
+        self.lbl_footer_note.setObjectName("footerNote")
+        fl.addWidget(self.lbl_footer_note)
+        return bar
+
+    def _on_vision_toggle(self, key: str, checked: bool) -> None:
+        """Latch the request and keep the footer honest about what is missing.
+
+        The button state is kept - it is a genuine operator request - but the
+        note spells out that nothing is rendering it, so a lit switch can never
+        be mistaken for a live overlay.
+        """
+        label = {"detect": "Detect", "depth": "Depth",
+                 "face": "Face Rec", "track": "Track"}.get(key, key)
+        if checked:
+            msg = (f"{label} requested - no vision engine on this station "
+                   "(needs the onboard perception pipeline)")
+            self.console.log_warning(msg)
+            self.toast.show_message(f"{label}: no vision engine available",
+                                    "#d29922", 3000)
+        else:
+            self.console.log_info(f"{label} request cleared")
+        self._refresh_vision_note()
+
+    def _refresh_vision_note(self) -> None:
+        names = [{"detect": "Detect", "depth": "Depth", "face": "Face Rec",
+                  "track": "Track"}[k]
+                 for k, b in self.vision_buttons.items() if b.isChecked()]
+        if names:
+            self.lbl_footer_note.setText(
+                "Requested but unavailable: " + ", ".join(names)
+                + " - no onboard perception pipeline connected")
+        else:
+            self.lbl_footer_note.setText(
+                "Vision engines unavailable - no onboard perception pipeline connected")
+
+    def _diag_set(self, key: str, text: str, colour: str = None) -> None:
+        """Write one diagnostics field, optionally colouring it by state.
+
+        Colour is applied per-widget rather than through the global sheet
+        because it encodes a live value, not a widget role.
+        """
+        lbl = self.diag_values.get(key)
+        if lbl is None:
+            return
+        lbl.setText(text)
+        lbl.setStyleSheet(
+            f"color: {colour};" if colour else f"color: {PALETTE['text_bright']};")
 
     def _on_view_changed(self, idx: int):
         self.stack.setCurrentIndex(idx)
-        if self.stack.widget(idx) is self.page_fpv:
-            # Auto-connect to the drone's MJPEG stream the first time this tab is opened.
-            # Idempotent - does nothing if a feed is already running.
+        page = self.stack.widget(idx)
+
+        # Any workspace that shows the camera starts it. Idempotent - does
+        # nothing if a feed is already running, and there is only ever one
+        # capture thread regardless of how many viewports are open.
+        if page in (self.page_fpv, self.page_cockpit, self.page_slam):
             self.page_fpv.ensure_started()
+
+        # The floating viewport belongs to the SLAM workspace: while flying a
+        # planned route you want the map full-size and the camera beside it.
+        if page is self.page_slam:
+            if not self.fpv_float.isVisible():
+                self._position_fpv_float()
+            self.fpv_float.show()
+            self.fpv_float.raise_()
+        else:
+            self.fpv_float.hide()
+
+    def _position_fpv_float(self):
+        """Park the floating viewport near the GCS's bottom-right on first show."""
+        geo = self.geometry()
+        self.fpv_float.move(geo.right() - self.fpv_float.width() - 40,
+                            geo.bottom() - self.fpv_float.height() - 60)
 
     # -------------------------------------------------------------------------
     # Connection Management
@@ -563,7 +846,9 @@ class DroneGCSMainWindow(QMainWindow):
             self.page_terminal.log_warning(f"Link status: {message}")
 
     def _on_rates_updated(self, rx_rate: float, tx_rate: float):
-        self.top_strip.update_rates(rx_rate, tx_rate)
+        # Header no longer carries these - see TopStatusStrip.update_rates.
+        self._diag_set("rx", f"{rx_rate:.1f} msg/s")
+        self._diag_set("tx", f"{tx_rate:.1f} msg/s")
 
     def _on_statustext_received(self, text: str, severity: int):
         if text.startswith("[GCS CMD]"):
@@ -585,12 +870,71 @@ class DroneGCSMainWindow(QMainWindow):
             self.console.log_info(f"PX4: {clean_text}")
             self.page_terminal.log_info(f"PX4: {clean_text}")
 
+    def _on_settings_saved(self, cfg) -> None:
+        """Apply what can change without a restart, and say what cannot."""
+        self.settings = cfg
+        self.TAKEOFF_ALT_MIN_M = cfg.limits.takeoff_alt_min_m
+        self.TAKEOFF_ALT_MAX_M = cfg.limits.takeoff_alt_max_m
+        self.MOVE_MAX_DELTA_M = cfg.limits.move_max_delta_m
+        self.page_fpv.txt_url.setText(cfg.video.stream_url)
+        msg = ("Settings saved. Command limits and stream URL applied now; "
+               "connection changes take effect on the next Connect.")
+        self.console.log_success(msg)
+        self.toast.show_message("Settings saved", "#238636", 3000)
+
+    def _set_exec_state(self, state: str) -> None:
+        """Colour the verifier's state badge. Purely presentational."""
+        badge = {
+            "IDLE": "execBadgeIdle",
+            "TRACKING": "execBadgeActive",
+            "EXECUTED": "execBadgeOk",
+            "STALLED": "execBadgeFail",
+            "REJECTED": "execBadgeFail",
+        }.get(state, "execBadgeIdle")
+        self.lbl_exec_state.setText(state)
+        self.lbl_exec_state.setObjectName(badge)
+        # Qt caches the style per objectName, so it must be re-polished by hand
+        # after the name changes or the badge keeps its previous colour.
+        self.lbl_exec_state.style().unpolish(self.lbl_exec_state)
+        self.lbl_exec_state.style().polish(self.lbl_exec_state)
+
+    def _update_verifier(self, state: str, msg: str, pct: float = 0.0,
+                         dx: float = 0.0, dy: float = 0.0, dz: float = 0.0,
+                         speed: float = 0.0, elapsed: float = 0.0,
+                         delta: float = 0.0, target: float = 0.0) -> None:
+        """Single writer for every widget in the execution verifier panel.
+
+        Previously the panel was written from two places with different
+        formats and never reset, so after a command finished it kept showing
+        the last run's numbers indefinitely - the display implied a live
+        measurement when nothing was being measured.
+        """
+        self._set_exec_state(state)
+        self.lbl_exec_val.setText(msg)
+        self.lbl_exec_elapsed.setText(f"{elapsed:.1f}s" if elapsed > 0 else "--")
+        self.lbl_exec_axes["dx"].setText(f"{dx:+.2f}")
+        self.lbl_exec_axes["dy"].setText(f"{dy:+.2f}")
+        self.lbl_exec_axes["dz"].setText(f"{dz:+.2f}")
+        self.lbl_exec_axes["spd"].setText(f"{speed:.2f}")
+        self.progress_verif.setValue(max(0, min(100, int(pct))))
+        # Travelled-vs-target belongs inside the bar it describes, rather than
+        # on a fourth line repeating what the bar already shows.
+        self.progress_verif.setFormat(
+            f"{delta:.2f} / {target:.2f} m" if target > 0 else "no displacement target")
+
     def _on_command_ack_received(self, cmd_id: int, result_code: int, cmd_name: str, result_str: str):
         """Real-time feedback when Pixhawk acknowledges or rejects a command."""
         # Immediately notify execution tracker so countdown timers are aborted and status is updated
         self.exec_tracker.notify_command_ack(cmd_id, result_code, cmd_name, result_str)
-        self.lbl_exec_val.setText(self.exec_tracker.status_msg)
-        self.progress_verif.setValue(int(self.exec_tracker.progress_pct))
+        self._update_verifier(
+            self.exec_tracker.status if self.exec_tracker.status in
+            ("EXECUTED", "STALLED", "REJECTED") else "TRACKING",
+            self.exec_tracker.status_msg,
+            pct=self.exec_tracker.progress_pct,
+            elapsed=self.exec_tracker.elapsed_time,
+            delta=self.exec_tracker.current_delta,
+            target=getattr(self.exec_tracker, "req_dist", 0.0) or 0.0,
+        )
 
         if result_code == 0:  # ACCEPTED
             msg = f"[ACCEPTED] PX4 ACK: {cmd_name} ACCEPTED"
@@ -646,8 +990,18 @@ class DroneGCSMainWindow(QMainWindow):
 
     def _on_ui_tick(self):
         t = self.last_telemetry
-        t.check_vision_staleness(max_age_sec=3.0)
+        t.check_vision_staleness(max_age_sec=self.settings.alerts.vision_stale_s)
         self.top_strip.update_telemetry(t)
+        self.sidebar.set_flight_state(t.flight_mode, t.armed)
+        self.sidebar.set_instruments(t.ground_speed, t.altitude)
+
+        # One record per armed session; the Logs tab updates the moment it closes.
+        closed = self.flight_logger.update(t, forced=self._last_arm_was_forced)
+        if closed is not None:
+            self.page_logs.add_record(closed)
+            self.console.log_success(
+                f"Flight recorded: {closed.duration_hms()}, "
+                f"{closed.distance_m:.1f} m travelled")
 
         # Arm/Mode status: shown in the header badges (top_strip.update_telemetry above)
         # and the HUD's own PFD banner - no longer duplicated here.
@@ -655,15 +1009,19 @@ class DroneGCSMainWindow(QMainWindow):
         # 3. Update Closed-Loop Execution Tracker
         if self.exec_tracker.active:
             res = self.exec_tracker.update(t.x, t.y, t.z, armed=t.armed, flight_mode=t.flight_mode, cur_heading=t.heading)
-            pct = int(res["progress_pct"])
-            self.progress_verif.setValue(pct)
-            self.lbl_exec_val.setText(res["status_msg"])
-
-            dx = t.x - self.exec_tracker.x0
-            dy = t.y - self.exec_tracker.y0
-            dz = t.z - self.exec_tracker.z0
-            self.lbl_exec_details.setText(
-                f"Displacement: dx={dx:+.2f}m dy={dy:+.2f}m dz={dz:+.2f}m | Speed: {t.ground_speed:.2f} m/s"
+            self._verifier_dirty = True
+            self._update_verifier(
+                "TRACKING" if res["status"] not in ("EXECUTED", "STALLED", "REJECTED")
+                else res["status"],
+                res["status_msg"],
+                pct=res["progress_pct"],
+                dx=t.x - self.exec_tracker.x0,
+                dy=t.y - self.exec_tracker.y0,
+                dz=t.z - self.exec_tracker.z0,
+                speed=t.ground_speed,
+                elapsed=res.get("elapsed", 0.0),
+                delta=res.get("delta", 0.0),
+                target=res.get("target", 0.0) or 0.0,
             )
 
             if res["status"] == "EXECUTED":
@@ -674,9 +1032,42 @@ class DroneGCSMainWindow(QMainWindow):
                 self.console.log_error(res["status_msg"])
                 self.page_terminal.log_error(res["status_msg"])
                 self.toast.show_message(res["status_msg"], "#da3633")
+        elif self._verifier_dirty:
+            # Tracking just ended. Clear the readouts so stale numbers are never
+            # mistaken for a live measurement.
+            self._verifier_dirty = False
+            self._update_verifier("IDLE", "Holding position - no command in flight")
 
         # 3. Pre-Flight Auto-Climb Interlock for Ground Start (Decoupled threshold & 15s timeout)
         now = time.time()
+
+        # 3a. Component health. The pump is only "live" while a path is
+        # actually streaming - a deliberately stopped pump is not a fault,
+        # so its status follows the timer rather than wall-clock silence.
+        pump_live = (
+            self.offboard_pump_timer.isActive()
+            and self.path_in_progress
+            and not self.path_paused
+        )
+        if pump_live != self._pump_was_live:
+            self._pump_was_live = pump_live
+            self.pump_health.set_status(
+                EngineStatus.READY if pump_live else EngineStatus.STOPPED)
+
+        # Sweep every registered component once a second. check_stall() latches,
+        # so each stall is reported exactly once instead of 30x per second.
+        if now - self._last_health_sweep >= 1.0:
+            self._last_health_sweep = now
+            for _h in get_registry().all():
+                if not _h.check_stall():
+                    continue
+                _snap = _h.snapshot()
+                _msg = f"[HEALTH] STALLED - {_snap.one_line()}"
+                self.console.log_error(_msg)
+                self.page_terminal.log_error(_msg)
+                self.toast.show_message(
+                    f"{_snap.name} stalled - no output for "
+                    f"{_snap.stall_after_s:.1f}s", "#da3633", 5000)
         if self.path_awaiting_climb and self.worker:
             climb_threshold = max(0.5, abs(self.cruise_z) * 0.80)
             if t.altitude >= climb_threshold:
@@ -797,39 +1188,73 @@ class DroneGCSMainWindow(QMainWindow):
                     self.toast.show_message("Goal Pose Reached!", "#238636", 5000)
 
         # 5. Update Diagnostics Tab
-        vio_str = "LOCKED (Streaming 10 Hz)" if t.d435i_vio_health else "NO VISION DATA"
-        self.diag_text.setText(
-            f"=== PX4 AUTOPILOT STATUS ===\n"
-            f"SysID: {t.system_id} | CompID: {t.component_id} | Connected: {t.connected}\n"
-            f"Arm State: {'ARMED' if t.armed else 'DISARMED'} | Flight Mode: {t.flight_mode}\n"
-            f"Flight Time: {int(t.flight_time_sec)}s\n\n"
-            f"=== INTEL REALSENSE D435i VIO STATUS ===\n"
-            f"VIO Stream Health: {vio_str}\n"
-            f"EKF2 Vision Fusion: {'ACTIVE (Indoor Position Locked)' if t.ekf2_vision_fused else 'WAITING'}\n\n"
-            f"=== LOCAL POSITION NED (VIO AGL) ===\n"
-            f"North (x): {t.x:+.3f} m\n"
-            f"East  (y): {t.y:+.3f} m\n"
-            f"Down  (z): {t.z:+.3f} m  (Altitude AGL: {t.altitude:.3f} m)\n\n"
-            f"=== BODY VELOCITIES & SPEED ===\n"
-            f"Vx: {t.vx:+.2f} m/s | Vy: {t.vy:+.2f} m/s | Vz: {t.vz:+.2f} m/s\n"
-            f"Ground Speed: {t.ground_speed:.2f} m/s\n\n"
-            f"=== MOTOR ACTUATOR OUTPUTS (SERVO_OUTPUT_RAW) ===\n"
-            f"M1 (FR CCW): {t.motor_pwms[0]} µs | M2 (RL CCW): {t.motor_pwms[1]} µs\n"
-            f"M3 (FL CW):  {t.motor_pwms[2]} µs | M4 (RR CW):  {t.motor_pwms[3]} µs\n\n"
-            f"=== ATTITUDE & HEADING ===\n"
-            f"Roll: {t.roll:+.1f}° | Pitch: {t.pitch:+.1f}° | Yaw: {t.yaw:+.1f}° | Heading: {t.heading:.1f}°\n\n"
-            f"=== POWER & GPS ===\n"
-            f"Battery: {t.battery_voltage:.2f} V | Current: {t.battery_current:.1f} A | Remaining: {t.battery_percent}%\n"
-            f"GPS Satellites: {t.satellites} | HDOP: {t.hdop:.1f} | Fix: {t.fix_type}\n"
-        )
+        OK, WARN, BAD = PALETTE["ok"], PALETTE["warn"], PALETTE["danger"]
+        DIM = PALETTE["text_dim"]
+
+        self._diag_set("sysid", f"{t.system_id} / {t.component_id}")
+        self._diag_set("connected", "CONNECTED" if t.connected else "NO LINK",
+                       OK if t.connected else BAD)
+        # Armed is red, not green: green would read as "safe" for the one state
+        # in which the props can actually spin.
+        self._diag_set("arm_state", "ARMED" if t.armed else "DISARMED",
+                       BAD if t.armed else DIM)
+        self._diag_set("flight_mode", t.flight_mode or "--",
+                       PALETTE["accent"] if t.connected else DIM)
+        self._diag_set("flight_time", f"{int(t.flight_time_sec)} s")
+
+        self._diag_set("vio_health",
+                       "LOCKED (10 Hz)" if t.d435i_vio_health else "NO VISION DATA",
+                       OK if t.d435i_vio_health else BAD)
+        self._diag_set("vio_age",
+                       f"{t.d435i_vio_age:.1f} s ago" if t.last_vision_time else "never",
+                       OK if t.d435i_vio_health else BAD)
+        self._diag_set("ekf2",
+                       "ACTIVE (indoor lock)" if t.ekf2_vision_fused else "WAITING",
+                       OK if t.ekf2_vision_fused else WARN)
+
+        pos_col = BAD if t.position_stale else None
+        self._diag_set("pos_x", f"{t.x:+.3f} m", pos_col)
+        self._diag_set("pos_y", f"{t.y:+.3f} m", pos_col)
+        self._diag_set("pos_z", f"{t.z:+.3f} m", pos_col)
+        self._diag_set("alt", f"{t.altitude:.3f} m", pos_col)
+
+        self._diag_set("vx", f"{t.vx:+.2f} m/s")
+        self._diag_set("vy", f"{t.vy:+.2f} m/s")
+        self._diag_set("vz", f"{t.vz:+.2f} m/s")
+        self._diag_set("gspeed", f"{t.ground_speed:.2f} m/s")
+
+        # Thresholds mirror the motor widget's own legend: idle 1000-1100,
+        # saturation above 1920.
+        for i, key in enumerate(("m1", "m2", "m3", "m4")):
+            pwm = t.motor_pwms[i] if i < len(t.motor_pwms) else 0
+            col = WARN if pwm > 1920 else (OK if pwm > 1100 else DIM)
+            self._diag_set(key, f"{pwm} \u00b5s", col)
+
+        self._diag_set("roll", f"{t.roll:+.1f}\u00b0")
+        self._diag_set("pitch", f"{t.pitch:+.1f}\u00b0")
+        self._diag_set("yaw", f"{t.yaw:+.1f}\u00b0")
+        self._diag_set("heading", f"{t.heading:.1f}\u00b0")
+
+        batt_col = OK if t.battery_percent > 35 else (WARN if t.battery_percent > 20 else BAD)
+        self._diag_set("volt", f"{t.battery_voltage:.2f} V", batt_col)
+        self._diag_set("curr", f"{t.battery_current:.1f} A")
+        self._diag_set("pct", f"{t.battery_percent}%", batt_col)
+
+        # GPS is informational indoors - this airframe flies on vision - so a
+        # missing fix is dimmed, not flagged red.
+        fix_col = OK if t.fix_type in ("3D_FIX", "DGPS", "RTK_FLOAT", "RTK_FIXED") else DIM
+        self._diag_set("sats", str(t.satellites), fix_col)
+        self._diag_set("hdop", f"{t.hdop:.1f}")
+        self._diag_set("fix", t.fix_type, fix_col)
 
     # -------------------------------------------------------------------------
     # Command Dispatch Helpers
     # -------------------------------------------------------------------------
 
     def _cmd_arm_from_ui(self):
-        force = self.chk_force_arm.isChecked()
-        self._cmd_arm(force=force)
+        # The ARM button is always a normal arm. Bench force-arm is reachable
+        # only by typing `arm force` in the flight terminal.
+        self._cmd_arm(force=False)
 
     def _cmd_arm(self, force: bool = False):
         if not self.worker or not self.worker.isRunning():
@@ -955,16 +1380,9 @@ class DroneGCSMainWindow(QMainWindow):
             cur_armed=t.armed, cur_mode=t.flight_mode
         )
 
-    def _cmd_move_from_ui(self):
-        try:
-            dx = float(self.ent_dx.text().strip())
-            dy = float(self.ent_dy.text().strip())
-            dz = float(self.ent_dz.text().strip())
-        except ValueError:
-            self.console.log_error("Coordinates must be valid numbers")
-            self.page_terminal.log_error("Coordinates must be valid numbers")
-            return
-        self._cmd_move(dx, dy, dz)
+    # _cmd_move_from_ui() removed with the Move (m) row: relative translation is
+    # now issued from the flight terminal ("move <dx> <dy> <dz>") and by the
+    # Tactical SLAM path executor, both of which call _cmd_move() directly.
 
     def _cmd_move(self, dx: float, dy: float, dz: float):
         if not self.worker or not self.worker.isRunning():
@@ -1201,7 +1619,7 @@ class DroneGCSMainWindow(QMainWindow):
         self.offboard_pump_timer.start()  # Start 10 Hz continuous stream
 
         self.exec_tracker.start_tracking(
-            f"waypoint W1", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
+            "waypoint W1", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
             target_dist=seg_dist
         )
         self.console.log_cmd(
@@ -1219,7 +1637,14 @@ class DroneGCSMainWindow(QMainWindow):
             and self.current_wpt_idx < len(self.active_waypoints)
         ):
             wpt = self.active_waypoints[self.current_wpt_idx]
+            _t0 = time.perf_counter()
             self.worker.move_to_waypoint(wpt[0], wpt[1], z=self.cruise_z, yaw_deg=self.current_target_yaw)
+            # Heartbeat only on a setpoint that actually went out. Timing the
+            # send matters as much as counting it: this runs on the GUI thread,
+            # so a socket that starts blocking here stalls the pump AND the UI
+            # together, and PX4 notices within 500 ms.
+            self.pump_health.record_latency((time.perf_counter() - _t0) * 1000.0)
+            self.pump_health.heartbeat()
 
     def _on_cruise_altitude_changed(self, alt_m: float):
         self.cruise_z = -abs(alt_m)
@@ -1396,7 +1821,7 @@ class DroneGCSMainWindow(QMainWindow):
             self.console.log_box.clear()
             self.page_terminal.log_box.clear()
         elif action == "arm":
-            force = (len(parts) > 1 and parts[1].lower() == "force") or self.chk_force_arm.isChecked()
+            force = len(parts) > 1 and parts[1].lower() == "force"
             self._cmd_arm(force=force)
         elif action == "disarm":
             self._cmd_disarm()
@@ -1432,6 +1857,9 @@ class DroneGCSMainWindow(QMainWindow):
             self.console.log_warning(f"Unknown command: '{action}'. Type 'help' for instructions.")
 
     def closeEvent(self, event):
+        # A Qt.Tool window is not a child in the window-manager sense; without
+        # this it outlives the main window as an orphan always-on-top frame.
+        self.fpv_float.close()
         """Clean shutdown of threads and embedded processes on window close."""
         if hasattr(self, "page_slam"):
             self.page_slam.stop_rviz()

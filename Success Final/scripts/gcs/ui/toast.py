@@ -82,18 +82,32 @@ class NotificationToast(QWidget):
         )
         self.adjustSize()
         top_strip = getattr(self.parent(), "top_strip", None)
-        anchor = getattr(top_strip, "ned_lbl", None) if top_strip is not None else None
+        # Anchor to the rightmost real content of the header's second row. This
+        # used to be the VIO NED readout; that moved to the Diagnostics tab, so
+        # the altitude instrument is now the last thing on the row. Falling
+        # back through the list rather than naming one widget means the next
+        # header reshuffle degrades to the centred fallback instead of dropping
+        # the toast onto the navigation rail.
+        # Anchor to the end of the header's second line. Row 1 is the controls
+        # you operate and row 2 is what the vehicle reports back, so a
+        # notification about what just happened belongs on row 2 - and that row
+        # has a wide gap between the status badges and the arm/mode pair.
+        # Falling through a list rather than naming one widget means a header
+        # reshuffle degrades to the centred fallback instead of dropping the
+        # toast onto the navigation rail.
+        anchor = None
+        if top_strip is not None:
+            for name in ("badge_rc", "badge_vision_conf", "badge_vio"):
+                anchor = getattr(top_strip, name, None)
+                if anchor is not None:
+                    break
         if anchor is not None:
-            # Anchor to row 2's actual line (the NED label, its rightmost real content),
-            # not a fraction of the header's total height - the header is two rows, and
-            # centering across both put the toast overlapping row 1's Connect button
-            # instead of landing in row 2's empty right-hand space as intended.
             w, h = self.width(), self.height()
             margin = 14  # matches top_status_strip.py's SPACING constant
             anchor_top_left = anchor.mapTo(self.parent(), anchor.rect().topLeft())
-            # sizeHint(), not the possibly one-frame-stale allocated width() - the NED
-            # text's length changes with live telemetry, and using the current geometry
-            # risked measuring last frame's (shorter) width right after a text update.
+            # sizeHint(), not the possibly one-frame-stale allocated width - the
+            # readout's text length changes with live telemetry, and the current
+            # geometry may still be last frame's (shorter) measurement.
             anchor_w = max(anchor.width(), anchor.sizeHint().width())
             x = anchor_top_left.x() + anchor_w + margin
             y = anchor_top_left.y() + (anchor.height() - h) // 2

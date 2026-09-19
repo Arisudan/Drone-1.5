@@ -44,20 +44,22 @@ USAGE:
 
 from __future__ import annotations
 import math
-import socket
-import struct
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from pymavlink import mavutil
 
-from core.telemetry import TelemetrySnapshot, MAV_CMD_NAMES, MAV_RESULT_NAMES
+from core.telemetry import TelemetrySnapshot
 
 
 class MAVLinkWorker(QThread):
     """Worker thread running continuous MAVLink RX/TX loops."""
+
+    # How often to re-report an unchanging fault while it keeps repeating.
+    STATUSTEXT_REPEAT_NOTICE_S = 15.0
+
 
     # Qt Signals
     telemetry_updated = pyqtSignal(object)              # Emits TelemetrySnapshot
@@ -108,6 +110,13 @@ class MAVLinkWorker(QThread):
         # command type always gets its own fresh token and is reported once more.
         self._ack_dispatch_token: dict = {}
         self._ack_reported_token: dict = {}
+
+        # STATUSTEXT assembly: msg id -> {chunks: {seq: text}, t: first_seen}
+        self._statustext_parts: dict = {}
+        # Consecutive-repeat suppression state.
+        self._statustext_last: str = ""
+        self._statustext_repeats: int = 0
+        self._statustext_last_emit: float = 0.0
         self.telemetry = TelemetrySnapshot()
         self.telemetry.system_id = 1
         self.telemetry.component_id = 1
@@ -512,6 +521,24 @@ class MAVLinkWorker(QThread):
                 text = str(raw_text).rstrip("\x00")
 
             severity = getattr(msg, "severity", 6)
+
+            # Reassemble multi-part messages before doing anything else with
+            # them. PX4 splits any STATUSTEXT longer than 50 characters across
+            # several messages that share an `id` and carry an incrementing
+            # `chunk_seq`; reading msg.text per message truncated every long
+            # message the autopilot ever sent. The symptom was subtle enough to
+            # live here a long time - "Arming denied: Resolve system health
+            # failures firs" followed by a separate line containing just "t".
+            text = self._reassemble_statustext(msg, text, severity)
+            if text is None:
+                return          # incomplete message, waiting for more chunks
+
+            # Collapse storms of an identical message. PX4 re-runs its preflight
+            # checks every ~2 s, so one unresolved fault produces an unbounded
+            # wall of the same line and pushes everything else off screen.
+            if not self._should_emit_statustext(text):
+                return
+
             self.statustext_received.emit(text, severity)
 
             # Check for inter-GCS broadcast command
@@ -521,6 +548,72 @@ class MAVLinkWorker(QThread):
                     self.telemetry.last_cmd_received = cmd_content
                     self.telemetry.last_cmd_timestamp = time.time()
                 self.command_broadcast_received.emit(cmd_content)
+
+    # -------------------------------------------------------------------------
+    # STATUSTEXT assembly & de-duplication
+    # -------------------------------------------------------------------------
+
+    def _reassemble_statustext(self, msg, text: str, severity: int):
+        """Join a chunked STATUSTEXT, or pass a single-part one straight through.
+
+        Returns the complete text, or None while chunks are still outstanding.
+        Older autopilots and non-PX4 stacks omit `id`/`chunk_seq` entirely, in
+        which case the message is by definition complete.
+        """
+        msg_id = getattr(msg, "id", 0)
+        chunk_seq = getattr(msg, "chunk_seq", 0)
+
+        if not msg_id:
+            return text
+
+        now = time.time()
+        # Drop half-assembled messages whose remaining chunks never arrived,
+        # otherwise a lost packet would prepend its fragment to the next
+        # message that happened to reuse the same id.
+        for stale_id, entry in list(self._statustext_parts.items()):
+            if now - entry["t"] > 3.0:
+                del self._statustext_parts[stale_id]
+
+        entry = self._statustext_parts.setdefault(msg_id, {"chunks": {}, "t": now})
+        entry["chunks"][chunk_seq] = text
+        entry["t"] = now
+
+        # A chunk shorter than the 50-byte field is the last one; so is a gap-free
+        # run that ends at a short chunk.
+        expected = max(entry["chunks"]) + 1
+        if len(entry["chunks"]) < expected:
+            return None                       # a middle chunk is still missing
+        if len(text) >= 50 and chunk_seq == max(entry["chunks"]):
+            return None                       # full-length tail: more to come
+
+        del self._statustext_parts[msg_id]
+        return "".join(entry["chunks"][i] for i in sorted(entry["chunks"]))
+
+    def _should_emit_statustext(self, text: str) -> bool:
+        """Suppress consecutive repeats, reporting the count when they stop.
+
+        Modelled on syslog's "last message repeated N times": the first
+        occurrence is always shown immediately, so nothing is hidden - only the
+        drumbeat after it is collapsed.
+        """
+        now = time.time()
+        if text == self._statustext_last:
+            self._statustext_repeats += 1
+            # Periodic reminder so a persistent fault does not scroll away and
+            # look resolved.
+            if now - self._statustext_last_emit >= self.STATUSTEXT_REPEAT_NOTICE_S:
+                self._statustext_last_emit = now
+                self.statustext_received.emit(
+                    f"{text}  (repeated {self._statustext_repeats}x)", 4)
+            return False
+
+        if self._statustext_repeats:
+            self.statustext_received.emit(
+                f"(previous message repeated {self._statustext_repeats}x)", 6)
+        self._statustext_last = text
+        self._statustext_repeats = 0
+        self._statustext_last_emit = now
+        return True
 
     # -------------------------------------------------------------------------
     # Command Dispatch Helpers

@@ -39,7 +39,7 @@ import os
 import sys
 import time
 import subprocess
-from typing import Optional
+from typing import Optional, Tuple
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QWindow, QFont

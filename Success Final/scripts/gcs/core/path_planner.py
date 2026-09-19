@@ -160,10 +160,12 @@ class AStarPathPlanner:
                 }
 
         # Check if goal is inside obstacle; snap to nearest reachable free cell
+        goal_was_snapped = False
         if inflated_obstacles[goal_r, goal_c] > 0:
             snapped = self._find_nearest_free_cell(inflated_obstacles, goal_r, goal_c, max_radius=20)
             if snapped:
                 goal_r, goal_c = snapped
+                goal_was_snapped = True
             else:
                 return {
                     "success": False,
@@ -272,8 +274,12 @@ class AStarPathPlanner:
         for r, c in smoothed_cells:
             waypoints.append(grid_to_world(r, c))
 
-        # Always ensure exact goal pose is final waypoint
-        if waypoints:
+        # Snap the final waypoint to the exact requested goal - but ONLY when
+        # the goal was actually reachable. If it had to be moved out of an
+        # obstacle above, overwriting the endpoint here would hand the
+        # operator a path whose last setpoint sits inside the wall they
+        # clicked on, which is precisely the case the snap existed to avoid.
+        if waypoints and not goal_was_snapped:
             waypoints[-1] = (goal_world[0], goal_world[1])
 
         # Compute total distance
@@ -295,8 +301,10 @@ class AStarPathPlanner:
             "total_distance_m": total_dist,
             "est_flight_time_s": est_time,
             "traverses_unknown": traverses_unknown,
+            "goal_adjusted": goal_was_snapped,
             "message": f"Planned collision-free path: {len(waypoints)} waypoints, {total_dist:.2f}m"
-            + (" (Traverses unmapped space)" if traverses_unknown else ""),
+            + (" (Traverses unmapped space)" if traverses_unknown else "")
+            + (" (Goal moved clear of an obstacle)" if goal_was_snapped else ""),
         }
 
     def check_path_collision(
