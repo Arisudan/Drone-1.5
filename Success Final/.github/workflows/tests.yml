@@ -69,6 +69,10 @@ jobs:
         working-directory: tests
         run: python -m unittest test_statustext -v
 
+      - name: Video source handling (RTSP options, per-source URLs)
+        working-directory: tests
+        run: python -m unittest test_video_sources -v
+
   lint:
     name: lint (pyflakes via ruff)
     runs-on: ubuntu-latest

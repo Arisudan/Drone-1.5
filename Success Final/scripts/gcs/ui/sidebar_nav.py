@@ -44,7 +44,9 @@ class SidebarNav(QFrame):
 
     def __init__(self, parent: Optional[QFrame] = None):
         super().__init__(parent)
-        self.setFixedWidth(162)
+        # 176, not 162: adding units pushed "ALT 0.00 m" flush against the
+        # rail's right edge, which would elide at a higher DPI.
+        self.setFixedWidth(176)
         # Scoped to the rail itself. As a bare `QFrame` rule this also matched
         # every descendant - QLabel derives from QFrame - so each label in the
         # rail painted its own right-hand border, scattering stray vertical
@@ -89,6 +91,13 @@ class SidebarNav(QFrame):
                 font-family: 'Noto Sans Mono', monospace;
                 padding: 2px 0;
             }
+            QFrame#navFootRule {
+                background-color: #30363d;
+                min-height: 1px;
+                max-height: 1px;
+                border: none;
+                margin: 0 10px;
+            }
             QFrame#navInstRule {
                 background-color: #30363d;
                 min-width: 1px;
@@ -128,7 +137,7 @@ class SidebarNav(QFrame):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setContentsMargins(0, 8, 0, 2)
         layout.setSpacing(2)
 
         self.btn_group = QButtonGroup(self)
@@ -162,8 +171,16 @@ class SidebarNav(QFrame):
         # sitting in the one spot visible from every workspace.
         # Each in its own bordered pill and centred in the rail, so the two
         # read as separate state indicators rather than one wrapped sentence.
+        # A rule closes off the workspace list: below it is state the vehicle
+        # reports, above it is navigation. Without the separation the readouts
+        # read as two more entries in the list.
+        foot_rule = QFrame(self)
+        foot_rule.setObjectName("navFootRule")
+        foot_rule.setFixedHeight(1)
+        layout.addWidget(foot_rule)
+
         foot = QVBoxLayout()
-        foot.setContentsMargins(10, 0, 10, 10)
+        foot.setContentsMargins(10, 8, 10, 4)
         foot.setSpacing(5)
 
         # Speed and altitude share one line, split by a rule. They belong with
@@ -173,7 +190,7 @@ class SidebarNav(QFrame):
         inst_row.setContentsMargins(0, 0, 0, 0)
         inst_row.setSpacing(6)
 
-        self.lbl_spd = QLabel("SPD 0.00", self)
+        self.lbl_spd = QLabel("SPD 0.00 m/s", self)
         self.lbl_spd.setObjectName("navInstIdle")
         self.lbl_spd.setAlignment(Qt.AlignCenter)
         inst_row.addWidget(self.lbl_spd, 1)
@@ -183,7 +200,7 @@ class SidebarNav(QFrame):
         inst_rule.setFixedWidth(1)
         inst_row.addWidget(inst_rule)
 
-        self.lbl_alt = QLabel("ALT 0.00", self)
+        self.lbl_alt = QLabel("ALT 0.00 m", self)
         self.lbl_alt.setObjectName("navInstIdle")
         self.lbl_alt.setAlignment(Qt.AlignCenter)
         inst_row.addWidget(self.lbl_alt, 1)
@@ -226,9 +243,9 @@ class SidebarNav(QFrame):
         already trusts (0.05 m/s and 0.05 m are inside VIO noise), so a
         stationary aircraft does not flicker.
         """
-        for lbl, caption, value in ((self.lbl_spd, "SPD", speed_ms),
-                                    (self.lbl_alt, "ALT", altitude_m)):
-            lbl.setText(f"{caption} {value:.2f}")
+        for lbl, caption, unit, value in ((self.lbl_spd, "SPD", "m/s", speed_ms),
+                                          (self.lbl_alt, "ALT", "m", altitude_m)):
+            lbl.setText(f"{caption} {value:.2f} {unit}")
             name = "navInstLive" if abs(value) > 0.05 else "navInstIdle"
             if lbl.objectName() != name:
                 lbl.setObjectName(name)

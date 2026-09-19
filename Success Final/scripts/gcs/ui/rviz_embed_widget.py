@@ -11,7 +11,7 @@ ARCHITECTURE & CONTEXT:
   * Downstream:    GCS Tactical SLAM Tab (seamless embedded 3D viewport)
 
 DATA FLOW & INTERFACES:
-  * Subprocess:    Launches `rviz2 -d /home/radxa/Flop/config/rtabmap_drone.rviz`.
+  * Subprocess:    Launches `rviz2 -d <checkout>/config/rtabmap_drone.rviz`.
   * X11 Swallowing: Uses `xdotool search --pid <pid>` to locate the X11 Window ID,
                    wraps it with `QWindow.fromWinId()`, and mounts it into
                    `QWidget.createWindowContainer()`.
@@ -29,7 +29,8 @@ KEY LOGIC & FAILSAFES:
     delay before the X11 window becomes discoverable.
 
 USAGE:
-  rviz_widget = RVizEmbedWidget(config_path="/home/radxa/Flop/config/rtabmap_drone.rviz")
+  rviz_widget = RVizEmbedWidget()            # ships-with-checkout layout
+  rviz_widget = RVizEmbedWidget("/path/to/custom.rviz")
   rviz_widget.start_rviz()
 ================================================================================
 """
@@ -39,6 +40,7 @@ import os
 import sys
 import time
 import subprocess
+from pathlib import Path
 from typing import Optional, Tuple
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -47,6 +49,11 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QStackedWidget, QFrame, QSizePolicy
 )
+
+
+def _default_config_path() -> str:
+    """The RViz layout that ships with this checkout (scripts/gcs/ui -> root)."""
+    return str(Path(__file__).resolve().parents[3] / "config" / "rtabmap_drone.rviz")
 
 
 class RVizEmbedWidget(QWidget):
@@ -59,11 +66,14 @@ class RVizEmbedWidget(QWidget):
 
     def __init__(
         self,
-        config_path: str = "/home/radxa/Flop/config/rtabmap_drone.rviz",
+        config_path: Optional[str] = None,
         parent: Optional[QWidget] = None
     ):
         super().__init__(parent)
-        self.config_path = config_path
+        # None resolves to the layout shipped in this checkout's config/
+        # directory, so the widget works wherever the repository is cloned
+        # rather than only on the machine it was written on.
+        self.config_path = config_path or _default_config_path()
         self.rviz_process: Optional[subprocess.Popen] = None
         self.rviz_container: Optional[QWidget] = None
         self.rviz_qwindow: Optional[QWindow] = None

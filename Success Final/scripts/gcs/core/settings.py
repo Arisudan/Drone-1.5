@@ -43,6 +43,20 @@ def settings_dir() -> Path:
     return Path(os.environ.get("DRONE_GCS_HOME", str(Path.home() / ".drone_gcs")))
 
 
+def package_root() -> Path:
+    """The checkout this module lives in (scripts/gcs/core -> package root)."""
+    return Path(__file__).resolve().parents[3]
+
+
+def default_rviz_config() -> str:
+    """Ship-with-the-checkout RViz layout, wherever the checkout happens to be."""
+    return str(package_root() / "config" / "rtabmap_drone.rviz")
+
+
+def resolve_rviz_config(cfg: "GCSSettings") -> str:
+    return cfg.slam.rviz_config or default_rviz_config()
+
+
 @dataclass
 class ProfileConfig:
     name: str = "Drone-1.5"
@@ -81,6 +95,7 @@ class ConnectionConfig:
 @dataclass
 class VideoConfig:
     stream_url: str = "http://172.16.101.84:8080/video"
+    map_bridge_host: str = "172.16.101.84"
     map_bridge_port: int = 5765
     jpeg_port: int = 8080
 
@@ -95,6 +110,10 @@ class SlamConfig:
     robot_radius_m: float = 0.25
     cell_size_m: float = 0.025
     treat_unknown_as_obstacle: bool = False
+    # Empty means "the copy shipped with this checkout" - resolved at runtime
+    # by default_rviz_config(), so the template works from any directory
+    # without anyone editing a path into source.
+    rviz_config: str = ""
 
     def validate(self) -> None:
         if not 0.2 <= self.cruise_altitude_m <= 10.0:
@@ -184,6 +203,62 @@ def _apply(target: Any, src: dict) -> None:
 
 def settings_path(path: Optional[Path] = None) -> Path:
     return Path(path) if path else (settings_dir() / "settings.json")
+
+
+# CLI flag -> (settings section, field, env var). One table drives both the
+# argument parser and the environment fallback, so a new knob cannot be added
+# to one and forgotten in the other.
+OVERRIDES = (
+    ("host",        "connection", "host",        "GCS_HOST"),
+    ("port",        "connection", "udp_port",    "GCS_PORT"),
+    ("protocol",    "connection", "protocol",    "GCS_PROTOCOL"),
+    ("map_host",    "video",      "map_bridge_host", "GCS_MAP_HOST"),
+    ("map_port",    "video",      "map_bridge_port", "GCS_MAP_PORT"),
+    ("video_url",   "video",      "stream_url",  "GCS_VIDEO_URL"),
+    ("rviz_config", "slam",       "rviz_config", "GCS_RVIZ_CONFIG"),
+)
+
+
+def apply_overrides(cfg: "GCSSettings", args=None) -> "GCSSettings":
+    """Layer CLI flags over environment variables over the saved settings.
+
+    Precedence is flag > env > settings.json > dataclass default. Nothing here
+    writes to disk: a one-off `--host` for a bench session should not silently
+    become the permanent configuration.
+    """
+    for flag, section, field_name, env in OVERRIDES:
+        value = getattr(args, flag, None) if args is not None else None
+        if value is None:
+            value = os.environ.get(env) or None
+        if value is None:
+            continue
+        target = getattr(cfg, section)
+        current = getattr(target, field_name)
+        try:
+            if isinstance(current, bool):
+                value = str(value).lower() in ("1", "true", "yes", "on")
+            elif isinstance(current, int):
+                value = int(value)
+            elif isinstance(current, float):
+                value = float(value)
+            else:
+                value = str(value)
+        except (TypeError, ValueError):
+            log.warning("ignoring bad override %s=%r", env, value)
+            continue
+        setattr(target, field_name, value)
+
+    # The stream URL follows the host unless it was set explicitly, so
+    # `--host 10.0.0.5` alone re-points MAVLink, the map bridge and the video.
+    explicit_video = (getattr(args, "video_url", None) if args else None) or \
+        os.environ.get("GCS_VIDEO_URL")
+    if not explicit_video:
+        cfg.video.stream_url = f"http://{cfg.connection.host}:{cfg.video.jpeg_port}/video"
+    if not (getattr(args, "map_host", None) if args else None) and not os.environ.get("GCS_MAP_HOST"):
+        cfg.video.map_bridge_host = cfg.connection.host
+
+    cfg.validate()
+    return cfg
 
 
 def load_settings(path: Optional[Path] = None) -> GCSSettings:

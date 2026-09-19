@@ -42,6 +42,7 @@ RUN:
 
 from __future__ import annotations
 import math
+import argparse
 import os
 import sys
 import time
@@ -104,7 +105,7 @@ from ui.sidebar_nav import SidebarNav
 from ui.logs_tab import LogsTabWidget
 from ui.config_tab import ConfigTabWidget
 from core.flight_log import FlightLogger
-from core.settings import load_settings
+from core.settings import load_settings, apply_overrides, resolve_rviz_config
 
 
 PX4_MODES_LIST = [
@@ -123,7 +124,7 @@ PX4_MODES_LIST = [
 class DroneGCSMainWindow(QMainWindow):
     """Main application window for industrial-grade Drone-GCS Pilot Station."""
 
-    def __init__(self):
+    def __init__(self, settings=None):
         super().__init__()
         self.setWindowTitle("Drone-GCS | Autonomous Industrial Ground Station")
         self.resize(1400, 860)
@@ -135,7 +136,7 @@ class DroneGCSMainWindow(QMainWindow):
 
         # Persisted settings and the flight recorder are built before the UI,
         # because the Config and Logs workspaces are views onto them.
-        self.settings = load_settings()
+        self.settings = settings if settings is not None else apply_overrides(load_settings())
         self.flight_logger = FlightLogger()
 
         # Core Engines
@@ -210,7 +211,11 @@ class DroneGCSMainWindow(QMainWindow):
         self.ui_timer.start(33)
 
         # Background ROS 2 Map Listener for live /map_thin (with automatic TCP fallback)
-        self.map_listener = ROS2MapListener(tcp_host="172.16.101.84", tcp_port=5765, parent=self)
+        self.map_listener = ROS2MapListener(
+            tcp_host=self.settings.video.map_bridge_host,
+            tcp_port=self.settings.video.map_bridge_port,
+            parent=self,
+            stall_after_s=self.settings.alerts.map_stall_s)
         self.map_listener.map_received.connect(self._on_map_received_dispatch)
         self.map_listener.status_updated.connect(self._on_ros2_status_updated)
         self.map_listener.start()
@@ -222,7 +227,9 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_fpv.frame_broadcast.connect(self.fpv_float.sink.on_frame)
 
         # Auto-connect to default autopilot endpoint on launch (UDP 14550)
-        self._connect_to_endpoint("172.16.101.84", 14550, protocol="udp")
+        conn = self.settings.connection
+        port = conn.udp_port if conn.protocol == "udp" else conn.tcp_port
+        self._connect_to_endpoint(conn.host, port, protocol=conn.protocol)
 
     def _init_ui(self):
         main_widget = QWidget(self)
@@ -266,10 +273,11 @@ class DroneGCSMainWindow(QMainWindow):
 
         # Page 1: FPV Camera Feed
         self.page_fpv = VideoFeedWidget(self)
+        self.page_fpv.txt_url.setText(self.settings.video.stream_url)
         self.stack.addWidget(self.page_fpv)
 
         # Page 2: Tactical 2D SLAM & Waypoint Stager
-        self.page_slam = SLAMMapWidget(self)
+        self.page_slam = SLAMMapWidget(self, rviz_config=resolve_rviz_config(self.settings))
         self.page_slam.execute_path_requested.connect(self._on_execute_path_requested)
         self.page_slam.pause_path_requested.connect(self._on_pause_path_requested)
         self.page_slam.resume_path_requested.connect(self._on_resume_path_requested)
@@ -1870,7 +1878,34 @@ class DroneGCSMainWindow(QMainWindow):
         event.accept()
 
 
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Every network endpoint is a flag, so this app can be pointed at a
+    different vehicle without editing source.
+
+    Precedence is flag > environment variable > ~/.drone_gcs/settings.json >
+    built-in default. --host alone re-points MAVLink, the map bridge and the
+    video stream together, which is the common case.
+    """
+    ap = argparse.ArgumentParser(
+        prog="drone_gcs.py",
+        description="Drone-GCS - PyQt5 ground control station for PX4 + ROS 2.")
+    ap.add_argument("--host", help="autopilot / companion host (env GCS_HOST)")
+    ap.add_argument("--port", help="MAVLink port (env GCS_PORT)")
+    ap.add_argument("--protocol", choices=("udp", "tcp"),
+                    help="MAVLink transport (env GCS_PROTOCOL)")
+    ap.add_argument("--map-host", help="TCP map bridge host (env GCS_MAP_HOST)")
+    ap.add_argument("--map-port", help="TCP map bridge port (env GCS_MAP_PORT)")
+    ap.add_argument("--video-url", help="FPV stream URL (env GCS_VIDEO_URL)")
+    ap.add_argument("--rviz-config", help="RViz2 layout path (env GCS_RVIZ_CONFIG)")
+    return ap
+
+
 def main():
+    # parse_known_args: Qt consumes its own switches from argv and must not
+    # trip over ours, nor ours over its.
+    args, _qt_args = build_arg_parser().parse_known_args()
+    settings = apply_overrides(load_settings(), args)
+
     if sys.platform.startswith("linux"):
         for _p in ["/usr/lib/aarch64-linux-gnu/qt5/plugins", "/usr/lib/x86_64-linux-gnu/qt5/plugins"]:
             if os.path.exists(_p):
@@ -1878,7 +1913,7 @@ def main():
                 break
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
-    window = DroneGCSMainWindow()
+    window = DroneGCSMainWindow(settings=settings)
     window.show()
     sys.exit(app.exec_())
 

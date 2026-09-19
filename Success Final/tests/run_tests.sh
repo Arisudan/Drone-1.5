@@ -17,4 +17,4 @@ if [ "${1:-all}" = "hermetic" ]; then
     exec python3 -m unittest ${HERMETIC} -v
 fi
 
-python3 -m unittest ${HERMETIC} test_smoke test_statustext -v
+python3 -m unittest ${HERMETIC} test_smoke test_statustext test_video_sources -v

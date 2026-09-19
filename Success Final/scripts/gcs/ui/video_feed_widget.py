@@ -67,6 +67,41 @@ from PyQt5.QtWidgets import (
 DEFAULT_STREAM_URL = "http://172.16.101.84:8080/video"
 
 
+#: FFmpeg options applied to network streams before the capture is opened.
+#: - rtsp_transport=tcp: UDP RTSP loses packets over Wi-Fi and FFmpeg has no
+#:   way to recover them, which shows up as smeared frames rather than a clean
+#:   dropout. TCP costs a little latency and removes that failure mode.
+#: - timeout: FFmpeg's default is *no* timeout. Measured against a host that
+#:   drops packets rather than refusing (drone powered down, wrong subnet,
+#:   Wi-Fi gone - i.e. the field case), cv2.VideoCapture() blocked for 30 s
+#:   before giving up, turning this widget's 2 s reconnect cadence into a 30 s
+#:   one. With this set it gives up in 5 s, measured on the same host.
+#:   The option is `timeout` (microseconds) on current FFmpeg; `stimeout` is
+#:   the pre-5.x spelling and does nothing on a modern build - both are listed
+#:   so this works either side of that rename. Verified: `stimeout` alone left
+#:   the 30 s block in place.
+#: - max_delay / fflags=nobuffer: keep the decoder from accumulating a backlog,
+#:   which is what CAP_PROP_BUFFERSIZE is meant to do but does not on the
+#:   FFmpeg backend (it is honoured by V4L2 and a few others, not this one).
+NETWORK_CAPTURE_OPTIONS = (
+    "rtsp_transport;tcp|timeout;5000000|stimeout;5000000"
+    "|max_delay;500000|fflags;nobuffer"
+)
+
+#: URL schemes that go through FFmpeg and therefore want the options above.
+NETWORK_SCHEMES = ("rtsp://", "rtsps://", "udp://", "rtp://", "rtmp://", "tcp://")
+
+
+def is_network_stream(source) -> bool:
+    """True for a URL FFmpeg will open over the network.
+
+    HTTP is excluded deliberately: the drone's own MJPEG feed is plain HTTP and
+    works well without RTSP-specific tuning, and stimeout would change its
+    reconnect behaviour for no benefit.
+    """
+    return isinstance(source, str) and source.lower().startswith(NETWORK_SCHEMES)
+
+
 class VideoCaptureThread(QThread):
     """Background video frame acquisition thread."""
 
@@ -80,6 +115,18 @@ class VideoCaptureThread(QThread):
 
     def set_source(self, source):
         self.source = source
+
+    def _apply_capture_options(self):
+        """Set FFmpeg options for the upcoming open, if this is a live stream.
+
+        OpenCV reads OPENCV_FFMPEG_CAPTURE_OPTIONS from the environment at
+        VideoCapture construction, so it has to be set here rather than once at
+        import - the source can change at runtime.
+        """
+        if is_network_stream(self.source):
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = NETWORK_CAPTURE_OPTIONS
+        else:
+            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
 
     def run(self):
         self.running = True
@@ -124,6 +171,7 @@ class VideoCaptureThread(QThread):
                 if now - last_open_attempt >= 2.0:
                     last_open_attempt = now
                     try:
+                        self._apply_capture_options()
                         cap = cv2.VideoCapture(self.source)
                         if isinstance(self.source, int):
                             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -292,7 +340,11 @@ class VideoFeedWidget(QWidget):
     # Re-emitted decoded frames, for any VideoSink that wants to mirror them.
     frame_broadcast = pyqtSignal(object)
 
-    SRC_DRONE_FPV, SRC_TEST_PATTERN, SRC_CAM0, SRC_CAM1, SRC_CUSTOM = range(5)
+    # The synthetic test pattern was dropped from the dropdown - it is a
+    # bench aid, not a source anyone selects in flight. VideoCaptureThread
+    # still understands the "TEST_PATTERN" source string, so it remains
+    # available to tests and offline development.
+    SRC_DRONE_FPV, SRC_CAM0, SRC_CAM1, SRC_CUSTOM = range(4)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -317,15 +369,25 @@ class VideoFeedWidget(QWidget):
 
         self.combo_source = QComboBox(self)
         self.combo_source.addItems([
-            "Drone FPV (Wi-Fi MJPEG)", "Test Pattern",
+            "Drone FPV (Wi-Fi MJPEG)",
             "Camera 0 (/dev/video0)", "Camera 1 (/dev/video1)", "Custom RTSP/HTTP URL",
         ])
         self.combo_source.currentIndexChanged.connect(self._on_source_changed)
         tb.addWidget(self.combo_source)
 
-        self.txt_url = QLineEdit(DEFAULT_STREAM_URL, self)
-        self.txt_url.setFixedWidth(200)
-        self.txt_url.setToolTip("Radxa MJPEG stream URL (used for Drone FPV / Custom URL sources)")
+        # Two remembered URLs, not one shared field. The drone feed follows the
+        # Network preset; the custom one is whatever the operator typed and must
+        # survive a preset change.
+        self._drone_url = DEFAULT_STREAM_URL
+        self._custom_url = "rtsp://192.168.1.10:554/stream"
+
+        self.txt_url = QLineEdit(self._drone_url, self)
+        self.txt_url.setMinimumWidth(240)
+        self.txt_url.setToolTip(
+            "Stream URL for the selected source.\n"
+            "Drone FPV: MJPEG over HTTP, follows the Network preset.\n"
+            "Custom: any rtsp:// rtsps:// udp:// rtp:// or http:// URL - RTSP\n"
+            "is opened over TCP with a 5 s timeout.")
         self.txt_url.editingFinished.connect(self._on_url_edited)
         tb.addWidget(self.txt_url)
 
@@ -359,13 +421,20 @@ class VideoFeedWidget(QWidget):
         self._start_capture()
 
     def set_stream_host(self, ip: str):
-        """Re-target the drone stream URL to a new IP (e.g. a Network preset switch in
-        the top strip), keeping the :8080/video port/path - those don't change with
-        the network, only the host does. Reconnects live if a feed is already running
-        off the drone source."""
-        self.txt_url.setText(f"http://{ip}:8080/video")
+        """Re-target the drone's MJPEG URL to a new IP (a Network preset switch
+        in the top strip), keeping the :8080/video port and path - those do not
+        change with the network, only the host does.
+
+        Only the drone feed is re-targeted. This used to rewrite whichever URL
+        happened to be in the field, so switching network preset silently
+        destroyed a hand-typed RTSP address and reconnected to MJPEG; the custom
+        URL is remembered separately now and restored when you switch back.
+        """
+        self._drone_url = f"http://{ip}:8080/video"
         idx = self.combo_source.currentIndex()
-        if idx in (self.SRC_DRONE_FPV, self.SRC_CUSTOM) and self.cap_thread and self.cap_thread.isRunning():
+        if idx == self.SRC_DRONE_FPV:
+            self.txt_url.setText(self._drone_url)
+        if idx == self.SRC_DRONE_FPV and self.cap_thread and self.cap_thread.isRunning():
             self.cap_thread.stop()
             self.cap_thread.set_source(self._resolve_source(idx))
             self.cap_thread.start()
@@ -376,14 +445,12 @@ class VideoFeedWidget(QWidget):
 
     def _resolve_source(self, idx: int):
         if idx == self.SRC_DRONE_FPV:
-            return self.txt_url.text().strip() or DEFAULT_STREAM_URL
-        if idx == self.SRC_TEST_PATTERN:
-            return "TEST_PATTERN"
+            return self.txt_url.text().strip() or self._drone_url or DEFAULT_STREAM_URL
         if idx == self.SRC_CAM0:
             return 0
         if idx == self.SRC_CAM1:
             return 1
-        return self.txt_url.text().strip() or DEFAULT_STREAM_URL
+        return self.txt_url.text().strip() or self._custom_url
 
     def _start_capture(self):
         src = self._resolve_source(self.combo_source.currentIndex())
@@ -402,6 +469,13 @@ class VideoFeedWidget(QWidget):
             self._start_capture()
 
     def _on_source_changed(self, idx: int):
+        # Swap the field to the URL that belongs to the newly selected source.
+        if idx == self.SRC_DRONE_FPV:
+            self.txt_url.setText(self._drone_url)
+        elif idx == self.SRC_CUSTOM:
+            self.txt_url.setText(self._custom_url)
+        self.txt_url.setEnabled(idx in (self.SRC_DRONE_FPV, self.SRC_CUSTOM))
+
         if self.cap_thread and self.cap_thread.isRunning():
             self.cap_thread.stop()
             self.cap_thread.set_source(self._resolve_source(idx))
@@ -409,6 +483,13 @@ class VideoFeedWidget(QWidget):
 
     def _on_url_edited(self):
         idx = self.combo_source.currentIndex()
+        # Remember the edit against whichever source it belongs to.
+        text = self.txt_url.text().strip()
+        if idx == self.SRC_DRONE_FPV:
+            self._drone_url = text
+        elif idx == self.SRC_CUSTOM:
+            self._custom_url = text
+
         if idx in (self.SRC_DRONE_FPV, self.SRC_CUSTOM) and self.cap_thread and self.cap_thread.isRunning():
             self.cap_thread.stop()
             self.cap_thread.set_source(self._resolve_source(idx))

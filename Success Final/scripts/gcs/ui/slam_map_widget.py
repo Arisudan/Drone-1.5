@@ -864,8 +864,11 @@ class SLAMMapWidget(QWidget):
     altitude_changed = pyqtSignal(float)
     reset_map_requested = pyqtSignal()  # emitted only after the user confirms
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, rviz_config: str = ""):
         super().__init__(parent)
+        # Empty falls back to the copy shipped with this checkout; the caller
+        # passes whatever --rviz-config / GCS_RVIZ_CONFIG resolved to.
+        self._rviz_config = rviz_config
         self.is_path_paused: bool = False
         self.current_view_mode: int = 0
         self.map_source: str = "none"
@@ -1178,7 +1181,7 @@ class SLAMMapWidget(QWidget):
         self.view_stack.addWidget(self.canvas)
 
         # Page 1: Live Embedded RViz2 Viewport
-        self.rviz_widget = RVizEmbedWidget("/home/radxa/Flop/config/rtabmap_drone.rviz", self)
+        self.rviz_widget = RVizEmbedWidget(self._rviz_config or None, self)
         self.view_stack.addWidget(self.rviz_widget)
 
         # Wire RViz controls & lifecycle signals
