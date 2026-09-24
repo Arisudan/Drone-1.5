@@ -41,6 +41,7 @@ from typing import Optional
 from PyQt5.QtCore import Qt, QTimer, QRectF
 from PyQt5.QtGui import QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import QWidget
+from ui.scaling import px
 
 from ui.styles import PALETTE
 
@@ -69,7 +70,7 @@ class BatteryBadge(QWidget):
         self._pulse.setInterval(620)
         self._pulse.timeout.connect(self._tick_pulse)
 
-        self.setFixedHeight(26)
+        self.setFixedHeight(px(26))
         self.setFixedWidth(int(VOLT_W + GAP + CELL_W + CAP_W + GAP + PCT_W))
         self.setToolTip("Battery - no telemetry")
 

@@ -11,8 +11,9 @@ ARCHITECTURE & CONTEXT:
   * Downstream:    drone_gcs.py, radxa_monitor.py, and all child widgets
 
 DATA FLOW & INTERFACES:
-  * Export:        `PALETTE` (dict of design tokens) and `DARK_STYLESHEET` (QSS).
-  * Consumed By:   `app.setStyleSheet(DARK_STYLESHEET)`.
+  * Export:        `PALETTE` (design tokens), `DARK_STYLESHEET` (QSS at 1.0)
+                   and `build_stylesheet(scale)` (QSS at the active UI scale).
+  * Consumed By:   `app.setStyleSheet(build_stylesheet())`.
 
 THE PALETTE IS DATA, NOT LITERALS:
   Every colour lives once in `PALETTE` and is substituted into the QSS below via
@@ -44,9 +45,16 @@ CONTROLS ARE OUTLINED, NOT FILLED:
   saturated blocks competes for attention; an outline conveys the same category
   while leaving the eye free to find the one control that is actually lit.
 
+EVERY DIMENSION HERE IS A BASE VALUE, NOT A FINAL ONE:
+  The px counts below are authored against a 96 DPI display. ui/scaling.py
+  multiplies them by the resolved UI scale before the sheet is applied, so a
+  4K panel or a desktop set to large text gets a station that is still
+  readable. Write new rules in base pixels and let that happen; hardcoding a
+  'big' value here breaks the one display it was not measured on.
+
 USAGE:
-  from ui.styles import DARK_STYLESHEET, PALETTE
-  app.setStyleSheet(DARK_STYLESHEET)
+  from ui.styles import build_stylesheet, PALETTE
+  app.setStyleSheet(build_stylesheet())
 ================================================================================
 """
 
@@ -482,6 +490,193 @@ QPushButton#btnKill {
 }
 QPushButton#btnKill:hover { background-color: $danger_dim; }
 
+/* Disabled dispatching controls. Without this rule a filled command button
+   keeps its full saturated colour when setEnabled(False) - it looks live and
+   clickable while silently ignoring every click. Harmless for a greyed-out
+   TAKEOFF; not harmless for the bench motor-test controls, which are disabled
+   precisely when spinning a motor would be unsafe. A disabled control has to
+   read as disabled. */
+QPushButton#btnArm:disabled,
+QPushButton#btnDisarm:disabled,
+QPushButton#btnNav:disabled,
+QPushButton#btnCaution:disabled,
+QPushButton#btnKill:disabled,
+QPushButton#btnConnect:disabled {
+    background-color: $bg_panel;
+    color: $text_muted;
+    border: 1px solid $border;
+}
+
+/* ─── Tactical SLAM map toolbar ────────────────────────────────────────
+   Every control on that tab used to carry its own inline setStyleSheet with
+   a hardcoded font-size. Inline sheets never pass through scale_qss, so the
+   whole toolbar stayed at 10px while the rest of the station scaled - at 2x
+   it was the one tab that could not be read. These roles put it back on the
+   design system, which is also the only way a palette change reaches it. */
+
+/* Neutral map tool: view controls, zoom, rotate. Outlined, never filled -
+   none of these command the aircraft. */
+QPushButton#mapTool {
+    background-color: $bg_input;
+    color: $text;
+    border: 1px solid $border_soft;
+    border-radius: 4px;
+    padding: 4px 8px;
+    min-height: 24px;
+    font-size: 10px;
+}
+QPushButton#mapTool:hover:!disabled {
+    background-color: $bg_raised;
+    border-color: $border_hover;
+    color: $text_bright;
+}
+QPushButton#mapTool:disabled {
+    background-color: $bg_panel;
+    color: $text_muted;
+    border-color: $border;
+}
+/* Latched tool (measure, auto-follow). Amber, because it changes what the
+   next click does - the operator has to know it is on. */
+QPushButton#mapTool:checked {
+    background-color: $warn_fill;
+    color: $warn;
+    border-color: $warn;
+    font-weight: bold;
+}
+
+/* Segmented control: view switcher and map layers. One row of buttons that
+   reads as a single multi-state control rather than three separate ones. */
+QPushButton#segItem {
+    background-color: $bg_input;
+    color: $text_dim;
+    border: 1px solid $border_soft;
+    border-radius: 4px;
+    padding: 4px 9px;
+    min-height: 24px;
+    font-size: 10px;
+    font-weight: bold;
+}
+QPushButton#segItem:hover:!disabled {
+    background-color: $bg_raised;
+    color: $text_bright;
+}
+QPushButton#segItem:checked {
+    background-color: $accent_fill;
+    color: $accent_bright;
+    border-color: $accent_dim;
+}
+QPushButton#segItem:disabled {
+    background-color: $bg_panel;
+    color: $text_muted;
+    border-color: $border;
+}
+
+/* Cluster caption above the toolbar groups. */
+QLabel#rulerTotal {
+    color: $warn;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+QLabel#mapCaption {
+    color: $text_muted;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+/* Map source / RViz state pill. Four states, selected by a dynamic property
+   so the widget never needs an inline sheet to change colour. */
+QLabel#mapPill {
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: bold;
+    background-color: $bg_input;
+    color: $text_dim;
+    border: 1px solid $border_soft;
+}
+QLabel#mapPill[state="ok"] {
+    background-color: $ok_fill; color: $ok; border-color: $ok_dim;
+}
+QLabel#mapPill[state="warn"] {
+    background-color: $warn_fill; color: $warn; border-color: $warn_dim;
+}
+QLabel#mapPill[state="bad"] {
+    background-color: $danger_fill; color: $danger; border-color: $danger_dim;
+}
+
+/* Staged-goal chip. Hidden until there is a goal, so it is never an empty
+   box taking up the most prominent row on the tab. */
+QLabel#goalChip {
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: bold;
+    background-color: $ok_fill;
+    color: $ok;
+    border: 1px solid $ok_dim;
+}
+QLabel#goalChip[state="blocked"] {
+    background-color: $danger_fill; color: $danger; border-color: $danger_dim;
+}
+
+/* Path actions. Filled, because these three move the aircraft. ABORT uses
+   the dimmer red: the fully saturated one is reserved for EMERGENCY KILL,
+   which cuts the motors rather than landing. */
+QPushButton#btnGo {
+    background-color: $ok_dim; color: #ffffff;
+    border: 1px solid $ok; border-radius: 4px;
+    padding: 6px 10px; min-height: 28px; font-weight: bold;
+}
+QPushButton#btnGo:hover:!disabled { background-color: $ok; }
+
+QPushButton#btnHold {
+    background-color: $warn_dim; color: #ffffff;
+    border: 1px solid $warn; border-radius: 4px;
+    padding: 6px 10px; min-height: 28px; font-weight: bold;
+}
+QPushButton#btnHold:hover:!disabled { background-color: $warn; }
+
+QPushButton#btnAbort {
+    background-color: $danger_dim; color: #ffffff;
+    border: 1px solid $danger; border-radius: 4px;
+    padding: 6px 10px; min-height: 28px; font-weight: bold;
+}
+QPushButton#btnAbort:hover:!disabled { background-color: $danger; }
+
+QPushButton#btnGo:disabled,
+QPushButton#btnHold:disabled,
+QPushButton#btnAbort:disabled {
+    background-color: $bg_panel; color: $text_muted; border-color: $border;
+}
+
+/* Destructive map action, kept outlined and apart from the view tools. */
+QPushButton#mapDanger {
+    background-color: $bg_input;
+    color: $danger;
+    border: 1px solid $danger_dim;
+    border-radius: 4px;
+    padding: 4px 8px;
+    min-height: 24px;
+    font-size: 10px;
+    font-weight: bold;
+}
+QPushButton#mapDanger:hover:!disabled { background-color: $danger_dim; color: #ffffff; }
+QPushButton#mapDanger:disabled {
+    background-color: $bg_panel; color: $text_muted; border-color: $border;
+}
+
+/* Embedded RViz2 placeholder, shown before the 3D view is launched. */
+QFrame#rvizPlaceholder {
+    background-color: $bg_window;
+    border: 1px dashed $border_soft;
+    border-radius: 8px;
+}
+QLabel#rvizPlaceholderIcon  { color: $accent; letter-spacing: 2px; }
+QLabel#rvizPlaceholderTitle { color: $text; font-size: 16px; font-weight: bold; }
+QLabel#rvizPlaceholderBody  { color: $text_dim; font-size: 12px; }
+
 QPushButton#btnConnect {
     background-color: $ok_dim; color: #ffffff;
     border: 1px solid $ok;
@@ -704,4 +899,23 @@ QLabel#badgeDisarmed {
 }
 """
 
+
+def build_stylesheet(scale: float = None) -> str:
+    """The full QSS with the palette substituted and every dimension scaled.
+
+    `scale=None` means "whatever ui.scaling resolved at startup", which is what
+    the application wants. An explicit value is for tests and for previewing a
+    factor without touching the global one.
+
+    Only dimensions move. The palette, the selectors and the hairline border
+    widths are identical at every scale - see ui/scaling.scale_qss for exactly
+    which properties are rewritten and why `border:` is not among them.
+    """
+    from ui.scaling import scale_qss
+    return scale_qss(Template(_QSS).substitute(PALETTE), scale)
+
+
+# Unscaled stylesheet at factor 1.0. Kept as a module constant because
+# radxa_monitor.py and the import smoke tests consume it directly, and because
+# it is the honest default for any caller that never initialised a scale.
 DARK_STYLESHEET = Template(_QSS).substitute(PALETTE)

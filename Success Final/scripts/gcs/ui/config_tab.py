@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
 )
 
 from core.settings import GCSSettings, load_settings, save_settings, settings_path
+from ui.scaling import px
 
 # Human captions and, where a value is an enumeration, its allowed set.
 CAPTIONS = {
@@ -61,6 +62,26 @@ CAPTIONS = {
         "batt_warn_pct": "Battery warning (%)", "batt_crit_pct": "Battery critical (%)",
         "vision_stale_s": "Vision stale after (s)",
         "map_stall_s": "Map stalled after (s)"}),
+    "ui": ("DISPLAY", {
+        "scale": "UI scale (0 = auto)",
+        "value_grid_columns": "Value grid columns",
+        "value_grid_font_scale": "Value grid text size"}),
+    "audio": ("AUDIO ALERTS", {
+        "enabled": "Audio alerts",
+        "tones_enabled": "Warning tones",
+        "speech_enabled": "Spoken messages",
+        "min_repeat_s": "Repeat same alert after (s)"}),
+}
+
+# Fields that belong to a settings section but are not typed in by hand here.
+# value_grid_fields is a list of telemetry keys edited directly on the value
+# grid itself; rendering it as a text box would invite someone to hand-write a
+# Python list into a QLineEdit. Hidden fields are carried across a Save
+# untouched - see _read_from_editors, which builds a fresh settings object and
+# would otherwise silently reset the operator's grid layout to the default
+# every time any unrelated setting was saved.
+HIDDEN_FIELDS = {
+    ("ui", "value_grid_fields"),
 }
 
 CHOICES = {
@@ -143,7 +164,8 @@ class ConfigTabWidget(QWidget):
         body.setColumnStretch(1, 1)
 
         obj = getattr(self.settings, section)
-        for r, f in enumerate(fields(obj)):
+        visible = [f for f in fields(obj) if (section, f.name) not in HIDDEN_FIELDS]
+        for r, f in enumerate(visible):
             cap = QLabel(captions.get(f.name, f.name), self)
             cap.setObjectName("fieldSubLabel")
             body.addWidget(cap, r, 0)
@@ -162,7 +184,9 @@ class ConfigTabWidget(QWidget):
         if isinstance(value, bool):
             return QCheckBox("", self)
         edit = QLineEdit(self)
-        edit.setMaximumWidth(220)
+        # Scaled: a fixed 220px cap clipped the stream URL as soon as the
+        # UI scale raised the font above the size it was measured at.
+        edit.setMaximumWidth(px(220))
         return edit
 
     # ── value transfer ──────────────────────────────────────────────
@@ -171,6 +195,8 @@ class ConfigTabWidget(QWidget):
         for section in self.settings.sections():
             obj = getattr(self.settings, section)
             for f in fields(obj):
+                if (section, f.name) in HIDDEN_FIELDS:
+                    continue
                 w = self._editors[f"{section}.{f.name}"]
                 v = getattr(obj, f.name)
                 if isinstance(w, QCheckBox):
@@ -190,6 +216,12 @@ class ConfigTabWidget(QWidget):
             if not is_dataclass(obj):
                 continue
             for f in fields(obj):
+                if (section, f.name) in HIDDEN_FIELDS:
+                    # Preserved verbatim from the live settings: this editor
+                    # never showed it, so it has no opinion about its value.
+                    setattr(obj, f.name,
+                            getattr(getattr(self.settings, section), f.name))
+                    continue
                 w = self._editors[f"{section}.{f.name}"]
                 current = getattr(obj, f.name)
                 if isinstance(w, QCheckBox):

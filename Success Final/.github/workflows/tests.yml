@@ -73,6 +73,12 @@ jobs:
         working-directory: tests
         run: python -m unittest test_video_sources -v
 
+      # The 2D tactical canvas must colour occupancy exactly as RViz does; the
+      # reference file is a dump of RViz's own palette functions.
+      - name: RViz palette parity (2D occupancy canvas)
+        working-directory: tests
+        run: python -m unittest test_rviz_palette -v
+
   lint:
     name: lint (pyflakes via ruff)
     runs-on: ubuntu-latest

@@ -15,7 +15,7 @@ DATA FLOW & INTERFACES:
                    TRANSIENT_LOCAL durability & RELIABLE QoS (catches latched maps).
   * TCP Bridge:    Connects to 172.16.101.84:5765; receives DMAP binary framed packets
                    with zlib-decompressed int8 arrays and JSON origin/metadata.
-  * Qt Signals:    map_received(np.ndarray, resolution, origin_x, origin_y, topic_name),
+  * Qt Signals:    map_received(grid, resolution, origin_x, origin_y, topic, QImage),
                    status_updated(str).
 
 KEY LOGIC & FAILSAFES:
@@ -58,6 +58,8 @@ for _ros_path in [
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from core.map_render import build_map_image
+
 # Make the gcs package root importable even when this module is loaded
 # directly (tests, diagnostics) rather than via drone_gcs.py.
 _GCS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -91,7 +93,13 @@ class ROS2MapListener(QThread):
     """
 
     # Emits: (grid_2d_numpy, resolution_m, origin_x_m, origin_y_m, topic_name)
-    map_received = pyqtSignal(object, float, float, float, str)
+    # (grid, resolution, origin_x, origin_y, topic, QImage). The image is built
+    # here rather than in the canvas: the conversion is a lookup over every cell
+    # and costs ~12 ms on a 25 x 25 m room at 2.5 cm, and it used to run on the
+    # GUI thread at the stream's rate - on the same thread as the 10 Hz OFFBOARD
+    # setpoint pump, whose PX4 deadline is 500 ms. QImage is safe to build on a
+    # worker thread; QPixmap would not be.
+    map_received = pyqtSignal(object, float, float, float, str, object)
     status_updated = pyqtSignal(str)
 
     def __init__(self, tcp_host: str = "172.16.101.84", tcp_port: int = 5765,
@@ -294,8 +302,10 @@ class ROS2MapListener(QThread):
                         self.health.heartbeat()
                         self.health.record_latency((time.perf_counter() - _t0) * 1000.0)
 
+                        image = build_map_image(grid, thin=is_thin)
                         self.map_received.emit(
-                            grid, meta["resolution"], meta["origin_x"], meta["origin_y"], source_name
+                            grid, meta["resolution"], meta["origin_x"],
+                            meta["origin_y"], source_name, image
                         )
                     except Exception as frame_err:
                         self.status_updated.emit(f"TCP Map Bridge: Frame decode error ({frame_err}), continuing...")
@@ -369,7 +379,8 @@ class ROS2MapListener(QThread):
         self.health.heartbeat()
         self.health.record_latency((time.perf_counter() - _t0) * 1000.0)
 
-        self.map_received.emit(grid, res, ox, oy, topic_name)
+        image = build_map_image(grid, thin="thin" in topic_name.lower())
+        self.map_received.emit(grid, res, ox, oy, topic_name, image)
 
     def stop(self):
         """Request graceful shutdown of the worker."""

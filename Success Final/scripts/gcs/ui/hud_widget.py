@@ -37,6 +37,7 @@ from PyQt5.QtGui import QPainter, QColor
 from PyQt5.QtWidgets import QWidget, QSizePolicy
 
 from core.telemetry import TelemetrySnapshot
+from ui.scaling import px
 from ui.video_feed_widget import VideoSink
 
 
@@ -45,7 +46,10 @@ class HUDWidget(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setMinimumSize(540, 380)
+        # A camera pane, not a fixed instrument: it can shrink a long way
+        # before it stops being useful, and a large floor here was forcing
+        # the cockpit's command column into overlap on narrow windows.
+        self.setMinimumSize(px(300), px(220))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Telemetry State - trimmed to only what's actually drawn now

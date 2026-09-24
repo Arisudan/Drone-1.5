@@ -104,7 +104,10 @@ class CLIConsoleWidget(QWidget):
 
         self.cmd_input = CommandLineEdit(self)
         self.cmd_input.setObjectName("cliInput")
-        self.cmd_input.setPlaceholderText("Type command: move 1 0 0 | takeoff 1.5 | arm force | mode offboard | help")
+        # Short enough to render in full at every UI scale. The long form was
+        # always elided mid-word, which made the examples unreadable - and an
+        # unreadable example is worse than a shorter one.
+        self.cmd_input.setPlaceholderText("move 1 0 0  |  takeoff 1.5  |  help")
         self.cmd_input.returnPressed.connect(self._handle_send)
         input_bar.addWidget(self.cmd_input, 1)
 

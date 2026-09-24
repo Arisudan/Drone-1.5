@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QHeaderView, QFileDialog, QAbstractItemView,
 )
 
+from ui.scaling import px
 from core.flight_log import FlightLogger, FlightRecord, summarise
 
 COLUMNS = ["DATE", "DURATION", "DISTANCE", "MAX ALT", "MAX SPEED",
@@ -91,6 +92,9 @@ class LogsTabWidget(QWidget):
         lbl_from.setObjectName("fieldLabel")
         fl.addWidget(lbl_from)
         self.date_from = QDateEdit(self)
+        # QDateEdit's own sizeHint came up a few pixels short of the
+        # rendered date, clipping the year.
+        self.date_from.setMinimumWidth(px(104))
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate.currentDate().addMonths(-3))
         self.date_from.dateChanged.connect(self._apply_filters)
@@ -100,6 +104,7 @@ class LogsTabWidget(QWidget):
         lbl_to.setObjectName("fieldLabel")
         fl.addWidget(lbl_to)
         self.date_to = QDateEdit(self)
+        self.date_to.setMinimumWidth(px(104))
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
         self.date_to.dateChanged.connect(self._apply_filters)

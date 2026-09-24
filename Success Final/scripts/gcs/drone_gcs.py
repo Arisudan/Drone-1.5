@@ -83,17 +83,19 @@ from PyQt5.QtGui import QDoubleValidator
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QFrame, QLabel, QPushButton, QStackedWidget,
-    QSplitter, QProgressBar, QMessageBox, QLineEdit, QComboBox,
-    QGroupBox
+    QSplitter, QProgressBar, QLineEdit, QComboBox,
+    QGroupBox, QScrollArea
 )
 
 from core.telemetry import TelemetrySnapshot
 from core.health import EngineHealth, EngineStatus, get_registry
 from core.execution_tracker import ExecutionTracker
 from core.path_planner import AStarPathPlanner
+from core.planner_worker import PlannerWorker
 from protocol.mavlink_worker import MAVLinkWorker
 from protocol.ros2_map_listener import ROS2MapListener, SlamMapResetWorker
-from ui.styles import DARK_STYLESHEET, PALETTE
+from ui.styles import build_stylesheet
+from ui.scaling import init_scale, enable_high_dpi, px
 from ui.toast import NotificationToast
 from ui.hud_widget import HUDWidget
 from ui.slam_map_widget import SLAMMapWidget
@@ -104,8 +106,12 @@ from ui.top_status_strip import TopStatusStrip
 from ui.sidebar_nav import SidebarNav
 from ui.logs_tab import LogsTabWidget
 from ui.config_tab import ConfigTabWidget
+from ui.value_grid import ValueGridWidget
+from ui.guided_confirm import GuidedConfirmBar
+from ui.shortcuts import install_shortcuts, ShortcutHelpOverlay
 from core.flight_log import FlightLogger
-from core.settings import load_settings, apply_overrides, resolve_rviz_config
+from core.audio import AudioAlerts, Severity
+from core.settings import load_settings, apply_overrides, resolve_rviz_config, save_settings
 
 
 PX4_MODES_LIST = [
@@ -127,17 +133,40 @@ class DroneGCSMainWindow(QMainWindow):
     def __init__(self, settings=None):
         super().__init__()
         self.setWindowTitle("Drone-GCS | Autonomous Industrial Ground Station")
-        self.resize(1400, 860)
+        # Window geometry follows the UI scale: on a display that needs 1.5x
+        # text, a 1400px window holds two-thirds of the content it was sized for.
+        # Both the opening size and the floor are then clamped to the screen -
+        # scaling the floor without clamping it makes the station unusable on
+        # exactly the machines that need scaling most. At 1.4x the raw floor is
+        # 1708x980, which no 1600x900 or 1366x768 laptop can satisfy: Qt would
+        # hold the window larger than the display and put the command column
+        # off-screen with no way to reach it.
+        avail = self._available_screen_size()
+        self.resize(min(px(1400), avail[0]), min(px(860), avail[1]))
         # Lowered from 1150x740: that floor didn't actually fit common smaller laptop
         # panels (1366x768 and especially 1280x720) once OS window-chrome/taskbar space
         # is subtracted, forcing clipping instead of a graceful shrink. 1024x700 still
         # comfortably fits every control - it was headroom, not a real usability need.
-        self.setMinimumSize(1220, 700)
+        self.setMinimumSize(min(px(1220), avail[0]), min(px(700), avail[1]))
 
         # Persisted settings and the flight recorder are built before the UI,
         # because the Config and Logs workspaces are views onto them.
         self.settings = settings if settings is not None else apply_overrides(load_settings())
         self.flight_logger = FlightLogger()
+
+        # Audio alerts. Constructed before the UI so the header's mute control
+        # can reflect whether a backend was actually found, rather than offering
+        # to mute something that was never going to make a sound.
+        self.audio = AudioAlerts(self.settings.audio)
+
+        # Edge-trigger memory for the audio alerts. Every one of these exists to
+        # answer "has this just changed?" rather than "is this true?" - a
+        # condition that is continuously true must sound once, not every tick.
+        self._alert_prev_armed: Optional[bool] = None
+        self._alert_prev_mode: Optional[str] = None
+        self._alert_prev_connected: Optional[bool] = None
+        self._alert_prev_batt_band: Optional[str] = None
+        self._alert_prev_vio_ok: Optional[bool] = None
 
         # Core Engines
         self.worker: Optional[MAVLinkWorker] = None
@@ -178,6 +207,28 @@ class DroneGCSMainWindow(QMainWindow):
         self.latest_map_data: Optional[Tuple[np.ndarray, float, float, float]] = None
         self.path_planner = AStarPathPlanner(robot_radius_m=0.25)
 
+        # One background thread for every A* search, path collision check and
+        # map score in the station. All three used to run on the GUI thread -
+        # 42 to 334 ms for a plan, 34 ms per collision check five times a
+        # second - on the same thread as the 10 Hz OFFBOARD setpoint pump,
+        # whose PX4 deadline is 500 ms. See core/planner_worker.py.
+        self.planner_worker = PlannerWorker(self.path_planner, parent=self)
+        self.planner_worker.collision_ready.connect(self._on_collision_result)
+        # Detour searches come back on the same signal the SLAM tab uses for
+        # goal planning; each handler ignores tokens that are not its own.
+        self.planner_worker.plan_ready.connect(self._on_detour_ready)
+        self.planner_worker.start()
+
+        # Token of the collision check we are waiting for, and the path
+        # generation it belongs to. A verdict about a path that has since been
+        # replaced, aborted or completed must never halt the current one.
+        self._collision_token: Optional[int] = None
+        self._collision_generation: int = -1
+        self._detour_token: Optional[int] = None
+        self._detour_generation: int = -1
+        self._path_generation: int = 0
+        self._collision_requested_at: float = 0.0
+
         # Continuous 10 Hz OFFBOARD Setpoint Pump (prevents PX4 500ms loss timeout)
         self.offboard_pump_timer = QTimer(self)
         self.offboard_pump_timer.setInterval(100)  # 100ms = 10 Hz
@@ -198,9 +249,19 @@ class DroneGCSMainWindow(QMainWindow):
         # the panel can be reset exactly once when tracking ends.
         self._verifier_dirty: bool = False
         self._last_health_sweep: float = 0.0
+        # Link throughput, cached as display text for the value grid.
+        self._rx_rate_text: str = "--"
+        self._tx_rate_text: str = "--"
+        # Mission progress bookkeeping (see _update_mission_progress).
+        self._progress_route_key: Optional[tuple] = None
 
         # Build Industrial UI Shell
         self._init_ui()
+
+        # Keyboard shortcuts. Held on the instance because a QShortcut that gets
+        # garbage collected stops working without any error.
+        self._shortcuts = install_shortcuts(self, self._shortcut_callbacks())
+        self._help_overlay: Optional[ShortcutHelpOverlay] = None
 
         # Toast manager
         self.toast = NotificationToast(self)
@@ -231,6 +292,25 @@ class DroneGCSMainWindow(QMainWindow):
         port = conn.udp_port if conn.protocol == "udp" else conn.tcp_port
         self._connect_to_endpoint(conn.host, port, protocol=conn.protocol)
 
+    @staticmethod
+    def _available_screen_size() -> Tuple[int, int]:
+        """Usable desktop area, minus a little for window chrome and panels.
+
+        Falls back to a conservative 1280x720 when Qt cannot report a screen
+        (offscreen rendering, a headless test), which is small enough to be a
+        safe floor and large enough that the layout still resolves.
+        """
+        try:
+            from PyQt5.QtWidgets import QApplication as _QApp
+            screen = _QApp.primaryScreen()
+            if screen is not None:
+                geo = screen.availableGeometry()
+                if geo.width() > 0 and geo.height() > 0:
+                    return max(640, geo.width() - 40), max(480, geo.height() - 80)
+        except Exception:
+            pass
+        return 1280, 720
+
     def _init_ui(self):
         main_widget = QWidget(self)
         self.setCentralWidget(main_widget)
@@ -245,6 +325,10 @@ class DroneGCSMainWindow(QMainWindow):
         self.top_strip.connect_requested.connect(self._connect_to_endpoint)
         self.top_strip.disconnect_requested.connect(self._disconnect_from_endpoint)
         self.top_strip.network_changed.connect(self._on_network_selected)
+        self.top_strip.mute_toggled.connect(self._on_mute_toggled)
+        # Reflect whether a backend was found at all, so the control is not
+        # offered on a machine where it would do nothing.
+        self.top_strip.set_audio_state(self.audio.muted, self.audio.available)
         root_layout.addWidget(self.top_strip)
 
         # 2. Main Workspace Splitter: SidebarNav (Left) + Stacked Workspaces (Center/Right)
@@ -284,11 +368,16 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_slam.abort_path_requested.connect(self._on_abort_path_requested)
         self.page_slam.altitude_changed.connect(self._on_cruise_altitude_changed)
         self.page_slam.reset_map_requested.connect(self._on_reset_map_requested)
+        self.page_slam.fly_here_requested.connect(self._on_fly_here_requested)
+        self.page_slam.attach_planner_worker(self.planner_worker)
+        self.page_slam.set_map_stale_after(self.settings.alerts.map_stall_s)
         self.stack.addWidget(self.page_slam)
         self._reset_map_worker: Optional[SlamMapResetWorker] = None
 
         # Page 3: Live Motor & Actuator Telemetry
         self.page_motors = MotorWidget(self)
+        self.page_motors.motor_test_requested.connect(self._on_motor_test_requested)
+        self.page_motors.motor_test_stop_requested.connect(self._on_motor_test_stop)
         self.stack.addWidget(self.page_motors)
 
         # Page 4: Diagnostics & Bench Safety
@@ -368,14 +457,14 @@ class DroneGCSMainWindow(QMainWindow):
 
         self.btn_arm = QPushButton("ARM", self)
         self.btn_arm.setObjectName("btnArm")
-        self.btn_arm.setMinimumHeight(34)
-        self.btn_arm.clicked.connect(self._cmd_arm_from_ui)
+        self.btn_arm.setMinimumHeight(px(34))
+        self.btn_arm.clicked.connect(self._request_arm)
         actions_box.addWidget(self.btn_arm, 1)
 
         self.btn_disarm = QPushButton("DISARM", self)
         self.btn_disarm.setObjectName("btnDisarm")
-        self.btn_disarm.setMinimumHeight(34)
-        self.btn_disarm.clicked.connect(self._cmd_disarm)
+        self.btn_disarm.setMinimumHeight(px(34))
+        self.btn_disarm.clicked.connect(self._request_disarm)
         actions_box.addWidget(self.btn_disarm, 1)
 
         # HOLD and LAND move the aircraft, so they carry the navigation colour
@@ -383,13 +472,13 @@ class DroneGCSMainWindow(QMainWindow):
         # which signalled nothing about what it does.
         self.btn_hold = QPushButton("HOLD", self)
         self.btn_hold.setObjectName("btnNav")
-        self.btn_hold.setMinimumHeight(34)
+        self.btn_hold.setMinimumHeight(px(34))
         self.btn_hold.clicked.connect(lambda: self._cmd_mode("AUTO.LOITER"))
         actions_box.addWidget(self.btn_hold, 1)
 
         self.btn_land = QPushButton("LAND", self)
         self.btn_land.setObjectName("btnNav")
-        self.btn_land.setMinimumHeight(34)
+        self.btn_land.setMinimumHeight(px(34))
         self.btn_land.clicked.connect(lambda: self._cmd_mode("AUTO.LAND"))
         actions_box.addWidget(self.btn_land, 1)
 
@@ -414,8 +503,11 @@ class DroneGCSMainWindow(QMainWindow):
         gn.setVerticalSpacing(6)
         gn.setColumnStretch(1, 1)
 
-        FIELD_W = 70      # numeric entry
-        ACTION_W = 120    # dispatch button
+        # Scaled: left as raw pixels these two capped the field and the
+        # dispatch button at their 96 DPI widths while the text inside them
+        # grew, which at 1.35x pushed the NAVIGATION rows into each other.
+        FIELD_W = px(70)       # numeric entry
+        ACTION_W = px(120)     # dispatch button
 
         lbl_to = QLabel("Takeoff Alt (m):", self)
         lbl_to.setObjectName("fieldLabel")
@@ -431,7 +523,7 @@ class DroneGCSMainWindow(QMainWindow):
         self.btn_takeoff.setObjectName("btnNav")
         self.btn_takeoff.setFixedWidth(ACTION_W)
         gn.addWidget(self.btn_takeoff, 0, 2)
-        self.btn_takeoff.clicked.connect(self._cmd_takeoff_from_ui)
+        self.btn_takeoff.clicked.connect(self._request_takeoff)
 
         lbl_yaw = QLabel("Yaw (\u00b0):", self)
         lbl_yaw.setObjectName("fieldLabel")
@@ -447,7 +539,26 @@ class DroneGCSMainWindow(QMainWindow):
         self.btn_yaw.setObjectName("btnNav")
         self.btn_yaw.setFixedWidth(ACTION_W)
         gn.addWidget(self.btn_yaw, 1, 2)
-        self.btn_yaw.clicked.connect(self._cmd_yaw_from_ui)
+        self.btn_yaw.clicked.connect(self._request_yaw)
+
+        # Change altitude in flight. Previously the only way to change height
+        # once airborne was to re-fly a path or land - the takeoff field sets an
+        # altitude for a takeoff, not for a vehicle already in the air.
+        lbl_alt = QLabel("Change Alt:", self)
+        lbl_alt.setObjectName("fieldLabel")
+        gn.addWidget(lbl_alt, 2, 0)
+
+        self.lbl_current_alt = QLabel("-- m AGL", self)
+        self.lbl_current_alt.setObjectName("valueMono")
+        gn.addWidget(self.lbl_current_alt, 2, 1, Qt.AlignLeft)
+
+        self.btn_change_alt = QPushButton("CHANGE ALT", self)
+        self.btn_change_alt.setObjectName("btnNav")
+        self.btn_change_alt.setFixedWidth(ACTION_W)
+        self.btn_change_alt.setToolTip(
+            "Hold position and climb or descend to a new altitude (requires OFFBOARD)")
+        gn.addWidget(self.btn_change_alt, 2, 2)
+        self.btn_change_alt.clicked.connect(self._request_change_alt)
 
         ff.addWidget(grp_nav, 3)
 
@@ -465,13 +576,13 @@ class DroneGCSMainWindow(QMainWindow):
         self.combo_modes = QComboBox(self)
         self.combo_modes.addItems(PX4_MODES_LIST)
         self.combo_modes.setCurrentText("STABILIZED")
-        self.combo_modes.setMinimumHeight(28)
+        self.combo_modes.setMinimumHeight(px(28))
         gm.addWidget(self.combo_modes)
 
         # Neutral on purpose: a mode change is routine, and colouring it would
         # dilute the three colours that do mean something here.
         self.btn_set_mode = QPushButton("SET MODE", self)
-        self.btn_set_mode.setMinimumHeight(28)
+        self.btn_set_mode.setMinimumHeight(px(28))
         self.btn_set_mode.clicked.connect(self._cmd_set_mode_from_ui)
         gm.addWidget(self.btn_set_mode)
 
@@ -492,8 +603,8 @@ class DroneGCSMainWindow(QMainWindow):
         # UI font here and rendered as a tofu box.
         self.btn_kill = QPushButton("EMERGENCY KILL", self)
         self.btn_kill.setObjectName("btnKill")
-        self.btn_kill.setMinimumHeight(32)
-        self.btn_kill.clicked.connect(self._cmd_kill)
+        self.btn_kill.setMinimumHeight(px(32))
+        self.btn_kill.clicked.connect(self._request_kill)
         gs.addWidget(self.btn_kill)
 
         cl.addWidget(grp_safety)
@@ -514,7 +625,7 @@ class DroneGCSMainWindow(QMainWindow):
         state_row.setSpacing(8)
         self.lbl_exec_state = QLabel("IDLE", self)
         self.lbl_exec_state.setObjectName("execBadgeIdle")
-        self.lbl_exec_state.setFixedWidth(84)
+        self.lbl_exec_state.setFixedWidth(px(84))
         self.lbl_exec_state.setAlignment(Qt.AlignCenter)
         state_row.addWidget(self.lbl_exec_state)
 
@@ -524,7 +635,7 @@ class DroneGCSMainWindow(QMainWindow):
 
         self.lbl_exec_elapsed = QLabel("--", self)
         self.lbl_exec_elapsed.setObjectName("valueMono")
-        self.lbl_exec_elapsed.setFixedWidth(52)
+        self.lbl_exec_elapsed.setFixedWidth(px(52))
         self.lbl_exec_elapsed.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         state_row.addWidget(self.lbl_exec_elapsed)
         vl.addLayout(state_row)
@@ -560,7 +671,7 @@ class DroneGCSMainWindow(QMainWindow):
         vl.addLayout(read_row)
 
         self.progress_verif = QProgressBar(self)
-        self.progress_verif.setFixedHeight(14)
+        self.progress_verif.setFixedHeight(px(14))
         self.progress_verif.setTextVisible(True)
         self.progress_verif.setFormat("no displacement target")
         self.progress_verif.setValue(0)
@@ -568,119 +679,91 @@ class DroneGCSMainWindow(QMainWindow):
 
         rl.addWidget(grp_verif)
 
+        # ---- Guided action confirmation ----
+        # Hidden until an action needs confirming. It sits directly above the
+        # console, in the column the operator is already looking at when they
+        # press a command button, rather than as a modal over the instruments.
+        self.confirm_bar = GuidedConfirmBar(self)
+        self.confirm_bar.confirmed.connect(self._on_guided_confirmed)
+        self.confirm_bar.cancelled.connect(self._on_guided_cancelled)
+        rl.addWidget(self.confirm_bar)
+
         # ---- Interactive Terminal / Console Bar ----
         self.console = CLIConsoleWidget(self)
         self.console.command_submitted.connect(self._execute_cli_command)
+        # A floor, because inside the scroll area a stretch factor alone would
+        # let the console collapse to nothing on a short window.
+        self.console.setMinimumHeight(px(150))
         rl.addWidget(self.console, 1)
 
-        splitter.addWidget(right_panel)
+        # The command column scrolls rather than compressing. Every control in
+        # it has a natural height, and when the window is short - a small screen,
+        # or a large UI scale, or both - a QVBoxLayout that cannot honour those
+        # heights does not shrink them, it lets the children overlap. Measured:
+        # at 1.35x in a 1220x700 window, TAKEOFF, ROTATE YAW and CHANGE ALT were
+        # drawn on top of each other and their labels collapsed to zero height.
+        # Overlapping controls on a panel that arms and flies an aircraft is not
+        # an acceptable failure mode; a scrollbar is.
+        right_scroll = QScrollArea(self)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right_panel)
+
+        splitter.addWidget(right_scroll)
         # 7:3 rather than 3:2 - the command column only ever holds fixed-height
         # controls, so the extra width went to padding while the camera pane
         # could use it.
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
-        right_panel.setMaximumWidth(640)
+        right_scroll.setMaximumWidth(px(660))
+        # Below this the NAVIGATION grid's label / field / button triple cannot
+        # lay out side by side, so the splitter is not allowed to go under it.
+        right_scroll.setMinimumWidth(px(430))
 
         layout.addWidget(splitter)
         return page
 
     def _build_diagnostics_page(self) -> QWidget:
-        """Page 4: Detailed Diagnostics & Bench Safety view.
+        """Page 4: the operator-configurable telemetry value grid.
 
-        Nine cards, each a plain frame with its heading and a rule INSIDE the
-        border. QGroupBox paints its title across the top border line, which
-        left every heading straddling the edge of its own box - fine for one
-        group in a control panel, visually broken in a nine-card grid.
+        This replaced nine hardcoded cards holding thirty fixed fields. The
+        fields were a reasonable default and are still the default - see
+        ui.value_grid.DEFAULT_FIELDS, which is exactly that original set in the
+        original reading order - but which thirty numbers matter depends on the
+        session, and previously changing them meant editing this method.
+
+        The saved layout wins over the default, so an operator who has tuned
+        this page keeps it across upgrades that change DEFAULT_FIELDS.
         """
-        page = QWidget(self)
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(16, 12, 16, 12)
-        outer.setSpacing(10)
+        cfg = self.settings.ui
+        self.value_grid = ValueGridWidget(
+            fields=cfg.value_grid_fields or None,
+            columns=cfg.value_grid_columns,
+            font_scale=cfg.value_grid_font_scale,
+            parent=self)
+        self.value_grid.layout_changed.connect(self._on_value_grid_changed)
+        return self.value_grid
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
+    def _on_value_grid_changed(self, keys: list, columns: int,
+                               font_scale: float) -> None:
+        """Persist the grid layout as soon as it is edited.
 
-        # key -> QLabel, so the telemetry tick addresses fields by name instead
-        # of rebuilding a 25-line f-string 30 times a second.
-        self.diag_values: dict = {}
-
-        cards = [
-            ("PX4 AUTOPILOT", [
-                ("sysid", "System / Comp ID"), ("connected", "Link"),
-                ("arm_state", "Arm State"), ("flight_mode", "Flight Mode"),
-                ("flight_time", "Flight Time"),
-            ]),
-            ("LINK THROUGHPUT", [
-                ("rx", "RX rate"), ("tx", "TX rate"),
-            ]),
-            ("D435i VIO / EKF2", [
-                ("vio_health", "VIO Stream"), ("vio_age", "Last Vision Packet"),
-                ("ekf2", "EKF2 Fusion"),
-            ]),
-            ("LOCAL POSITION NED", [
-                ("pos_x", "North (x)"), ("pos_y", "East (y)"),
-                ("pos_z", "Down (z)"), ("alt", "Altitude AGL"),
-            ]),
-            ("BODY VELOCITIES", [
-                ("vx", "Vx"), ("vy", "Vy"), ("vz", "Vz"),
-                ("gspeed", "Ground Speed"),
-            ]),
-            ("MOTOR OUTPUTS", [
-                ("m1", "M1  FR CCW"), ("m2", "M2  RL CCW"),
-                ("m3", "M3  FL CW"), ("m4", "M4  RR CW"),
-            ]),
-            ("ATTITUDE / HEADING", [
-                ("roll", "Roll"), ("pitch", "Pitch"),
-                ("yaw", "Yaw"), ("heading", "Heading"),
-            ]),
-            ("POWER", [
-                ("volt", "Battery"), ("curr", "Current"), ("pct", "Remaining"),
-            ]),
-            ("GPS", [
-                ("sats", "Satellites"), ("hdop", "HDOP"), ("fix", "Fix Type"),
-            ]),
-        ]
-
-        for i, (card_title, rows) in enumerate(cards):
-            card = QFrame(self)
-            card.setProperty("class", "cardFrame")
-            cv = QVBoxLayout(card)
-            cv.setContentsMargins(12, 10, 12, 10)
-            cv.setSpacing(6)
-
-            heading = QLabel(card_title, self)
-            heading.setObjectName("cardHeading")
-            cv.addWidget(heading)
-
-            rule = QFrame(self)
-            rule.setObjectName("hDivider")
-            rule.setFixedHeight(1)
-            cv.addWidget(rule)
-
-            body = QGridLayout()
-            body.setHorizontalSpacing(8)
-            body.setVerticalSpacing(3)
-            body.setColumnStretch(1, 1)
-            for r, (key, caption) in enumerate(rows):
-                cap = QLabel(caption, self)
-                cap.setObjectName("fieldSubLabel")
-                body.addWidget(cap, r, 0)
-                val = QLabel("--", self)
-                val.setObjectName("diagValue")
-                val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                body.addWidget(val, r, 1)
-                self.diag_values[key] = val
-            cv.addLayout(body)
-            cv.addStretch()
-
-            grid.addWidget(card, i // 3, i % 3)
-
-        for c in range(3):
-            grid.setColumnStretch(c, 1)
-        outer.addLayout(grid)
-        outer.addStretch()
-        return page
+        Written immediately rather than on exit: this is a preference the
+        operator just expressed by hand, and losing it to a crash - on a station
+        whose whole job is talking to hardware that sometimes wedges the app -
+        would teach them not to bother arranging it.
+        """
+        self.settings.ui.value_grid_fields = list(keys)
+        self.settings.ui.value_grid_columns = int(columns)
+        self.settings.ui.value_grid_font_scale = float(font_scale)
+        try:
+            save_settings(self.settings)
+        except (ValueError, OSError) as exc:
+            # A settings file that cannot be written is worth reporting but is
+            # not worth interrupting a flight over; the grid still works for
+            # this session.
+            self.console.log_warning(f"Could not save value grid layout: {exc}")
 
     def _build_footer_bar(self) -> QFrame:
         """Vision-engine toggles, laid out as in the Walle GCS control row.
@@ -761,18 +844,21 @@ class DroneGCSMainWindow(QMainWindow):
             self.lbl_footer_note.setText(
                 "Vision engines unavailable - no onboard perception pipeline connected")
 
-    def _diag_set(self, key: str, text: str, colour: str = None) -> None:
-        """Write one diagnostics field, optionally colouring it by state.
+    def _grid_extras(self) -> dict:
+        """Station-measured values the vehicle does not report.
 
-        Colour is applied per-widget rather than through the global sheet
-        because it encodes a live value, not a widget role.
+        Everything the *vehicle* sends is formatted by the value grid's own
+        field registry straight off the telemetry snapshot. These four are
+        different in kind - they describe the ground station and its link - so
+        they are handed in rather than derived.
         """
-        lbl = self.diag_values.get(key)
-        if lbl is None:
-            return
-        lbl.setText(text)
-        lbl.setStyleSheet(
-            f"color: {colour};" if colour else f"color: {PALETTE['text_bright']};")
+        return {
+            "rx": self._rx_rate_text,
+            "tx": self._tx_rate_text,
+            "map_source": self.page_slam.map_source or "none",
+            "audio": ("MUTED" if self.audio.muted else
+                      ("ON" if self.audio.available else "UNAVAILABLE")),
+        }
 
     def _on_view_changed(self, idx: int):
         self.stack.setCurrentIndex(idx)
@@ -855,8 +941,11 @@ class DroneGCSMainWindow(QMainWindow):
 
     def _on_rates_updated(self, rx_rate: float, tx_rate: float):
         # Header no longer carries these - see TopStatusStrip.update_rates.
-        self._diag_set("rx", f"{rx_rate:.1f} msg/s")
-        self._diag_set("tx", f"{tx_rate:.1f} msg/s")
+        # Cached as text rather than pushed straight at a label: the value grid
+        # may or may not currently be showing them, and it reads its own values
+        # once per tick.
+        self._rx_rate_text = f"{rx_rate:.1f} msg/s"
+        self._tx_rate_text = f"{tx_rate:.1f} msg/s"
 
     def _on_statustext_received(self, text: str, severity: int):
         if text.startswith("[GCS CMD]"):
@@ -871,6 +960,12 @@ class DroneGCSMainWindow(QMainWindow):
             self.console.log_error(log_msg)
             self.page_terminal.log_error(log_msg)
             self.toast.show_message(clean_text, "#da3633", 6000)
+            # Keyed on the message text, so one unresolved fault that PX4
+            # re-reports every two seconds is spoken once per rate-limit window
+            # rather than continuously. The worker already collapses identical
+            # STATUSTEXT storms; this is the second line of defence.
+            self.audio.say(clean_text, Severity.from_mavlink(severity),
+                           key=f"status:{clean_text[:40]}")
         elif severity <= 5:
             self.console.log_warning(f"PX4 NOTICE: {clean_text}")
             self.page_terminal.log_warning(f"PX4 NOTICE: {clean_text}")
@@ -885,8 +980,10 @@ class DroneGCSMainWindow(QMainWindow):
         self.TAKEOFF_ALT_MAX_M = cfg.limits.takeoff_alt_max_m
         self.MOVE_MAX_DELTA_M = cfg.limits.move_max_delta_m
         self.page_fpv.txt_url.setText(cfg.video.stream_url)
-        msg = ("Settings saved. Command limits and stream URL applied now; "
-               "connection changes take effect on the next Connect.")
+        self.audio.set_config(cfg.audio)
+        msg = ("Settings saved. Command limits, audio and stream URL applied "
+               "now; connection and UI scale changes take effect on the next "
+               "start.")
         self.console.log_success(msg)
         self.toast.show_message("Settings saved", "#238636", 3000)
 
@@ -944,6 +1041,13 @@ class DroneGCSMainWindow(QMainWindow):
             target=getattr(self.exec_tracker, "req_dist", 0.0) or 0.0,
         )
 
+        if result_code != 0:
+            # Only the rejections are sounded. An accepted command already
+            # announces itself by the aircraft doing what was asked, and a tone
+            # on every ACK would cover the telemetry stream in beeps.
+            self.audio.say(f"{cmd_name} rejected", Severity.WARN,
+                           key=f"ack:{cmd_id}")
+
         if result_code == 0:  # ACCEPTED
             msg = f"[ACCEPTED] PX4 ACK: {cmd_name} ACCEPTED"
             self.console.log_success(msg)
@@ -969,9 +1073,10 @@ class DroneGCSMainWindow(QMainWindow):
         self.console.log_info(f"ROS 2: {msg}")
         self.page_terminal.log_info(f"ROS 2: {msg}")
 
-    def _on_map_received_dispatch(self, grid: np.ndarray, res: float, ox: float, oy: float, source: str):
+    def _on_map_received_dispatch(self, grid: np.ndarray, res: float, ox: float,
+                                  oy: float, source: str, image=None):
         self.latest_map_data = (grid, res, ox, oy)
-        self.page_slam.on_ros2_map_received(grid, res, ox, oy, source)
+        self.page_slam.on_ros2_map_received(grid, res, ox, oy, source, image)
 
     def _on_telemetry_updated(self, t: TelemetrySnapshot):
         self.last_telemetry = t
@@ -1040,6 +1145,8 @@ class DroneGCSMainWindow(QMainWindow):
                 self.console.log_error(res["status_msg"])
                 self.page_terminal.log_error(res["status_msg"])
                 self.toast.show_message(res["status_msg"], "#da3633")
+                self.audio.say("Command did not execute", Severity.WARN,
+                               key="exec_failed")
         elif self._verifier_dirty:
             # Tracking just ended. Clear the readouts so stale numbers are never
             # mistaken for a live measurement.
@@ -1076,6 +1183,8 @@ class DroneGCSMainWindow(QMainWindow):
                 self.toast.show_message(
                     f"{_snap.name} stalled - no output for "
                     f"{_snap.stall_after_s:.1f}s", "#da3633", 5000)
+                self.audio.say(f"{_snap.name} stalled", Severity.CRITICAL,
+                               key=f"stall:{_snap.name}")
         if self.path_awaiting_climb and self.worker:
             climb_threshold = max(0.5, abs(self.cruise_z) * 0.80)
             if t.altitude >= climb_threshold:
@@ -1102,6 +1211,7 @@ class DroneGCSMainWindow(QMainWindow):
                     )
                     self.page_terminal.log_error(f"❌ CLIMB TIMEOUT: Reached only {t.altitude:.2f}m. Halting in AUTO.LOITER.")
                     self.toast.show_message("Climb Timeout! Halting in LOITER", "#da3633", 6000)
+                    self.audio.say("Climb timeout, holding", Severity.CRITICAL, key="climb")
                 else:
                     # Hold vertical climb setpoint directly over initial position
                     self.worker.move_to_waypoint(
@@ -1115,48 +1225,30 @@ class DroneGCSMainWindow(QMainWindow):
                 self.console.log_warning("⚠️ LOITER WATCHDOG: Drone has been holding in AUTO.LOITER for 45s! Command RESUME or LAND.")
                 self.toast.show_message("Holding in LOITER for 45s! Action needed", "#d29922", 6000)
 
-        # 5. Live Dynamic Collision Avoidance on Active Flight Path
+        # 5. Live collision avoidance on the active path.
+        #
+        # This only *asks*. The check itself costs ~34 ms on a 25 x 25 m grid
+        # and used to run right here, five times a second, on the GUI thread -
+        # 170 ms of every second blocked, on the same thread as the OFFBOARD
+        # setpoint pump that PX4 drops the aircraft out of OFFBOARD for if it
+        # goes quiet for 500 ms. The verdict now arrives in
+        # _on_collision_result. Only one request is ever outstanding: asking
+        # again while the last answer is still coming would queue up verdicts
+        # about where the vehicle used to be.
         if (
             self.path_in_progress
             and self.active_waypoints
             and self.latest_map_data is not None
+            and self._collision_token is None
             and (now - self.last_collision_check_time > 0.20)
         ):
             self.last_collision_check_time = now
+            self._collision_requested_at = now
             grid, res, ox, oy = self.latest_map_data
             remaining_wpts = self.active_waypoints[self.current_wpt_idx:]
-            is_blocked, col_pt, col_dist = self.path_planner.check_path_collision(
-                grid, res, ox, oy, remaining_wpts, (t.x, t.y), lookahead_m=1.5
-            )
-            if is_blocked:
-                # Obstacle detected directly in path!
-                self.worker.set_mode("AUTO.LOITER")
-                self.path_in_progress = False
-                self.path_paused = True
-                self.loiter_pause_start_time = now
-                self._loiter_warned = False
-                self.page_slam.set_executing_state(False, paused=True)
-
-                self.console.log_error(
-                    f"🚨 COLLISION ALERT: Obstacle detected {col_dist:.2f}m ahead on flight path! Halting in AUTO.LOITER."
-                )
-                self.page_terminal.log_error(f"🚨 COLLISION ALERT: Obstacle {col_dist:.2f}m ahead! Switched to AUTO.LOITER.")
-                self.toast.show_message(f"Obstacle Ahead ({col_dist:.2f}m)! Drone Halted", "#da3633", 6000)
-
-                # Attempt automatic detour replanning to final goal
-                final_goal = self.active_waypoints[-1]
-                detour = self.path_planner.plan(grid, res, ox, oy, (t.x, t.y), final_goal)
-                if detour["success"]:
-                    self.console.log_success(
-                        f"🔄 DETOUR READY: Clear path found ({len(detour['waypoints'])} WPTs, {detour['total_distance_m']:.2f}m). "
-                        "Click '▶ RESUME PATH' on SLAM screen to fly detour."
-                    )
-                    self.page_slam.canvas.planned_waypoints = detour["waypoints"]
-                    self.page_slam.canvas.update()
-                    self.active_waypoints = list(detour["waypoints"])
-                    self.current_wpt_idx = 0
-                else:
-                    self.console.log_warning("No clear detour found. Maintain hold or command manual RTL / LAND.")
+            self._collision_generation = self._path_generation
+            self._collision_token = self.planner_worker.request_collision_check(
+                grid, res, ox, oy, remaining_wpts, (t.x, t.y), lookahead_m=1.5)
 
         # 6. Sequential Waypoint Navigation along Planned A* Path with Tangent Yaw
         if self.path_in_progress and self.active_waypoints and self.worker:
@@ -1168,6 +1260,7 @@ class DroneGCSMainWindow(QMainWindow):
                 self.console.log_success(
                     f"Reached Waypoint W{self.current_wpt_idx+1} ({curr_target[0]:+.2f}, {curr_target[1]:+.2f})"
                 )
+                self.audio.alert(Severity.INFO, key=None)
                 self.current_wpt_idx += 1
                 if self.current_wpt_idx < len(self.active_waypoints):
                     next_wpt = self.active_waypoints[self.current_wpt_idx]
@@ -1189,75 +1282,213 @@ class DroneGCSMainWindow(QMainWindow):
                 else:
                     self.path_in_progress = False
                     self.path_paused = False
+                    self._begin_path_generation()
                     self.offboard_pump_timer.stop()
                     self.page_slam.set_executing_state(False, paused=False)
                     self.console.log_success("MISSION COMPLETE: Drone arrived at final Goal Pose!")
                     self.page_terminal.log_success("MISSION COMPLETE: Drone arrived at final Goal Pose!")
                     self.toast.show_message("Goal Pose Reached!", "#238636", 5000)
+                    self.page_slam.progress.mark_complete()
+                    self.audio.say("Goal reached", Severity.OK, key="mission")
 
-        # 5. Update Diagnostics Tab
-        OK, WARN, BAD = PALETTE["ok"], PALETTE["warn"], PALETTE["danger"]
-        DIM = PALETTE["text_dim"]
+        # 5. Diagnostics workspace: one call, because which values are on
+        # screen is now the operator's choice rather than this method's.
+        self.value_grid.update_values(t, self._grid_extras())
 
-        self._diag_set("sysid", f"{t.system_id} / {t.component_id}")
-        self._diag_set("connected", "CONNECTED" if t.connected else "NO LINK",
-                       OK if t.connected else BAD)
-        # Armed is red, not green: green would read as "safe" for the one state
-        # in which the props can actually spin.
-        self._diag_set("arm_state", "ARMED" if t.armed else "DISARMED",
-                       BAD if t.armed else DIM)
-        self._diag_set("flight_mode", t.flight_mode or "--",
-                       PALETTE["accent"] if t.connected else DIM)
-        self._diag_set("flight_time", f"{int(t.flight_time_sec)} s")
+        # 6. Current altitude, next to the CHANGE ALT control it is the
+        # starting point for.
+        self.lbl_current_alt.setText(f"{t.altitude:.2f} m AGL")
 
-        self._diag_set("vio_health",
-                       "LOCKED (10 Hz)" if t.d435i_vio_health else "NO VISION DATA",
-                       OK if t.d435i_vio_health else BAD)
-        self._diag_set("vio_age",
-                       f"{t.d435i_vio_age:.1f} s ago" if t.last_vision_time else "never",
-                       OK if t.d435i_vio_health else BAD)
-        self._diag_set("ekf2",
-                       "ACTIVE (indoor lock)" if t.ekf2_vision_fused else "WAITING",
-                       OK if t.ekf2_vision_fused else WARN)
+        # 7. Mission progress strip and the motor-test interlocks, both of
+        # which are pure functions of state already computed above.
+        self._update_mission_progress(t)
+        self.page_motors.set_vehicle_state(
+            connected=t.connected, armed=t.armed, airborne=t.is_airborne)
 
-        pos_col = BAD if t.position_stale else None
-        self._diag_set("pos_x", f"{t.x:+.3f} m", pos_col)
-        self._diag_set("pos_y", f"{t.y:+.3f} m", pos_col)
-        self._diag_set("pos_z", f"{t.z:+.3f} m", pos_col)
-        self._diag_set("alt", f"{t.altitude:.3f} m", pos_col)
-
-        self._diag_set("vx", f"{t.vx:+.2f} m/s")
-        self._diag_set("vy", f"{t.vy:+.2f} m/s")
-        self._diag_set("vz", f"{t.vz:+.2f} m/s")
-        self._diag_set("gspeed", f"{t.ground_speed:.2f} m/s")
-
-        # Thresholds mirror the motor widget's own legend: idle 1000-1100,
-        # saturation above 1920.
-        for i, key in enumerate(("m1", "m2", "m3", "m4")):
-            pwm = t.motor_pwms[i] if i < len(t.motor_pwms) else 0
-            col = WARN if pwm > 1920 else (OK if pwm > 1100 else DIM)
-            self._diag_set(key, f"{pwm} \u00b5s", col)
-
-        self._diag_set("roll", f"{t.roll:+.1f}\u00b0")
-        self._diag_set("pitch", f"{t.pitch:+.1f}\u00b0")
-        self._diag_set("yaw", f"{t.yaw:+.1f}\u00b0")
-        self._diag_set("heading", f"{t.heading:.1f}\u00b0")
-
-        batt_col = OK if t.battery_percent > 35 else (WARN if t.battery_percent > 20 else BAD)
-        self._diag_set("volt", f"{t.battery_voltage:.2f} V", batt_col)
-        self._diag_set("curr", f"{t.battery_current:.1f} A")
-        self._diag_set("pct", f"{t.battery_percent}%", batt_col)
-
-        # GPS is informational indoors - this airframe flies on vision - so a
-        # missing fix is dimmed, not flagged red.
-        fix_col = OK if t.fix_type in ("3D_FIX", "DGPS", "RTK_FLOAT", "RTK_FIXED") else DIM
-        self._diag_set("sats", str(t.satellites), fix_col)
-        self._diag_set("hdop", f"{t.hdop:.1f}")
-        self._diag_set("fix", t.fix_type, fix_col)
+        # 8. Audio alerts for state transitions.
+        self._update_audio_alerts(t)
 
     # -------------------------------------------------------------------------
     # Command Dispatch Helpers
     # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Guided Action Confirmation  (ui/guided_confirm.GuidedConfirmBar)
+    # -------------------------------------------------------------------------
+
+    def _request_arm(self):
+        """ARM used to dispatch on a single click, with no confirmation at all -
+        despite this module's own docstring claiming a dual-stage modal. It now
+        goes through the same slide-to-confirm gesture as every other guarded
+        action. Bench force-arm remains terminal-only (`arm force`)."""
+        if not self._require_link("arm"):
+            return
+        self.confirm_bar.request(
+            "arm", "ARM MOTORS", danger=True,
+            detail="Propellers will be live. Confirm the area is clear.",
+            confirm_text="Slide to arm")
+
+    def _request_disarm(self):
+        """Disarm. Airborne, this is redirected to AUTO.LAND by _cmd_disarm -
+        the confirmation says so, because 'disarm' and 'land' are different
+        enough that the operator should know which one they are getting."""
+        if not self._require_link("disarm"):
+            return
+        if self.last_telemetry.is_airborne:
+            self.confirm_bar.request(
+                "disarm", "DISARM (AIRBORNE)", danger=True,
+                detail="Vehicle is airborne: this commands AUTO.LAND and "
+                       "disarms on touchdown. Use EMERGENCY KILL for an "
+                       "immediate cutoff.",
+                confirm_text="Slide to land and disarm")
+        else:
+            self.confirm_bar.request(
+                "disarm", "DISARM", danger=True,
+                detail="Vehicle is on the ground.",
+                confirm_text="Slide to disarm")
+
+    def _request_takeoff(self):
+        """Takeoff, with the altitude on a slider bounded by settings.limits."""
+        if not self._require_link("takeoff"):
+            return
+        try:
+            seed = float(self.ent_takeoff_alt.text().strip())
+        except ValueError:
+            seed = self.settings.slam.cruise_altitude_m
+        seed = max(self.TAKEOFF_ALT_MIN_M, min(self.TAKEOFF_ALT_MAX_M, seed))
+        self.confirm_bar.request(
+            "takeoff", "TAKEOFF", value_label="Altitude AGL",
+            vmin=self.TAKEOFF_ALT_MIN_M, vmax=self.TAKEOFF_ALT_MAX_M,
+            vinit=seed, unit="m", step=0.1,
+            detail="Vehicle must already be armed.",
+            confirm_text="Slide to take off")
+
+    def _request_yaw(self):
+        if not self._require_link("rotate yaw"):
+            return
+        try:
+            seed = float(self.ent_yaw.text().strip())
+        except ValueError:
+            seed = 90.0
+        self.confirm_bar.request(
+            "yaw", "ROTATE YAW", value_label="Rotation",
+            vmin=-180.0, vmax=180.0, vinit=max(-180.0, min(180.0, seed)),
+            unit="\u00b0", step=5.0,
+            detail="Relative rotation from the current heading. Requires "
+                   "OFFBOARD and an airborne vehicle.",
+            confirm_text="Slide to rotate")
+
+    def _request_change_alt(self):
+        """Climb or descend in place to a new altitude."""
+        if not self._require_link("change altitude"):
+            return
+        current = abs(self.last_telemetry.altitude)
+        seed = max(self.TAKEOFF_ALT_MIN_M, min(self.TAKEOFF_ALT_MAX_M,
+                                               current if current > 0.05 else 1.0))
+        self.confirm_bar.request(
+            "change_alt", "CHANGE ALTITUDE", value_label="Target AGL",
+            vmin=self.TAKEOFF_ALT_MIN_M, vmax=self.TAKEOFF_ALT_MAX_M,
+            vinit=seed, unit="m", step=0.1,
+            detail=f"Currently {current:.2f} m AGL. Holds the present position "
+                   f"and changes height only. Requires OFFBOARD.",
+            confirm_text="Slide to change altitude")
+
+    def _request_kill(self):
+        """Emergency kill. The confirmation is a drag, not a modal with a
+        default button one Return keypress away."""
+        self.confirm_bar.request(
+            "kill", "EMERGENCY MOTOR KILL", danger=True,
+            detail="Cuts all motor outputs immediately. If the vehicle is "
+                   "airborne it will fall. There is no recovery from this.",
+            confirm_text="Slide to cut motors")
+
+    def _request_abort_path(self):
+        if not self.path_in_progress and not self.path_paused:
+            self.console.log_info("No path is executing - nothing to abort.")
+            return
+        self.confirm_bar.request(
+            "abort_path", "ABORT PATH", danger=True,
+            detail="Stops the path and commands AUTO.LAND.",
+            confirm_text="Slide to abort and land")
+
+    def _require_link(self, what: str) -> bool:
+        """Refuse to even offer a confirmation with no link. Showing a confirm
+        bar for a command that cannot be sent trains the operator to confirm
+        things that do nothing."""
+        if self.worker and self.worker.isRunning():
+            return True
+        msg = f"Cannot {what}: not connected to vehicle"
+        self.console.log_error(msg)
+        self.page_terminal.log_error(msg)
+        self.toast.show_message(msg, "#da3633")
+        return False
+
+    def _on_guided_confirmed(self, action: str, value: float):
+        """Single dispatch point for every confirmed guided action.
+
+        Each branch calls the same _cmd_* method the direct control always
+        called, so every interlock in those methods still applies. Confirmation
+        gates the request; it does not replace the checks.
+        """
+        if action == "arm":
+            self._cmd_arm(force=False)
+        elif action == "disarm":
+            self._cmd_disarm()
+        elif action == "takeoff":
+            self.ent_takeoff_alt.setText(f"{value:.2f}")
+            self._cmd_takeoff(value)
+        elif action == "yaw":
+            self.ent_yaw.setText(f"{value:.1f}")
+            self._cmd_yaw(value)
+        elif action == "change_alt":
+            self._cmd_change_altitude(value)
+        elif action == "kill":
+            self._cmd_kill()
+        elif action == "abort_path":
+            self._on_abort_path_requested()
+
+    def _on_guided_cancelled(self, action: str):
+        self.console.log_info(f"{action.replace('_', ' ').upper()} cancelled.")
+
+    def _cmd_change_altitude(self, altitude_m: float):
+        """Hold the current horizontal position and move to a new altitude.
+
+        Uses the same OFFBOARD setpoint path as a waypoint, with the north/east
+        components pinned to where the vehicle already is, so it is a pure climb
+        or descent rather than a move that happens to change height.
+        """
+        if not self._require_link("change altitude"):
+            return
+        t = self.last_telemetry
+        if not t.is_airborne:
+            msg = "Cannot change altitude: not airborne - arm and take off first."
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Cannot change alt: not airborne", "#da3633", 4000)
+            return
+        if t.flight_mode != "OFFBOARD":
+            msg = (f"Cannot change altitude: current mode is "
+                   f"{t.flight_mode or 'UNKNOWN'}, not OFFBOARD. Switch to "
+                   "OFFBOARD manually (Mode dropdown -> SET MODE) first.")
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message("Not in OFFBOARD - switch manually first",
+                                    "#da3633", 4000)
+            return
+
+        target_z = -abs(altitude_m)
+        self.cruise_z = target_z
+        self.console.log_cmd(
+            f"Changing altitude to {abs(target_z):.2f} m AGL "
+            f"(holding N {t.x:+.2f}, E {t.y:+.2f})...")
+        self.page_terminal.log_cmd(f"Changing altitude to {abs(target_z):.2f} m AGL...")
+        self.worker.move_to_waypoint(t.x, t.y, z=target_z, yaw_deg=t.heading)
+        self.offboard_pump_timer.start()
+        self.toast.show_message(f"Altitude -> {abs(target_z):.2f} m", "#1f6feb")
+        self.exec_tracker.start_tracking(
+            f"altitude {abs(target_z):.2f}m", t.x, t.y, t.z,
+            cur_armed=t.armed, cur_mode=t.flight_mode,
+            target_dist=abs(target_z - t.z))
 
     def _cmd_arm_from_ui(self):
         # The ARM button is always a normal arm. Bench force-arm is reachable
@@ -1288,6 +1519,7 @@ class DroneGCSMainWindow(QMainWindow):
             return
 
         # Completely reset active navigation and waypoint pump
+        self._begin_path_generation()
         self.offboard_pump_timer.stop()
         self.path_in_progress = False
         self.path_paused = False
@@ -1499,30 +1731,33 @@ class DroneGCSMainWindow(QMainWindow):
             )
 
     def _cmd_kill(self):
-        reply = QMessageBox.critical(
-            self,
-            "EMERGENCY MOTOR KILL",
-            "WARNING: This will immediately cut all motor outputs!\nAre you sure you want to terminate flight?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            # Completely reset active navigation and waypoint pump
-            self.offboard_pump_timer.stop()
-            self.path_in_progress = False
-            self.path_paused = False
-            self.path_awaiting_climb = False
-            self.climb_start_time = 0.0
-            self.active_waypoints = []
-            self.current_wpt_idx = 0
-            self.page_slam.set_executing_state(False, paused=False)
-            self.page_slam.canvas.clear_goal()
+        """Execute the kill. Confirmation is the caller's job.
 
-            if self.worker and self.worker.isRunning():
-                self.worker.emergency_kill()
-                self.console.log_error("!!! EMERGENCY MOTOR KILL EXECUTED !!!")
-                self.page_terminal.log_error("!!! EMERGENCY MOTOR KILL EXECUTED !!!")
-                self.toast.show_message("EMERGENCY KILL SENT", "#da3633", 5000)
+        The Yes/No QMessageBox that used to live here is gone: its default
+        button was one Return keypress from cutting the motors of a flying
+        aircraft. _request_kill now gates this behind a deliberate drag. The
+        terminal's `kill` command reaches this directly, which is the documented
+        behaviour of a typed emergency command.
+        """
+        # Completely reset active navigation and waypoint pump
+        self.offboard_pump_timer.stop()
+        self.path_in_progress = False
+        self.path_paused = False
+        self.path_awaiting_climb = False
+        self.climb_start_time = 0.0
+        self.active_waypoints = []
+        self.current_wpt_idx = 0
+        self.page_slam.set_executing_state(False, paused=False)
+        self.page_slam.canvas.clear_goal()
+        self.page_slam.progress.set_state("ABORTED")
+        self.page_motors.stop_motor_tests()
+
+        if self.worker and self.worker.isRunning():
+            self.worker.emergency_kill()
+            self.console.log_error("!!! EMERGENCY MOTOR KILL EXECUTED !!!")
+            self.page_terminal.log_error("!!! EMERGENCY MOTOR KILL EXECUTED !!!")
+            self.toast.show_message("EMERGENCY KILL SENT", "#da3633", 5000)
+            self.audio.say("Emergency kill", Severity.ALARM, key="kill")
 
     # -------------------------------------------------------------------------
     # A* Path Planning Execution & Flight Safety Handlers
@@ -1609,6 +1844,7 @@ class DroneGCSMainWindow(QMainWindow):
 
     def _dispatch_path_start(self, waypoints: list):
         """Dispatches the first waypoint with tangent yaw alignment."""
+        self._begin_path_generation()
         self.active_waypoints = list(waypoints)
         self.current_wpt_idx = 0
         self.path_in_progress = True
@@ -1633,6 +1869,20 @@ class DroneGCSMainWindow(QMainWindow):
         self.console.log_cmd(
             f"Dispatching W1: ({first_wpt[0]:+.2f}m, {first_wpt[1]:+.2f}m) alt={-self.cruise_z:.2f}m yaw={yaw_deg:+.1f}°"
         )
+
+    def _begin_path_generation(self) -> int:
+        """Start a new path 'generation'.
+
+        Collision verdicts and detour plans are computed on a background thread
+        and can land after the path they were about has gone away. Each carries
+        the generation it was requested under; a mismatch means the answer is
+        about a path that no longer exists, and acting on it could halt a good
+        path over an obstacle that is no longer ahead of the aircraft.
+        """
+        self._path_generation += 1
+        self._collision_token = None
+        self._detour_token = None
+        return self._path_generation
 
     def _pump_active_waypoint_setpoint(self):
         """Continuously stream active waypoint setpoint at 10 Hz to satisfy PX4 500ms timeout."""
@@ -1780,6 +2030,7 @@ class DroneGCSMainWindow(QMainWindow):
 
     def _on_abort_path_requested(self):
         """Called when user clicks 'ABORT & LAND' in Tactical SLAM tab."""
+        self._begin_path_generation()
         self.offboard_pump_timer.stop()
         self.path_in_progress = False
         self.path_paused = False
@@ -1864,6 +2115,356 @@ class DroneGCSMainWindow(QMainWindow):
         else:
             self.console.log_warning(f"Unknown command: '{action}'. Type 'help' for instructions.")
 
+    # -------------------------------------------------------------------------
+    # Live collision avoidance  (answers from core/planner_worker.PlannerWorker)
+    # -------------------------------------------------------------------------
+
+    def _on_collision_result(self, token: int, is_blocked: bool,
+                             collision_point, distance_m: float) -> None:
+        """Act on a collision verdict, if it is still about the current path.
+
+        The generation check is the important part. A verdict computed against
+        a path that has since been aborted, completed or replaced by a detour
+        would otherwise halt a perfectly good new path on the strength of an
+        obstacle that is no longer in front of the aircraft.
+        """
+        if token != self._collision_token:
+            return
+        self._collision_token = None
+
+        if getattr(self, "_collision_generation", None) != self._path_generation:
+            return
+        if not self.path_in_progress or not self.active_waypoints:
+            return
+        if not is_blocked:
+            return
+
+        now = time.time()
+        t = self.last_telemetry
+        self.worker.set_mode("AUTO.LOITER")
+        self.path_in_progress = False
+        self.path_paused = True
+        self.loiter_pause_start_time = now
+        self._loiter_warned = False
+        self.page_slam.set_executing_state(False, paused=True)
+
+        self.console.log_error(
+            f"🚨 COLLISION ALERT: Obstacle detected {distance_m:.2f}m ahead on "
+            "flight path! Halting in AUTO.LOITER.")
+        self.page_terminal.log_error(
+            f"🚨 COLLISION ALERT: Obstacle {distance_m:.2f}m ahead! Switched to AUTO.LOITER.")
+        self.toast.show_message(
+            f"Obstacle Ahead ({distance_m:.2f}m)! Drone Halted", "#da3633", 6000)
+        self.audio.say("Obstacle ahead, holding", Severity.ALARM, key="collision")
+
+        # Look for a way round, also off this thread. The aircraft is already
+        # holding, so the answer can take as long as it takes.
+        if self.latest_map_data is None:
+            return
+        grid, res, ox, oy = self.latest_map_data
+        final_goal = self.active_waypoints[-1]
+        self._detour_generation = self._path_generation
+        self._detour_token = self.planner_worker.request_plan(
+            grid, res, ox, oy, (t.x, t.y), final_goal)
+        self.console.log_info("Searching for a detour around the obstacle...")
+
+    def _on_detour_ready(self, token: int, result) -> None:
+        """Adopt a detour, if it is still wanted."""
+        if token != getattr(self, "_detour_token", None):
+            return
+        self._detour_token = None
+        if getattr(self, "_detour_generation", None) != self._path_generation:
+            return
+        if result and result.get("success"):
+            waypoints = result["waypoints"]
+            self.console.log_success(
+                f"🔄 DETOUR READY: Clear path found ({len(waypoints)} WPTs, "
+                f"{result['total_distance_m']:.2f}m). Press RESUME to fly it.")
+            self.page_slam.canvas.planned_waypoints = waypoints
+            self.page_slam.canvas.update()
+            self.active_waypoints = list(waypoints)
+            self.current_wpt_idx = 0
+            self._progress_route_key = None      # the route changed; re-seed
+        else:
+            self.console.log_warning(
+                "No clear detour found. Maintain hold or command manual RTL / LAND.")
+
+    # -------------------------------------------------------------------------
+    # Mission Progress  (ui/mission_progress.MissionProgressBar)
+    # -------------------------------------------------------------------------
+
+    def _progress_state(self) -> str:
+        """Translate the window's navigation flags into one operator-facing word."""
+        if self.path_awaiting_climb:
+            return "CLIMBING"
+        if self.path_paused:
+            # The collision handler pauses and leaves path_in_progress False,
+            # which is what distinguishes an obstacle hold from an operator
+            # pause - worth showing differently, because one of them means
+            # something is in the way.
+            return "PAUSED" if self.path_in_progress else "OBSTACLE HOLD"
+        if self.path_in_progress:
+            return "EN ROUTE"
+        return "STAGED"
+
+    def _update_mission_progress(self, t: TelemetrySnapshot) -> None:
+        """Feed the route strip from state the tick has already computed."""
+        strip = self.page_slam.progress
+        waypoints = self.active_waypoints or self.pending_path_waypoints
+        if not waypoints:
+            if strip.isVisible():
+                strip.clear()
+            self._progress_route_key = None
+            return
+
+        # Re-seed only when the route itself changes. A detour replaces the
+        # waypoint list mid-flight, and the strip has to restart against the new
+        # one rather than keep measuring against the route that was blocked.
+        key = (len(waypoints), waypoints[0], waypoints[-1])
+        if key != self._progress_route_key:
+            self._progress_route_key = key
+            strip.set_route(waypoints, origin=(t.x, t.y), state=self._progress_state())
+
+        strip.update_progress(self.current_wpt_idx, (t.x, t.y), t.ground_speed,
+                              state=self._progress_state())
+
+    # -------------------------------------------------------------------------
+    # Audio Alerts  (core/audio.AudioAlerts)
+    # -------------------------------------------------------------------------
+
+    def _update_audio_alerts(self, t: TelemetrySnapshot) -> None:
+        """Sound the state transitions worth hearing without looking.
+
+        Every branch here is edge-triggered against the previous tick. A
+        condition that is continuously true - a flat battery, a dead link -
+        must announce itself once and then be quiet, or the operator mutes the
+        station and loses the alerts that matter.
+        """
+        # Link
+        if self._alert_prev_connected is not None and t.connected != self._alert_prev_connected:
+            if t.connected:
+                self.audio.say("Link restored", Severity.OK, key="link")
+            else:
+                self.audio.say("Link lost", Severity.CRITICAL, key="link")
+        self._alert_prev_connected = t.connected
+
+        if not t.connected:
+            # Everything below describes a vehicle we are no longer hearing
+            # from; announcing stale state would be worse than silence.
+            return
+
+        # Arming
+        if self._alert_prev_armed is not None and t.armed != self._alert_prev_armed:
+            if t.armed:
+                self.audio.say("Armed", Severity.WARN, key="arm_state")
+            else:
+                self.audio.say("Disarmed", Severity.OK, key="arm_state")
+        self._alert_prev_armed = t.armed
+
+        # Flight mode
+        mode = t.flight_mode or ""
+        if self._alert_prev_mode is not None and mode and mode != self._alert_prev_mode:
+            spoken = mode.replace("AUTO.", "").replace("_", " ").title()
+            self.audio.say(spoken, Severity.INFO, key="mode")
+        self._alert_prev_mode = mode
+
+        # Battery, by band rather than by percentage, so a value oscillating
+        # across a threshold cannot produce a stream of warnings.
+        alerts = self.settings.alerts
+        pct = t.battery_percent
+        if pct <= 0:
+            band = "unknown"
+        elif pct <= alerts.batt_crit_pct:
+            band = "critical"
+        elif pct <= alerts.batt_warn_pct:
+            band = "warn"
+        else:
+            band = "ok"
+        if self._alert_prev_batt_band is not None and band != self._alert_prev_batt_band:
+            if band == "critical":
+                self.audio.say(f"Battery critical, {pct} percent",
+                               Severity.ALARM, key="battery")
+            elif band == "warn":
+                self.audio.say(f"Battery low, {pct} percent",
+                               Severity.WARN, key="battery")
+        self._alert_prev_batt_band = band
+
+        # Vision, but only while airborne: losing VIO on the bench is normal
+        # and constant, and announcing it there would make the alert worthless
+        # in the air, which is the only place it matters.
+        vio_ok = t.d435i_vio_health or t.ekf2_vision_fused
+        if self._alert_prev_vio_ok is not None and vio_ok != self._alert_prev_vio_ok:
+            if not vio_ok and t.is_airborne:
+                self.audio.say("Vision lost", Severity.CRITICAL, key="vision")
+            elif vio_ok and t.is_airborne:
+                self.audio.say("Vision restored", Severity.OK, key="vision")
+        self._alert_prev_vio_ok = vio_ok
+
+    def _on_mute_toggled(self, muted: bool) -> None:
+        """The header control. Ctrl+M routes through _toggle_mute instead, and
+        both end up calling set_audio_state so the button can never disagree
+        with the alert service."""
+        self.audio.set_muted(muted)
+        self.top_strip.set_audio_state(self.audio.muted, self.audio.available)
+        self.console.log_info(
+            f"Audio alerts {'muted' if self.audio.muted else 'unmuted'}.")
+
+    def _toggle_mute(self) -> None:
+        muted = self.audio.toggle_muted()
+        self.top_strip.set_audio_state(muted, self.audio.available)
+        state = "muted" if muted else "unmuted"
+        self.console.log_info(f"Audio alerts {state}.")
+        self.toast.show_message(f"Audio {state}",
+                                "#d29922" if muted else "#238636", 2000)
+        if not muted:
+            self.audio.alert(Severity.OK)
+
+    # -------------------------------------------------------------------------
+    # Keyboard Shortcuts  (ui/shortcuts)
+    # -------------------------------------------------------------------------
+
+    def _shortcut_callbacks(self) -> dict:
+        """Map ui.shortcuts action names to callables.
+
+        Every destructive action points at a _request_* method, never a _cmd_*
+        one, so a keystroke opens the confirmation rather than committing. There
+        is deliberately no entry for the emergency kill.
+        """
+        callbacks = {
+            "toggle_link": self._toggle_link,
+            "arm": self._request_arm,
+            "disarm": self._request_disarm,
+            "takeoff": self._request_takeoff,
+            "land": lambda: self._cmd_mode("AUTO.LAND"),
+            "hold": lambda: self._cmd_mode("AUTO.LOITER"),
+            "execute_path": self._shortcut_execute_path,
+            "pause_path": self._shortcut_pause_path,
+            "abort_path": self._request_abort_path,
+            "fit_map": lambda: self.page_slam.canvas.fit_to_map(),
+            "zoom_in": lambda: self.page_slam.canvas.zoom(1.25),
+            "zoom_out": lambda: self.page_slam.canvas.zoom(0.80),
+            "toggle_ruler": self._shortcut_toggle_ruler,
+            "toggle_mute": self._toggle_mute,
+            "cancel": self._shortcut_cancel,
+            "show_help": self._show_shortcut_help,
+        }
+        for index in range(8):
+            callbacks[f"workspace_{index}"] = (
+                lambda i=index: self._switch_workspace(i))
+        return callbacks
+
+    def _switch_workspace(self, index: int) -> None:
+        # select_tab checks the rail button and emits view_changed, which the
+        # window already routes to the stack - so the rail and the page can
+        # never disagree about which workspace is showing.
+        self.sidebar.select_tab(index)
+
+    def _toggle_link(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self._disconnect_from_endpoint()
+        else:
+            conn = self.settings.connection
+            port = conn.udp_port if conn.protocol == "udp" else conn.tcp_port
+            self._connect_to_endpoint(conn.host, port, protocol=conn.protocol)
+
+    def _shortcut_execute_path(self) -> None:
+        if self.page_slam.canvas.planned_waypoints:
+            self._on_execute_path_requested(self.page_slam.canvas.planned_waypoints)
+        else:
+            self.console.log_info("No path staged - click the map to set a goal.")
+
+    def _shortcut_pause_path(self) -> None:
+        if self.path_paused:
+            self._on_resume_path_requested()
+        elif self.path_in_progress:
+            self._on_pause_path_requested()
+        else:
+            self.console.log_info("No path executing.")
+
+    def _shortcut_toggle_ruler(self) -> None:
+        self._switch_workspace(2)
+        self.page_slam.btn_ruler.setChecked(not self.page_slam.btn_ruler.isChecked())
+
+    def _shortcut_cancel(self) -> None:
+        """Escape: one key that stops whatever is pending, in order of danger."""
+        self.page_motors.stop_motor_tests()
+        if self.confirm_bar.is_active():
+            self.confirm_bar.cancel()
+        if self.page_slam.btn_ruler.isChecked():
+            self.page_slam.btn_ruler.setChecked(False)
+        else:
+            self.page_slam.canvas.clear_ruler()
+
+    def _show_shortcut_help(self) -> None:
+        if self._help_overlay is None:
+            self._help_overlay = ShortcutHelpOverlay(self)
+        self._help_overlay.show()
+        self._help_overlay.raise_()
+
+    # -------------------------------------------------------------------------
+    # Bench Motor Test  (ui/motor_widget.MotorTestPanel)
+    # -------------------------------------------------------------------------
+
+    def _on_motor_test_requested(self, motor_num: int, throttle_pct: float) -> None:
+        """Forward a bench motor test, after re-checking the interlocks here.
+
+        The panel already refuses to emit unless the vehicle is connected,
+        disarmed and on the ground, and MAVLinkWorker clamps the throttle. This
+        is a third check at the last point before the command reaches the link,
+        because the cost of a stale UI state here is a spinning propeller.
+        """
+        if not (self.worker and self.worker.isRunning()):
+            return
+        t = self.last_telemetry
+        if t.armed or t.is_airborne:
+            self.page_motors.stop_motor_tests()
+            self.console.log_error(
+                "Motor test refused: vehicle is armed or airborne.")
+            return
+        self.worker.test_actuator(motor_num, throttle_pct)
+
+    def _on_motor_test_stop(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self.worker.stop_all_motor_tests()
+
+    # -------------------------------------------------------------------------
+    # Map "Fly here now"  (ui/slam_map_widget context menu)
+    # -------------------------------------------------------------------------
+
+    def _on_fly_here_requested(self, wx: float, wy: float) -> None:
+        """Execute the path the map already planned to the clicked point.
+
+        Routed through _on_execute_path_requested rather than dispatching
+        setpoints directly, so the arm / OFFBOARD / VIO / ground-takeoff
+        interlocks all apply exactly as they do to the EXECUTE PATH button.
+        """
+        waypoints = self.page_slam.canvas.planned_waypoints
+        if not waypoints:
+            self.console.log_error(
+                f"Cannot fly to N {wx:+.2f}, E {wy:+.2f}: no clear path.")
+            return
+        self.console.log_cmd(
+            f"Fly-here requested: N {wx:+.2f} m, E {wy:+.2f} m "
+            f"({len(waypoints)} waypoints).")
+        self._on_execute_path_requested(waypoints)
+
+    def shutdown_workers(self) -> None:
+        """Stop every background thread this window owns.
+
+        Separate from closeEvent so anything that disposes of the window
+        without a close - a test, a programmatic teardown - can still stop the
+        threads. A QThread destroyed while running aborts the process.
+        """
+        worker = getattr(self, "planner_worker", None)
+        if worker is not None:
+            worker.stop()
+        listener = getattr(self, "map_listener", None)
+        if listener is not None:
+            listener.stop()
+        audio = getattr(self, "audio", None)
+        if audio is not None:
+            audio.shutdown()
+
     def closeEvent(self, event):
         # A Qt.Tool window is not a child in the window-manager sense; without
         # this it outlives the main window as an orphan always-on-top frame.
@@ -1873,8 +2474,14 @@ class DroneGCSMainWindow(QMainWindow):
             self.page_slam.stop_rviz()
         if self.map_listener:
             self.map_listener.stop()
+        # Stop any bench motor test before the link goes away, rather than
+        # relying on the vehicle-side expiry to catch it.
+        if hasattr(self, "page_motors"):
+            self.page_motors.stop_motor_tests()
+            self._on_motor_test_stop()
         if self.worker and self.worker.isRunning():
             self.worker.disconnect_endpoint()
+        self.shutdown_workers()
         event.accept()
 
 
@@ -1897,6 +2504,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--map-port", help="TCP map bridge port (env GCS_MAP_PORT)")
     ap.add_argument("--video-url", help="FPV stream URL (env GCS_VIDEO_URL)")
     ap.add_argument("--rviz-config", help="RViz2 layout path (env GCS_RVIZ_CONFIG)")
+    ap.add_argument("--ui-scale", type=float,
+                    help="UI scale factor, 0.75-3.0 (env GCS_UI_SCALE; "
+                         "omit or 0 to detect from the display)")
+    ap.add_argument("--no-audio", action="store_true",
+                    help="start with audio alerts muted")
     return ap
 
 
@@ -1911,9 +2523,21 @@ def main():
             if os.path.exists(_p):
                 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _p
                 break
+    # Must precede the QApplication: Qt reads these attributes once, at
+    # construction, and silently ignores them afterwards.
+    enable_high_dpi()
+
     app = QApplication(sys.argv)
-    app.setStyleSheet(DARK_STYLESHEET)
+    # Resolve the UI scale before any stylesheet or widget exists, so every
+    # dimension in the station is computed from the same factor.
+    init_scale(app, settings, override=getattr(args, "ui_scale", None))
+    app.setStyleSheet(build_stylesheet())
     window = DroneGCSMainWindow(settings=settings)
+    if getattr(args, "no_audio", False):
+        # A session flag, not a saved preference: --no-audio for one bench run
+        # must not silence the station permanently, and must leave the header
+        # control live so alerts can be turned back on without a restart.
+        window._on_mute_toggled(True)
     window.show()
     sys.exit(app.exec_())
 

@@ -93,52 +93,35 @@ class RVizEmbedWidget(QWidget):
 
         # 1. Header Toolbar
         hdr_card = QFrame(self)
-        hdr_card.setStyleSheet(
-            "QFrame { background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px; }"
-        )
+        hdr_card.setProperty("class", "cardFrame")
         hl = QHBoxLayout(hdr_card)
         hl.setContentsMargins(8, 4, 8, 4)
         hl.setSpacing(8)
 
         self.lbl_status_badge = QLabel("RVIZ2: OFFLINE", self)
-        self.lbl_status_badge.setStyleSheet(
-            "background-color: #21262d; color: #8b949e; border: 1px solid #30363d; "
-            "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-        )
+        self.lbl_status_badge.setObjectName("mapPill")
         hl.addWidget(self.lbl_status_badge)
 
         self.lbl_detail = QLabel(
             f"Config: {os.path.basename(self.config_path)} (Displays /map_thin, /map, TF, PointCloud2)", self
         )
-        self.lbl_detail.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_detail.setObjectName("fieldSubLabel")
         hl.addWidget(self.lbl_detail, 1)
 
         # Action Buttons
         self.btn_launch = QPushButton("Launch RViz2", self)
-        self.btn_launch.setStyleSheet(
-            "QPushButton { background-color: #238636; color: #ffffff; font-weight: bold; "
-            "border-radius: 4px; padding: 6px 14px; min-height: 28px; }"
-            "QPushButton:hover { background-color: #2ea043; }"
-        )
+        self.btn_launch.setObjectName("btnGo")
         self.btn_launch.clicked.connect(self.launch_rviz)
         hl.addWidget(self.btn_launch)
 
         self.btn_reload = QPushButton("Reload", self)
-        self.btn_reload.setStyleSheet(
-            "QPushButton { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; "
-            "border-radius: 4px; padding: 6px 12px; min-height: 28px; }"
-            "QPushButton:hover { background-color: #30363d; }"
-        )
+        self.btn_reload.setObjectName("mapTool")
         self.btn_reload.setEnabled(False)
         self.btn_reload.clicked.connect(self.reload_rviz)
         hl.addWidget(self.btn_reload)
 
         self.btn_stop = QPushButton("⏹ Close RViz2", self)
-        self.btn_stop.setStyleSheet(
-            "QPushButton { background-color: #21262d; color: #f85149; border: 1px solid #da3633; "
-            "border-radius: 4px; padding: 6px 12px; min-height: 28px; }"
-            "QPushButton:hover { background-color: #da3633; color: #ffffff; }"
-        )
+        self.btn_stop.setObjectName("mapDanger")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_rviz)
         hl.addWidget(self.btn_stop)
@@ -151,21 +134,19 @@ class RVizEmbedWidget(QWidget):
 
         # Page 0: Sleek placeholder card
         self.placeholder = QFrame(self)
-        self.placeholder.setStyleSheet(
-            "QFrame { background-color: #0d1117; border: 1px dashed #30363d; border-radius: 8px; }"
-        )
+        self.placeholder.setObjectName("rvizPlaceholder")
         pl_layout = QVBoxLayout(self.placeholder)
         pl_layout.setAlignment(Qt.AlignCenter)
         pl_layout.setSpacing(12)
 
         icon_lbl = QLabel("[ 3D POINT CLOUD ]", self)
         icon_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        icon_lbl.setStyleSheet("color: #58a6ff; letter-spacing: 2px;")
+        icon_lbl.setObjectName("rvizPlaceholderIcon")
         icon_lbl.setAlignment(Qt.AlignCenter)
         pl_layout.addWidget(icon_lbl)
 
         title_lbl = QLabel("ROS 2 RViz2 2D Occupancy Grid & SLAM Viewport", self)
-        title_lbl.setStyleSheet("color: #c9d1d9; font-size: 16px; font-weight: bold;")
+        title_lbl.setObjectName("rvizPlaceholderTitle")
         title_lbl.setAlignment(Qt.AlignCenter)
         pl_layout.addWidget(title_lbl)
 
@@ -177,16 +158,12 @@ class RVizEmbedWidget(QWidget):
             "(powered by resilient TCP map streaming on port 5765).",
             self
         )
-        desc_lbl.setStyleSheet("color: #8b949e; font-size: 12px; line-height: 1.4;")
+        desc_lbl.setObjectName("rvizPlaceholderBody")
         desc_lbl.setAlignment(Qt.AlignCenter)
         pl_layout.addWidget(desc_lbl)
 
         btn_ph_launch = QPushButton("Launch Embedded RViz2 Now", self)
-        btn_ph_launch.setStyleSheet(
-            "QPushButton { background-color: #238636; color: #ffffff; font-size: 13px; font-weight: bold; "
-            "border-radius: 6px; padding: 10px 24px; min-height: 36px; }"
-            "QPushButton:hover { background-color: #2ea043; }"
-        )
+        btn_ph_launch.setObjectName("btnGo")
         btn_ph_launch.clicked.connect(self.launch_rviz)
         pl_layout.addWidget(btn_ph_launch, 0, Qt.AlignCenter)
 
@@ -219,6 +196,19 @@ class RVizEmbedWidget(QWidget):
             return False, "Command 'xwininfo' not found in PATH. Install x11-utils to enable window embedding."
         return True, "Display server compatible."
 
+    def _set_badge_state(self, state: str) -> None:
+        """Colour the status badge through the design system's #mapPill states.
+
+        Ten inline stylesheets used to do this, each repeating the same hex
+        values and each carrying a hardcoded font-size that the UI scale factor
+        could never reach.
+        """
+        if self.lbl_status_badge.property("state") == state:
+            return
+        self.lbl_status_badge.setProperty("state", state)
+        self.lbl_status_badge.style().unpolish(self.lbl_status_badge)
+        self.lbl_status_badge.style().polish(self.lbl_status_badge)
+
     def launch_rviz(self):
         """Spawn rviz2 process with target config and start looking for its X11 window."""
         if self.rviz_process and self.rviz_process.poll() is None:
@@ -227,18 +217,12 @@ class RVizEmbedWidget(QWidget):
         compat, reason = self.check_display_compatibility()
         if not compat:
             self.lbl_status_badge.setText("RVIZ2: X11 / UTILS REQ")
-            self.lbl_status_badge.setStyleSheet(
-                "background-color: #9e6a03; color: #ffffff; border: 1px solid #d29922; "
-                "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-            )
+            self._set_badge_state("warn")
             self.rviz_state_changed.emit(False, f"DISPLAY NOTICE: {reason}")
             return
 
         self.lbl_status_badge.setText("RVIZ2: LAUNCHING...")
-        self.lbl_status_badge.setStyleSheet(
-            "background-color: #9e6a03; color: #ffffff; border: 1px solid #d29922; "
-            "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-        )
+        self._set_badge_state("warn")
         self.btn_launch.setEnabled(False)
         self.rviz_state_changed.emit(False, "LAUNCHING...")
 
@@ -276,10 +260,7 @@ class RVizEmbedWidget(QWidget):
             self.poll_timer.start()
         except Exception as e:
             self.lbl_status_badge.setText("RVIZ2: LAUNCH FAILED")
-            self.lbl_status_badge.setStyleSheet(
-                "background-color: #da3633; color: #ffffff; border: 1px solid #f85149; "
-                "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-            )
+            self._set_badge_state("bad")
             self.btn_launch.setEnabled(True)
             self.rviz_state_changed.emit(False, f"ERROR: {e}")
 
@@ -289,10 +270,7 @@ class RVizEmbedWidget(QWidget):
         if self._find_attempts > 40:  # Timeout after 10 seconds
             self.poll_timer.stop()
             self.lbl_status_badge.setText("RVIZ2: EMBED TIMEOUT")
-            self.lbl_status_badge.setStyleSheet(
-                "background-color: #da3633; color: #ffffff; border: 1px solid #f85149; "
-                "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-            )
+            self._set_badge_state("bad")
             self.btn_launch.setEnabled(True)
             self.rviz_state_changed.emit(False, "TIMEOUT")
             return
@@ -301,10 +279,7 @@ class RVizEmbedWidget(QWidget):
         if self.rviz_process and self.rviz_process.poll() is not None:
             self.poll_timer.stop()
             self.lbl_status_badge.setText("RVIZ2: CRASHED")
-            self.lbl_status_badge.setStyleSheet(
-                "background-color: #da3633; color: #ffffff; border: 1px solid #f85149; "
-                "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-            )
+            self._set_badge_state("bad")
             self.btn_launch.setEnabled(True)
             self.rviz_state_changed.emit(False, "CRASHED")
             return
@@ -366,20 +341,14 @@ class RVizEmbedWidget(QWidget):
             self.stack.setCurrentIndex(1)  # Show embedded page
 
             self.lbl_status_badge.setText("RVIZ2: EMBEDDED & ACTIVE")
-            self.lbl_status_badge.setStyleSheet(
-                "background-color: #1f6feb; color: #ffffff; border: 1px solid #388bfd; "
-                "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-            )
+            self._set_badge_state("idle")
             self.btn_launch.setEnabled(False)
             self.btn_reload.setEnabled(True)
             self.btn_stop.setEnabled(True)
             self.rviz_state_changed.emit(True, "ACTIVE")
         except Exception as e:
             self.lbl_status_badge.setText("RVIZ2: EMBED ERROR")
-            self.lbl_status_badge.setStyleSheet(
-                "background-color: #da3633; color: #ffffff; border: 1px solid #f85149; "
-                "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-            )
+            self._set_badge_state("bad")
             self.btn_launch.setEnabled(True)
             self.rviz_state_changed.emit(False, f"ERROR: {e}")
 
@@ -407,10 +376,7 @@ class RVizEmbedWidget(QWidget):
 
         self.stack.setCurrentIndex(0)
         self.lbl_status_badge.setText("RVIZ2: OFFLINE")
-        self.lbl_status_badge.setStyleSheet(
-            "background-color: #21262d; color: #8b949e; border: 1px solid #30363d; "
-            "border-radius: 4px; padding: 4px 8px; font-size: 10px; font-weight: bold;"
-        )
+        self._set_badge_state("idle")
         self.btn_launch.setEnabled(True)
         self.btn_reload.setEnabled(False)
         self.btn_stop.setEnabled(False)

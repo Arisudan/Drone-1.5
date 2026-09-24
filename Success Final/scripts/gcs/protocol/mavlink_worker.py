@@ -14,7 +14,8 @@ DATA FLOW & INTERFACES:
   * MAVLink Out:   HEARTBEAT (SysID 255), MAV_CMD_DO_SET_MODE,
                    MAV_CMD_COMPONENT_ARM_DISARM (normal & force 21196),
                    SET_POSITION_TARGET_LOCAL_NED (20 Hz daemon),
-                   MAV_CMD_SET_MESSAGE_INTERVAL (telemetry rates).
+                   MAV_CMD_SET_MESSAGE_INTERVAL (telemetry rates),
+                   MAV_CMD_DO_MOTOR_TEST (bench actuator test, clamped + expiring).
   * MAVLink In:    HEARTBEAT, LOCAL_POSITION_NED, ATTITUDE, SYS_STATUS,
                    SERVO_OUTPUT_RAW, STATUSTEXT, COMMAND_ACK.
   * Qt Signals:    telemetry_updated(TelemetrySnapshot),
@@ -829,6 +830,80 @@ class MAVLinkWorker(QThread):
         self.setpoint_kind = "position"
         self.streaming_setpoints = True
         self.broadcast_cmd(f"waypoint {x:.2f} {y:.2f} {self.sp_z:.2f}")
+
+    # -------------------------------------------------------------------------
+    # Bench Actuator Testing
+    # -------------------------------------------------------------------------
+
+    # Hard ceiling on any throttle this worker will ever send to a motor test,
+    # regardless of what the caller asks for. Bench motor-order and
+    # direction-of-rotation checks need enough thrust to see the prop turn and
+    # no more; a caller that asks for 80% has a bug, and this is the last place
+    # that bug can be caught before it reaches an ESC.
+    MOTOR_TEST_MAX_THROTTLE_PCT = 30.0
+
+    # Every test carries its own expiry, enforced by PX4 rather than by us. If
+    # the link drops mid-test the vehicle stops the motor by itself; a GCS that
+    # has to send a stop command is a GCS that cannot stop a motor after the
+    # Wi-Fi goes away. The UI re-sends while the operator holds the control.
+    MOTOR_TEST_DEFAULT_TIMEOUT_S = 2.0
+
+    def test_actuator(self, motor_index: int, throttle_pct: float,
+                      timeout_s: float = None) -> bool:
+        """Spin one motor at a bench-test throttle via MAV_CMD_DO_MOTOR_TEST.
+
+        `motor_index` is 1-based, matching both PX4's own numbering and the M1-M4
+        labels on the motor workspace.
+
+        This is a bench command and nothing here makes it safe on its own: the
+        caller is responsible for confirming the props are off and the vehicle
+        is disarmed and on the ground. What this method guarantees is narrower
+        and worth stating - the throttle is clamped, and the command always
+        expires on the vehicle side.
+
+        Returns True if the command was written to the link.
+        """
+        if not self.master:
+            return False
+
+        throttle = max(0.0, min(self.MOTOR_TEST_MAX_THROTTLE_PCT, float(throttle_pct)))
+        timeout = self.MOTOR_TEST_DEFAULT_TIMEOUT_S if timeout_s is None else float(timeout_s)
+        timeout = max(0.0, min(10.0, timeout))
+
+        try:
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST)
+            self.master.mav.command_long_send(
+                self.target_system,
+                self.target_component,
+                mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST,
+                0,
+                float(int(motor_index)),                                   # p1 motor number (1-based)
+                float(mavutil.mavlink.MOTOR_TEST_THROTTLE_PERCENT),        # p2 throttle type
+                throttle,                                                  # p3 throttle value
+                timeout,                                                   # p4 timeout (s)
+                0.0,                                                       # p5 motor count (0 = just this one)
+                float(mavutil.mavlink.MOTOR_TEST_ORDER_DEFAULT),           # p6 test order
+                0.0
+            )
+            self.tx_count += 1
+            return True
+        except Exception as e:
+            print(f"[MAVLink TX Error] test_actuator({motor_index}): {e}")
+            return False
+
+    def stop_all_motor_tests(self, motor_count: int = 8) -> bool:
+        """Command zero throttle on every channel, with a zero timeout.
+
+        Sent to more channels than this airframe has on purpose. This is the
+        stop path; addressing a channel that does not exist costs one ignored
+        packet, while failing to address one that does costs a spinning motor.
+        """
+        if not self.master:
+            return False
+        ok = True
+        for index in range(1, max(1, int(motor_count)) + 1):
+            ok = self.test_actuator(index, 0.0, timeout_s=0.0) and ok
+        return ok
 
     def emergency_kill(self):
         """Immediately cut motor outputs via emergency force-disarm and termination."""

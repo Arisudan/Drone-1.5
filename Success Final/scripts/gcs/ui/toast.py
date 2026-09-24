@@ -32,7 +32,7 @@ USAGE:
 ================================================================================
 """
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QRect, QTimer
 from PyQt5.QtWidgets import QWidget, QLabel, QHBoxLayout, QApplication
 
 
@@ -69,8 +69,21 @@ class NotificationToast(QWidget):
         self._timer.timeout.connect(self.hide)
 
     def show_message(self, text: str, color: str = "#58a6ff", duration_ms: int = 3200):
-        """Display toast message with custom color and auto-hide timer."""
-        self._label.setText(text)
+        """Display a toast, sized and placed so it cannot cover anything.
+
+        The toast is confined to the header's reserved notification band (see
+        TopStatusStrip.notification_rect) and its text is elided to fit. It
+        previously anchored itself off one named badge's right edge and grew to
+        whatever width the message needed, which meant two separate failures:
+        adding the AUDIO control to the row after that badge put every
+        notification on top of the word AUDIO, and a long message ran past the
+        band and was clamped back left across the status badges.
+
+        Eliding loses nothing: every caller in drone_gcs.py writes the same text
+        to the console and the flight terminal before raising a toast, so the
+        full wording is always recoverable a glance away.
+        """
+        self._full_text = text
         self._label.setStyleSheet(
             f"background-color: rgba(13, 17, 23, 0.96); "
             f"color: {color}; "
@@ -80,52 +93,51 @@ class NotificationToast(QWidget):
             f"font-weight: bold; "
             f"border: 1px solid {color};"
         )
-        self.adjustSize()
-        top_strip = getattr(self.parent(), "top_strip", None)
-        # Anchor to the rightmost real content of the header's second row. This
-        # used to be the VIO NED readout; that moved to the Diagnostics tab, so
-        # the altitude instrument is now the last thing on the row. Falling
-        # back through the list rather than naming one widget means the next
-        # header reshuffle degrades to the centred fallback instead of dropping
-        # the toast onto the navigation rail.
-        # Anchor to the end of the header's second line. Row 1 is the controls
-        # you operate and row 2 is what the vehicle reports back, so a
-        # notification about what just happened belongs on row 2 - and that row
-        # has a wide gap between the status badges and the arm/mode pair.
-        # Falling through a list rather than naming one widget means a header
-        # reshuffle degrades to the centred fallback instead of dropping the
-        # toast onto the navigation rail.
-        anchor = None
-        if top_strip is not None:
-            for name in ("badge_rc", "badge_vision_conf", "badge_vio"):
-                anchor = getattr(top_strip, name, None)
-                if anchor is not None:
-                    break
-        if anchor is not None:
-            w, h = self.width(), self.height()
-            margin = 14  # matches top_status_strip.py's SPACING constant
-            anchor_top_left = anchor.mapTo(self.parent(), anchor.rect().topLeft())
-            # sizeHint(), not the possibly one-frame-stale allocated width - the
-            # readout's text length changes with live telemetry, and the current
-            # geometry may still be last frame's (shorter) measurement.
-            anchor_w = max(anchor.width(), anchor.sizeHint().width())
-            x = anchor_top_left.x() + anchor_w + margin
-            y = anchor_top_left.y() + (anchor.height() - h) // 2
 
-            # Clamp to the header's own right/bottom edge so it can never spill onto
-            # the workspace content below or past the window's right edge.
-            max_x = top_strip.x() + top_strip.width() - w - 8
-            max_y = top_strip.y() + top_strip.height() - h - 4
-            x = max(0, min(x, max_x))
-            y = max(0, min(y, max_y))
-            self.move(x, y)
-        elif self.parent():
-            # Fallback: center at top of the window
-            pw = self.parent().width()
-            w = self.width()
-            self.move((pw - w) // 2, 65)
+        band = self._band()
+        self._label.setText(text)
+        if band is not None and band.width() > 0:
+            metrics = self._label.fontMetrics()
+            # Measure the label's own padding and border rather than hardcoding
+            # them, so restyling the toast cannot silently break the fit.
+            chrome = max(0, self._label.sizeHint().width()
+                         - metrics.horizontalAdvance(text))
+            room = max(0, band.width() - chrome)
+            self._label.setText(
+                metrics.elidedText(text, Qt.ElideRight, room))
+            self.adjustSize()
+            width = min(self.width(), band.width())
+            height = min(self.height(), max(band.height(), self.height()))
+            self.resize(width, height)
+            x = band.x() + (band.width() - width) // 2
+            y = band.y() + (band.height() - height) // 2
+            self.move(max(0, x), max(0, y))
+        else:
+            # No measurable band - centre under the header rather than guessing
+            # at an anchor that might sit on top of a readout.
+            self.adjustSize()
+            parent = self.parent()
+            if parent is not None:
+                self.move(max(0, (parent.width() - self.width()) // 2), 65)
 
         self.show()
         if QApplication.platformName() != "wayland":
             self.raise_()
         self._timer.start(duration_ms)
+
+    def _band(self):
+        """The header's reserved notification band, in this widget's parent's
+        coordinates, or None when the header cannot supply one."""
+        parent = self.parent()
+        top_strip = getattr(parent, "top_strip", None)
+        if top_strip is None or not hasattr(top_strip, "notification_rect"):
+            return None
+        rect = top_strip.notification_rect()
+        if rect.isEmpty() or rect.width() <= 0:
+            return None
+        top_left = top_strip.mapTo(parent, rect.topLeft())
+        return QRect(top_left.x(), top_left.y(), rect.width(), rect.height())
+
+    def current_rect(self):
+        """Geometry the toast currently occupies, for layout tests."""
+        return QRect(self.x(), self.y(), self.width(), self.height())

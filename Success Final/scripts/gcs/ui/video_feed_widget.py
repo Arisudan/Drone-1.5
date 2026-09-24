@@ -87,6 +87,7 @@ NETWORK_CAPTURE_OPTIONS = (
     "rtsp_transport;tcp|timeout;5000000|stimeout;5000000"
     "|max_delay;500000|fflags;nobuffer"
 )
+from ui.scaling import px
 
 #: URL schemes that go through FFmpeg and therefore want the options above.
 NETWORK_SCHEMES = ("rtsp://", "rtsps://", "udp://", "rtp://", "rtmp://", "tcp://")
@@ -240,7 +241,7 @@ class VideoSink(QLabel):
         super().__init__(parent)
         self._placeholder = placeholder
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(160, 90)
+        self.setMinimumSize(px(160), px(90))
         self.setStyleSheet(
             "background-color: #090d12; border: 1px solid #30363d;"
             "border-radius: 6px; color: #6e7681; font-size: 10px;"
@@ -297,7 +298,7 @@ class FloatingVideoWindow(QWidget):
         bar.addWidget(hint)
         bar.addStretch()
         btn_close = QPushButton("\u00d7", self)
-        btn_close.setFixedSize(18, 18)
+        btn_close.setFixedSize(px(18), px(18))
         btn_close.setStyleSheet(
             "QPushButton { background: transparent; border: none; color: #8b949e;"
             " font-size: 14px; font-weight: bold; padding: 0; min-height: 0; }"
@@ -348,7 +349,7 @@ class VideoFeedWidget(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setMinimumSize(540, 360)
+        self.setMinimumSize(px(540), px(360))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -382,7 +383,7 @@ class VideoFeedWidget(QWidget):
         self._custom_url = "rtsp://192.168.1.10:554/stream"
 
         self.txt_url = QLineEdit(self._drone_url, self)
-        self.txt_url.setMinimumWidth(240)
+        self.txt_url.setMinimumWidth(px(240))
         self.txt_url.setToolTip(
             "Stream URL for the selected source.\n"
             "Drone FPV: MJPEG over HTTP, follows the Network preset.\n"

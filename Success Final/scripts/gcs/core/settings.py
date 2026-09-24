@@ -159,6 +159,60 @@ class AlertsConfig:
 
 
 @dataclass
+class UIConfig:
+    """Presentation-layer preferences. None of these can affect a command."""
+
+    # 0.0 means "work it out from the display" - see ui/scaling.detect_scale.
+    # A literal 1.0 here would be indistinguishable from "auto", which is why
+    # the unset value is zero rather than the identity factor.
+    scale: float = 0.0
+
+    # Which telemetry fields the Diagnostics value grid shows, in order, and how
+    # many columns to lay them out in. Empty list = the built-in default layout,
+    # so a fresh install and a user who has deleted every tile are distinct
+    # states: the first gets the sensible set, the second gets what they asked
+    # for. See ui/value_grid.DEFAULT_FIELDS.
+    value_grid_fields: List[str] = field(default_factory=list)
+    value_grid_columns: int = 3
+    value_grid_font_scale: float = 1.0
+
+    def validate(self) -> None:
+        if self.scale != 0.0 and not 0.75 <= self.scale <= 3.0:
+            raise ValueError(f"ui.scale={self.scale} outside 0.75..3.0 (0 = auto)")
+        if not 1 <= self.value_grid_columns <= 8:
+            raise ValueError("ui.value_grid_columns outside 1..8")
+        if not 0.6 <= self.value_grid_font_scale <= 2.5:
+            raise ValueError("ui.value_grid_font_scale outside 0.6..2.5")
+        if not isinstance(self.value_grid_fields, list) or \
+                any(not isinstance(k, str) for k in self.value_grid_fields):
+            raise ValueError("ui.value_grid_fields must be a list of field keys")
+
+
+@dataclass
+class AudioConfig:
+    """Spoken and tonal alerts.
+
+    Off is a supported configuration, not a degraded one: this station is also
+    run on a bench beside a live aircraft where an unexpected klaxon is worse
+    than no alert at all.
+    """
+
+    enabled: bool = True
+    tones_enabled: bool = True
+    speech_enabled: bool = True
+
+    # Floor between two soundings of the *same* event. PX4 re-runs its preflight
+    # checks every ~2 s, so without this one unresolved fault becomes a
+    # continuous alarm that the operator learns to ignore - which is the exact
+    # failure mode an audio alert exists to prevent.
+    min_repeat_s: float = 8.0
+
+    def validate(self) -> None:
+        if not 0.0 <= self.min_repeat_s <= 300.0:
+            raise ValueError("audio.min_repeat_s outside 0..300")
+
+
+@dataclass
 class GCSSettings:
     profile: ProfileConfig = field(default_factory=ProfileConfig)
     connection: ConnectionConfig = field(default_factory=ConnectionConfig)
@@ -166,6 +220,8 @@ class GCSSettings:
     slam: SlamConfig = field(default_factory=SlamConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    ui: UIConfig = field(default_factory=UIConfig)
+    audio: AudioConfig = field(default_factory=AudioConfig)
 
     def validate(self) -> None:
         for f in fields(self):
@@ -216,6 +272,7 @@ OVERRIDES = (
     ("map_port",    "video",      "map_bridge_port", "GCS_MAP_PORT"),
     ("video_url",   "video",      "stream_url",  "GCS_VIDEO_URL"),
     ("rviz_config", "slam",       "rviz_config", "GCS_RVIZ_CONFIG"),
+    ("ui_scale",    "ui",         "scale",       "GCS_UI_SCALE"),
 )
 
 

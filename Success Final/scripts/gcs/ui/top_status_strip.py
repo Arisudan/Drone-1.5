@@ -35,12 +35,14 @@ USAGE:
 from __future__ import annotations
 from typing import Optional
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, QRect, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox
+    QWidget, QFrame, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit, QPushButton,
+    QComboBox, QSpacerItem, QSizePolicy
 )
 
 from core.telemetry import TelemetrySnapshot
+from ui.scaling import px
 from ui.battery_badge import BatteryBadge
 
 # The networks this rig is actually deployed on. Picking one here just fills in the
@@ -57,11 +59,18 @@ KNOWN_NETWORKS = [
 
 
 class TopStatusStrip(QFrame):
+    # Gap between header controls. A class attribute rather than an
+    # __init__ local: the relayout logic below needs it too, and a local
+    # meant those methods raised NameError inside a resize event, where
+    # Qt swallows the traceback and simply stops laying the header out.
+    SPACING = 14
+
     """Aerospace status bar with dynamic connection toggling and telemetry badges."""
 
     connect_requested = pyqtSignal(str, int, str)
     disconnect_requested = pyqtSignal()
-    network_changed = pyqtSignal(str)  # emits the resolved IP whenever a network preset is picked
+    network_changed = pyqtSignal(str)
+    mute_toggled = pyqtSignal(bool)  # emits the resolved IP whenever a network preset is picked
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -75,7 +84,7 @@ class TopStatusStrip(QFrame):
         # One spacing constant used everywhere in this header instead of a different
         # ad hoc value per row/group (was 8/10/12/16/24 scattered around) - every gap
         # between adjacent items is now the same size.
-        SPACING = 14
+        SPACING = self.SPACING
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 6, 10, 6)
@@ -111,11 +120,16 @@ class TopStatusStrip(QFrame):
         row1 = QHBoxLayout()
         row1.setSpacing(SPACING)
 
-        # 2. Dynamic IP, Port, & Protocol Inputs
-        conn_box = QHBoxLayout()
+        # 2. Dynamic IP, Port, & Protocol Inputs.
+        # These live in their own widget rather than straight in row 1 so the
+        # header can move them onto a line of their own when it is too narrow
+        # to hold them beside the brand and the battery - see _relayout_rows.
+        self.conn_panel = QWidget(self)
+        conn_box = QHBoxLayout(self.conn_panel)
+        conn_box.setContentsMargins(0, 0, 0, 0)
         conn_box.setSpacing(SPACING)
 
-        lbl_net = QLabel("Network:")
+        lbl_net = QLabel("Net:")
         lbl_net.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
         conn_box.addWidget(lbl_net)
 
@@ -139,12 +153,12 @@ class TopStatusStrip(QFrame):
         conn_box.addWidget(lbl_ip)
 
         self.ip_input = QLineEdit(KNOWN_NETWORKS[0][1], self)
-        self.ip_input.setFixedWidth(120)
+        self.ip_input.setFixedWidth(px(120))
         self.ip_input.setToolTip("Target SBC IP (e.g. 172.16.101.84 or 127.0.0.1) - auto-filled by the Network dropdown, or type your own")
         self.ip_input.textEdited.connect(self._on_ip_hand_edited)
         conn_box.addWidget(self.ip_input)
 
-        lbl_proto = QLabel("Protocol:")
+        lbl_proto = QLabel("Proto:")
         lbl_proto.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
         conn_box.addWidget(lbl_proto)
 
@@ -160,7 +174,7 @@ class TopStatusStrip(QFrame):
         conn_box.addWidget(lbl_port)
 
         self.port_input = QLineEdit("14550", self)
-        self.port_input.setFixedWidth(70)  # 60 clipped the leading digit of "14550"
+        self.port_input.setFixedWidth(px(70))  # 60 clipped the leading digit of "14550"
         self.port_input.setToolTip("Target Port (UDP flight: 14550, TCP bench: 5760)")
         conn_box.addWidget(self.port_input)
 
@@ -182,7 +196,7 @@ class TopStatusStrip(QFrame):
         # Left-aligned so the controls sit directly above the RX/TX and VIO NED
         # readouts in row 2: what you configure and what it produces line up in
         # the same column instead of sitting at opposite ends of the header.
-        row1.addLayout(conn_box)
+        row1.addWidget(self.conn_panel)
         row1.addStretch()
 
         # 3. Mode / Arm status - pinned to the top-right corner, single line (Arm to the
@@ -238,11 +252,27 @@ class TopStatusStrip(QFrame):
         self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
         telemetry_strip.addWidget(self.badge_rc)
 
+        # Audio mute. A control rather than a badge, because muting is something
+        # the operator does - typically the moment a fault starts repeating and
+        # they have already seen it. Ctrl+M does the same thing.
+        self.btn_mute = QPushButton("\U0001F50A AUDIO", self)
+        self.btn_mute.setCheckable(True)
+        self.btn_mute.setCursor(Qt.PointingHandCursor)
+        self.btn_mute.setToolTip("Mute or unmute spoken and tonal alerts (Ctrl+M)")
+        self.btn_mute.clicked.connect(self._on_mute_clicked)
+        self._style_mute(False, True)
+        telemetry_strip.addWidget(self.btn_mute)
+
         # Badges left-aligned so they sit directly beneath the connection
         # controls above them: one column of things you set, one column of
         # things the vehicle reports back.
         row2.addLayout(telemetry_strip)
-        row2.addStretch(1)
+        # Reserved notification band. The toast lives in this gap, so the gap is
+        # a real layout requirement rather than incidental slack: without a
+        # floor it collapses on a narrow window and the toast has nowhere to go
+        # that is not already occupied by a badge.
+        row2.addSpacerItem(QSpacerItem(px(110), 0, QSizePolicy.MinimumExpanding,
+                                       QSizePolicy.Minimum))
 
         # Arm state and flight mode sit on the second line, directly beneath the
         # battery: the header's right-hand column is then "how is the vehicle",
@@ -252,7 +282,139 @@ class TopStatusStrip(QFrame):
 
 
         rows.addLayout(row2)
+
+        # The narrow-layout home for the connection controls. Empty and zero
+        # height until _relayout_rows needs it.
+        self.row_conn = QHBoxLayout()
+        self.row_conn.setSpacing(SPACING)
+        self.row_conn.setContentsMargins(0, 0, 0, 0)
+        rows.addLayout(self.row_conn)
+
+        self._row1 = row1
+        self._conn_on_own_row = False
+
         layout.addLayout(rows, 1)
+
+    # Widgets that bound the notification band, left and right. Named as lists
+    # rather than as one anchor widget because the header gets reshuffled: the
+    # toast used to anchor off badge_rc's right edge, and when the AUDIO control
+    # was added to the row after it, every notification was drawn straight over
+    # the word AUDIO. Bounding the band by "the rightmost thing on the left" and
+    # "the leftmost thing on the right" survives that.
+    _BAND_LEFT = ("badge_vio", "badge_vision_conf", "badge_rc", "btn_mute")
+    _BAND_RIGHT = ("badge_arm", "badge_mode")
+
+    def notification_rect(self) -> QRect:
+        """The clear band on row 2, in this widget's own coordinates.
+
+        Empty when the row cannot be measured, which the caller must treat as
+        "no safe place here" rather than falling back to an overlapping guess.
+        """
+        def present(names):
+            out = []
+            for name in names:
+                w = getattr(self, name, None)
+                if w is not None and not w.isHidden():
+                    out.append(w)
+            return out
+
+        left = present(self._BAND_LEFT)
+        right = present(self._BAND_RIGHT)
+        if not left or not right:
+            return QRect()
+
+        gap = px(10)
+        x = max(w.geometry().right() for w in left) + 1 + gap
+        limit = min(w.geometry().left() for w in right) - gap
+        reference = left[-1].geometry()
+        return QRect(x, reference.top(), max(0, limit - x), reference.height())
+
+    # Extra width demanded before the connection controls are allowed back up
+    # onto the first row. Without hysteresis the two layouts sit either side of
+    # a single pixel and the header flickers between them while the window is
+    # being dragged.
+    _RELAYOUT_HYSTERESIS_PX = 48
+
+    def _row1_width_needed(self) -> int:
+        """Width row 1 wants with the connection controls on it."""
+        need = self.conn_panel.sizeHint().width()
+        for widget in (self.badge_arm, self.badge_mode):
+            if widget is not None and not widget.isHidden():
+                need += widget.sizeHint().width() + self.SPACING
+        battery = getattr(self, "battery", None)
+        if battery is not None:
+            need += max(battery.sizeHint().width(),
+                        battery.minimumWidth()) + self.SPACING
+        # The brand block and the rule to its right are outside `rows`.
+        need += self.title_lbl.sizeHint().width() + self.SPACING * 3
+        return need
+
+    def _relayout_rows(self) -> None:
+        """Put the connection controls on their own line when they do not fit.
+
+        Row 1 holds the brand, the connection controls and the battery. At a
+        large UI scale on a small screen those cannot sit side by side: measured
+        at 1.35x in a 1220px window, row 1 wanted about 1430px, and a Qt layout
+        given less than it needs does not shrink its children - it overlaps
+        them. The target IP field was drawn straight across the "Protocol:"
+        caption and CONNECT was clipped to ")NNE(".
+
+        Moving one block onto its own line costs a row of header height and
+        fixes both rows, because the strip's minimum width - and therefore the
+        compression applied to every row in it - is set by the widest one.
+        """
+        if not hasattr(self, "row_conn"):
+            return
+        needed = self._row1_width_needed()
+        available = self.width()
+
+        if not self._conn_on_own_row and available < needed:
+            self._row1.removeWidget(self.conn_panel)
+            self.row_conn.addWidget(self.conn_panel)
+            self.row_conn.addStretch()
+            # The subtitle is decoration, and the brand block is as wide as
+            # whichever of its two lines is longer - so dropping it is the
+            # cheapest width available at exactly the moment width is scarce.
+            self.sub_lbl.setVisible(False)
+            self._conn_on_own_row = True
+        elif self._conn_on_own_row and available > needed + self._RELAYOUT_HYSTERESIS_PX:
+            self.row_conn.removeWidget(self.conn_panel)
+            while self.row_conn.count():
+                self.row_conn.takeAt(0)
+            self._row1.insertWidget(0, self.conn_panel)
+            self.sub_lbl.setVisible(True)
+            self._conn_on_own_row = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout_rows()
+
+    def _style_mute(self, muted: bool, available: bool) -> None:
+        """Three visual states, because they mean three different things:
+        sounding, deliberately muted, and no audio backend at all."""
+        if not available:
+            text, fg, bg, border = "\U0001F507 NO AUDIO", "#6e7681", "#161b22", "#30363d"
+        elif muted:
+            text, fg, bg, border = "\U0001F507 MUTED", "#d29922", "#2b2109", "#9e6a03"
+        else:
+            text, fg, bg, border = "\U0001F50A AUDIO", "#3fb950", "#122a19", "#238636"
+        self.btn_mute.setText(text)
+        self.btn_mute.setStyleSheet(
+            f"QPushButton {{ background-color: {bg}; color: {fg};"
+            f" border: 1px solid {border}; border-radius: 4px;"
+            " padding: 4px 8px; font-weight: bold; font-size: 11px; }")
+
+    def _on_mute_clicked(self) -> None:
+        self.mute_toggled.emit(self.btn_mute.isChecked())
+
+    def set_audio_state(self, muted: bool, available: bool) -> None:
+        """Reflect the alert service's real state, whoever changed it - the
+        header button, Ctrl+M, or a settings save."""
+        self.btn_mute.setEnabled(available)
+        self.btn_mute.blockSignals(True)
+        self.btn_mute.setChecked(muted)
+        self.btn_mute.blockSignals(False)
+        self._style_mute(muted, available)
 
     def _on_network_selected(self, idx: int):
         ip = self.network_combo.currentData()

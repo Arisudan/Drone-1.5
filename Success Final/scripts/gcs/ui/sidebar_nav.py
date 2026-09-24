@@ -35,6 +35,7 @@ from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QButtonGroup
 )
+from ui.scaling import px
 
 
 class SidebarNav(QFrame):
@@ -46,7 +47,7 @@ class SidebarNav(QFrame):
         super().__init__(parent)
         # 176, not 162: adding units pushed "ALT 0.00 m" flush against the
         # rail's right edge, which would elide at a higher DPI.
-        self.setFixedWidth(176)
+        self.setFixedWidth(px(176))
         # Scoped to the rail itself. As a bare `QFrame` rule this also matched
         # every descendant - QLabel derives from QFrame - so each label in the
         # rail painted its own right-hand border, scattering stray vertical

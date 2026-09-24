@@ -72,10 +72,12 @@ Everything else in this guide is reference material for once those two are runni
 │   │   └── verify_ekf2_params.py
 │   ├── gcs
 │   │   ├── core
+│   │   │   ├── audio.py
 │   │   │   ├── execution_tracker.py
 │   │   │   ├── health.py
 │   │   │   ├── __init__.py
 │   │   │   ├── path_planner.py
+│   │   │   ├── settings.py
 │   │   │   └── telemetry.py
 │   │   ├── protocol
 │   │   │   ├── __init__.py
@@ -83,15 +85,22 @@ Everything else in this guide is reference material for once those two are runni
 │   │   │   └── ros2_map_listener.py
 │   │   ├── ui
 │   │   │   ├── cli_console.py
+│   │   │   ├── config_tab.py
+│   │   │   ├── guided_confirm.py
 │   │   │   ├── hud_widget.py
 │   │   │   ├── __init__.py
+│   │   │   ├── logs_tab.py
+│   │   │   ├── mission_progress.py
 │   │   │   ├── motor_widget.py
 │   │   │   ├── rviz_embed_widget.py
+│   │   │   ├── scaling.py
+│   │   │   ├── shortcuts.py
 │   │   │   ├── sidebar_nav.py
 │   │   │   ├── slam_map_widget.py
 │   │   │   ├── styles.py
 │   │   │   ├── toast.py
 │   │   │   ├── top_status_strip.py
+│   │   │   ├── value_grid.py
 │   │   │   └── video_feed_widget.py
 │   │   ├── drone_gcs.py
 │   │   ├── radxa_monitor.py
@@ -107,9 +116,12 @@ Everything else in this guide is reference material for once those two are runni
 ├── tests
 │   ├── _env.py
 │   ├── run_tests.sh
+│   ├── test_audio.py
+│   ├── test_gui_features.py
 │   ├── test_health.py
 │   ├── test_map_eval.py
 │   ├── test_path_planner.py
+│   ├── test_scaling.py
 │   ├── test_smoke.py
 │   └── test_telemetry.py
 ├── CMakeLists.txt
@@ -159,6 +171,7 @@ Everything else in this guide is reference material for once those two are runni
 - **verify_ekf2_params.py** — Read-only audit of the Pixhawk's EKF2 sensor-fusion parameters (vision/GPS/optical-flow/height-reference config) — safe to run any time.
 
 ### `scripts/gcs/core/`
+- **audio.py** — Spoken and tonal operator alerts. A daemon thread and a bounded queue, so a wedged sound device can never block the GUI; tones are synthesised to WAV once and played through `aplay`, speech goes through `spd-say`, and a machine with neither degrades to silence rather than failing. Per-event rate limiting is the point, not an optimisation: PX4 re-runs its preflight checks every ~2 s, and an alert that repeats forever is one the operator mutes.
 - **health.py** — Liveness and latency bookkeeping for background workers: heartbeats, measured rate, p95 latency, and stall detection against a declared deadline. Wired into the OFFBOARD setpoint pump (whose 500 ms limit is PX4's, not a UI preference) and the map listener, so a dead worker surfaces instead of silently freezing the last good value on screen.
 - **execution_tracker.py** — Confirms a dispatched flight command was actually physically executed (not just ACKed) by watching real position displacement.
 - **\_\_init\_\_.py** — Marks `core` as a Python package (empty).
@@ -172,15 +185,20 @@ Everything else in this guide is reference material for once those two are runni
 
 ### `scripts/gcs/ui/`
 - **cli_console.py** — Embedded terminal widget (command history, live scrolling log) for typing flight commands directly inside the GCS.
+- **guided_confirm.py** — The slide-to-confirm bar and its bounded value slider. Every irreversible action (arm, disarm, emergency kill) and every numeric one (takeoff altitude, yaw, change altitude) is gated behind a deliberate horizontal drag rather than a click or a modal whose default button is one Return away. It dispatches nothing itself - the main window still runs the same `_cmd_*` method, interlocks and all.
 - **hud_widget.py** — Cockpit PFD tab: speed/altitude tapes plus the mode/armed status banner.
 - **\_\_init\_\_.py** — Marks `ui` as a Python package (empty).
-- **motor_widget.py** — Live per-motor PWM gauge bars with color-coded saturation/idle/nominal thresholds.
+- **mission_progress.py** — Route progress strip for an executing A* path: a painted route bar with one pip per waypoint, plus waypoint index, distance to next, distance remaining along the route (not straight-line), ETA and elapsed. Display only. The ETA reads `--` rather than inventing a number when the vehicle is not moving.
+- **motor_widget.py** — The actuator workspace: a top-down Quad X frame diagram with each rotor drawn where it physically is and tinted live by its PWM, the per-motor PWM gauge bars, and the bench motor-test panel (`MAV_CMD_DO_MOTOR_TEST`). The test panel is gated on a live link, a disarmed and grounded vehicle, an expiring props-removed acknowledgement and a throttle ceiling; read the module header before changing any of it.
 - **rviz_embed_widget.py** — Embeds a real RViz2 3D window directly inside the GCS app (X11 window swallowing) for full point-cloud/SLAM 3D viewing.
+- **scaling.py** — One UI scale factor for the whole station. Rewrites the stylesheet's px dimensions and provides `px()`/`scaled_font()` for code, so a 4K panel or a desktop set to large text gets a readable station instead of the 96 DPI layout everything was authored against. Hairline `border:` widths are deliberately not scaled.
+- **shortcuts.py** — The keyboard binding table and the F1 overlay generated from it. No destructive action fires directly from a key: arm, disarm and abort all open the `guided_confirm` bar, and the emergency kill has no binding at all.
 - **sidebar_nav.py** — Left-hand vertical navigation rail that switches between GCS workspace tabs (Cockpit, SLAM, Video, Motors, Diagnostics, Terminal).
 - **slam_map_widget.py** — The 2D Tactical SLAM tab: renders the occupancy grid, drone position/heading, planned path, and the Reset Map button.
 - **styles.py** — Central dark aviation-themed Qt stylesheet (QSS) shared by the entire GCS app.
 - **toast.py** — Small transient notification popup shown in the header after actions (connect, reset, etc.).
 - **top_status_strip.py** — The header bar: network dropdown/connect controls, mode/arm badges, battery/VIO/EKF2 badges, RX/TX throughput, and VIO NED readout.
+- **value_grid.py** — The Diagnostics workspace: a grid of telemetry tiles the operator chooses, orders and sizes, over a registry of ~50 fields. Replaced nine hardcoded cards of thirty fixed values; that exact set is still the default layout, and a saved layout always wins over it. Field keys are written to settings.json, so add a new key rather than renaming one.
 - **video_feed_widget.py** — FPV Camera tab: connects to the onboard MJPEG stream and displays live D435i video with auto-reconnect.
 
 ### `scripts/gcs/` (top level)
@@ -202,16 +220,24 @@ Everything else in this guide is reference material for once those two are runni
 ### `tests/`
 - **\_env.py** — Import-path and headless-Qt setup; every test module imports it first.
 - **run_tests.sh** — Runs the suite the way CI does (`./run_tests.sh hermetic` for the numpy-only subset).
+- **test_audio.py** — Tone synthesis, the silent fallback with no backend, per-event rate limiting, and that submitting an alert never blocks the caller. Hermetic; makes no sound.
+- **test_gui_features.py** — The value grid, the slide-to-confirm bar, map right-click vs pan, the measure tool, the adaptive scale bar, the route progress strip, the motor-test interlock matrix and the shortcut table. Needs PyQt5; skipped where it is absent.
 - **test_health.py** — Stall latching, recovery, rate/p95, registry and watchdog behaviour.
 - **test_map_eval.py** — Every SLAM metric against synthetic grids, plus the CLI's exit codes.
 - **test_path_planner.py** — A* over synthetic occupancy grids: doorways, sealed walls, inflation clearance, unknown-space policy, and the regression that a goal clicked inside a wall never becomes the final waypoint.
+- **test_scaling.py** — UI scale resolution order, clamping, and the stylesheet rewrite - including that a `border: 1px solid` width is never scaled. Hermetic (no PyQt import).
 - **test_smoke.py** — Import-level checks for the PyQt5 modules (skipped where PyQt5 is absent).
 - **test_telemetry.py** — PX4 mode decoding, the `landed_state` × `is_airborne` matrix behind the disarm-vs-land interlock, RC health from `SYS_STATUS`, and vision staleness.
 
 ### Root
 - **.github/workflows/tests.yml** — CI: a hermetic numpy-only job, a PyQt5 offscreen smoke job, and a pyflakes lint gate.
 - **CMakeLists.txt** — ROS 2 `ament_cmake` build file; lists every script that gets installed as an executable.
-- **Drone_1.5.params** — Exported Pixhawk parameter dump (full onboard parameter table) for this specific vehicle.
+- **Drone_1.5.params** — Exported Pixhawk parameter dump (full onboard parameter table) for this
+  specific vehicle. Re-exported from the live aircraft on 2026-09-21 (PX4 1.17.0, git d6f12ad1).
+  The previous copy had gone badly stale - it still had `PWM_MAIN_FUNC1..4 = 0` (no motor outputs
+  assigned), `EKF2_EV_CTRL = 0` (vision fusion off) and a different board rotation, so anything
+  diffed against it read as broken when the aircraft was fine. Re-export it after parameter work
+  rather than letting it drift again.
 - **GetItCorrect.md** — Short one-page summary of the system's sensor → SLAM → EKF2 data flow.
 - **gotalldone.md** — Full historical runbook, Q&A troubleshooting log, and an archived full snapshot of an earlier README.
 - **mav.tlog** / **mav.tlog.raw** — Raw MAVLink telemetry log recordings (binary flight-log dumps, not source code).
