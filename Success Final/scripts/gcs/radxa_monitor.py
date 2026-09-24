@@ -44,13 +44,12 @@ import sys
 import time
 from typing import Optional
 
+from qt_env import pin_system_qt_plugins
+
 # Ensure system Qt5 XCB backend for X11 / Wayland compatibility
 if sys.platform.startswith("linux"):
     os.environ["QT_QPA_PLATFORM"] = "xcb"
-    for _p in ["/usr/lib/aarch64-linux-gnu/qt5/plugins", "/usr/lib/x86_64-linux-gnu/qt5/plugins"]:
-        if os.path.exists(_p):
-            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _p
-            break
+pin_system_qt_plugins()
 
 # Add package root to sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

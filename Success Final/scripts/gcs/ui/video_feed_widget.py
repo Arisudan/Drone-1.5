@@ -39,7 +39,8 @@ import time
 from typing import Optional
 
 import os
-import sys
+
+from qt_env import pin_system_qt_plugins
 
 # Ensure OpenCV does not hijack system Qt platform plugins
 try:
@@ -47,12 +48,8 @@ try:
 except ImportError:
     cv2 = None
 
-# Always enforce system Qt5 platform plugin path (overrides cv2's internal pollution)
-if sys.platform.startswith("linux"):
-    for _p in ["/usr/lib/aarch64-linux-gnu/qt5/plugins", "/usr/lib/x86_64-linux-gnu/qt5/plugins"]:
-        if os.path.exists(_p):
-            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _p
-            break
+# Re-pin the system Qt5 plugin path over cv2's (only for the distro PyQt5)
+pin_system_qt_plugins()
 if "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "xcb"
 

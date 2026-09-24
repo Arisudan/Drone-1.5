@@ -41,6 +41,27 @@ COLUMNS = ["DATE", "DURATION", "DISTANCE", "MAX ALT", "MAX SPEED",
            "BATTERY USED", "MODES", "STATUS"]
 
 
+def _fit_date_edit(edit: QDateEdit) -> None:
+    """Size a date field to the widest date it can show, in the font in use.
+
+    This used to be a fixed px(104). That was right for Lato and clipped the
+    year under any wider fallback font - which is every machine without Lato
+    installed, including a stock CI runner ("24 Sep 2026" needed 74 px of
+    text area and got 67). QDateEdit's own sizeHint also comes up short, so
+    measure every month rather than trusting it.
+    """
+    edit.ensurePolished()          # stylesheet font must be applied first
+    fm = edit.fontMetrics()
+    fmt = edit.displayFormat()
+    widest = max(fm.horizontalAdvance(QDate(2026, month, 28).toString(fmt))
+                 for month in range(1, 13))
+    # The text sits in an inner QLineEdit, which keeps ~12 px of its own
+    # margin; around that come the drop-down button and the stylesheet's
+    # horizontal padding. Counting only the outer parts left it 2 px short.
+    inner_margin = px(12)
+    edit.setMinimumWidth(widest + inner_margin + px(18) + px(8) * 2 + px(4))
+
+
 class LogsTabWidget(QWidget):
     """Flight history: statistics, filtering and export."""
 
@@ -84,7 +105,10 @@ class LogsTabWidget(QWidget):
         fl.setSpacing(10)
 
         self.search = QLineEdit(self)
-        self.search.setPlaceholderText("Search flights (mode, status, date)...")
+        # Short placeholder: the long form clipped at the minimum window width
+        # with 135% scaling. What it matches is in the tooltip instead.
+        self.search.setPlaceholderText("Search flights...")
+        self.search.setToolTip("Filters by flight mode, status or date text")
         self.search.textChanged.connect(self._apply_filters)
         fl.addWidget(self.search, 2)
 
@@ -92,9 +116,6 @@ class LogsTabWidget(QWidget):
         lbl_from.setObjectName("fieldLabel")
         fl.addWidget(lbl_from)
         self.date_from = QDateEdit(self)
-        # QDateEdit's own sizeHint came up a few pixels short of the
-        # rendered date, clipping the year.
-        self.date_from.setMinimumWidth(px(104))
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate.currentDate().addMonths(-3))
         self.date_from.dateChanged.connect(self._apply_filters)
@@ -104,11 +125,12 @@ class LogsTabWidget(QWidget):
         lbl_to.setObjectName("fieldLabel")
         fl.addWidget(lbl_to)
         self.date_to = QDateEdit(self)
-        self.date_to.setMinimumWidth(px(104))
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
         self.date_to.dateChanged.connect(self._apply_filters)
         fl.addWidget(self.date_to)
+        for edit in (self.date_from, self.date_to):
+            _fit_date_edit(edit)
 
         self.mode_filter = QComboBox(self)
         self.mode_filter.addItems(["All Modes", "OFFBOARD", "POSCTL", "ALTCTL",

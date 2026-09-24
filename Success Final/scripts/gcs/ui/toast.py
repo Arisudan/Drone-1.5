@@ -32,7 +32,7 @@ USAGE:
 ================================================================================
 """
 
-from PyQt5.QtCore import Qt, QRect, QTimer
+from PyQt5.QtCore import Qt, QEvent, QRect, QTimer
 from PyQt5.QtWidgets import QWidget, QLabel, QHBoxLayout, QApplication
 
 
@@ -68,6 +68,10 @@ class NotificationToast(QWidget):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
 
+        self._full_text = ""
+        self._watched = []
+        self._placing = False
+
     def show_message(self, text: str, color: str = "#58a6ff", duration_ms: int = 3200):
         """Display a toast, sized and placed so it cannot cover anything.
 
@@ -94,6 +98,22 @@ class NotificationToast(QWidget):
             f"border: 1px solid {color};"
         )
 
+        self._place()
+        self.show()
+        if QApplication.platformName() != "wayland":
+            self.raise_()
+        self._timer.start(duration_ms)
+
+    def _place(self):
+        """Fit the current text into the band and position the toast there."""
+        self._placing = True
+        try:
+            self._place_now()
+        finally:
+            self._placing = False
+
+    def _place_now(self):
+        text = self._full_text
         band = self._band()
         self._label.setText(text)
         if band is not None and band.width() > 0:
@@ -120,10 +140,33 @@ class NotificationToast(QWidget):
             if parent is not None:
                 self.move(max(0, (parent.width() - self.width()) // 2), 65)
 
-        self.show()
-        if QApplication.platformName() != "wayland":
-            self.raise_()
-        self._timer.start(duration_ms)
+    # The band is measured from the header's live geometry, so a toast placed
+    # just before the header reflows (window resize, a badge's text changing
+    # width, the connection controls moving between rows) would be left over
+    # whatever slid into its old spot - the AUDIO control, in practice. Watch
+    # the widgets that bound the band and re-place whenever one moves. Their
+    # Move/Resize events are sent synchronously as the layout positions them,
+    # so the toast follows in the same pass rather than a frame late.
+    _RELAYOUT_EVENTS = (QEvent.Resize, QEvent.Move)
+
+    def _watch(self, top_strip):
+        targets = [top_strip] + list(getattr(top_strip, "band_widgets", lambda: [])())
+        if [id(w) for w in targets] == [id(w) for w in self._watched]:
+            return
+        for w in self._watched:
+            try:
+                w.removeEventFilter(self)
+            except RuntimeError:        # already deleted with its window
+                pass
+        for w in targets:
+            w.installEventFilter(self)
+        self._watched = targets
+
+    def eventFilter(self, obj, event):
+        if (event.type() in self._RELAYOUT_EVENTS and self.isVisible()
+                and not self._placing and obj in self._watched):
+            self._place()
+        return False
 
     def _band(self):
         """The header's reserved notification band, in this widget's parent's
@@ -132,6 +175,7 @@ class NotificationToast(QWidget):
         top_strip = getattr(parent, "top_strip", None)
         if top_strip is None or not hasattr(top_strip, "notification_rect"):
             return None
+        self._watch(top_strip)
         rect = top_strip.notification_rect()
         if rect.isEmpty() or rect.width() <= 0:
             return None

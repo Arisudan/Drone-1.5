@@ -21,7 +21,7 @@ import _env  # noqa: F401  -- sets sys.path + offscreen Qt; must import first
 
 try:
     from PyQt5.QtWidgets import QApplication
-    from PyQt5.QtCore import QEventLoop, QTimer
+    from PyQt5.QtCore import QEventLoop
     HAVE_QT = True
 except Exception:
     HAVE_QT = False

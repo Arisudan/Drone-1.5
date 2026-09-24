@@ -304,6 +304,12 @@ class TopStatusStrip(QFrame):
     _BAND_LEFT = ("badge_vio", "badge_vision_conf", "badge_rc", "btn_mute")
     _BAND_RIGHT = ("badge_arm", "badge_mode")
 
+    def band_widgets(self) -> list:
+        """Every widget whose geometry bounds notification_rect()."""
+        return [w for w in (getattr(self, n, None)
+                            for n in self._BAND_LEFT + self._BAND_RIGHT)
+                if w is not None]
+
     def notification_rect(self) -> QRect:
         """The clear band on row 2, in this widget's own coordinates.
 

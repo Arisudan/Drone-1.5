@@ -50,19 +50,26 @@ from typing import Optional, List, Tuple
 
 import numpy as np
 
+from qt_env import pin_system_qt_plugins
+
 # Auto-configure ROS 2 Jazzy dynamic library path before any C-extensions load
 if sys.platform.startswith("linux"):
     if "QT_QPA_PLATFORM" not in os.environ:
         os.environ["QT_QPA_PLATFORM"] = "xcb"
-    for _p in ["/usr/lib/aarch64-linux-gnu/qt5/plugins", "/usr/lib/x86_64-linux-gnu/qt5/plugins"]:
-        if os.path.exists(_p):
-            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _p
-            break
+    pin_system_qt_plugins()
 
-    # If ROS 2 Jazzy libraries are not in LD_LIBRARY_PATH, re-exec once
+    # If ROS 2 Jazzy libraries are not in LD_LIBRARY_PATH, re-exec once.
+    # Only when launched as a script: the dynamic loader reads LD_LIBRARY_PATH
+    # at process start, so the fix needs a fresh process - but doing that on
+    # *import* replaced whatever process imported this module. Under
+    # `python -m unittest` sys.argv[0] is the literal "python -m unittest",
+    # so the re-exec tried to run a file by that name and killed the test run
+    # on any machine with ROS 2 installed but not sourced.
     ros_ld = "/opt/ros/jazzy/opt/rviz_ogre_vendor/lib:/opt/ros/jazzy/lib/aarch64-linux-gnu:/opt/ros/jazzy/lib"
     curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
-    if "/opt/ros/jazzy/lib" not in curr_ld and os.path.exists("/opt/ros/jazzy/lib"):
+    if (__name__ == "__main__"
+            and "/opt/ros/jazzy/lib" not in curr_ld
+            and os.path.exists("/opt/ros/jazzy/lib")):
         os.environ["LD_LIBRARY_PATH"] = f"{ros_ld}:{curr_ld}" if curr_ld else ros_ld
         ros_py = "/opt/ros/jazzy/lib/python3.12/site-packages"
         curr_py = os.environ.get("PYTHONPATH", "")
@@ -2518,11 +2525,7 @@ def main():
     args, _qt_args = build_arg_parser().parse_known_args()
     settings = apply_overrides(load_settings(), args)
 
-    if sys.platform.startswith("linux"):
-        for _p in ["/usr/lib/aarch64-linux-gnu/qt5/plugins", "/usr/lib/x86_64-linux-gnu/qt5/plugins"]:
-            if os.path.exists(_p):
-                os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _p
-                break
+    pin_system_qt_plugins()
     # Must precede the QApplication: Qt reads these attributes once, at
     # construction, and silently ignores them afterwards.
     enable_high_dpi()

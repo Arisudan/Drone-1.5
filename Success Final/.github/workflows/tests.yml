@@ -41,6 +41,10 @@ jobs:
         working-directory: tests
         run: python -m unittest test_map_eval -v
 
+      - name: Audio alerts
+        working-directory: tests
+        run: python -m unittest test_audio -v
+
 
   gui:
     # PyQt5 is installable on the runner, so the import-level smoke tests run
@@ -78,6 +82,29 @@ jobs:
       - name: RViz palette parity (2D occupancy canvas)
         working-directory: tests
         run: python -m unittest test_rviz_palette -v
+
+      # These four need PyQt5. Run without it they do not fail - they skip
+      # (60/60, 8/8 and 12/18 respectively), which in the numpy-only job would
+      # have reported green while testing nothing. Measured in an isolated
+      # numpy-only environment before choosing where each one runs.
+      - name: GUI features
+        working-directory: tests
+        run: python -m unittest test_gui_features -v
+
+      # Includes a no-clipped-text sweep at three window sizes and two scale
+      # factors. The runner has no Lato, so this also proves the layout holds
+      # under a fallback font - which is what caught the Logs date fields.
+      - name: GUI layout integrity
+        working-directory: tests
+        run: python -m unittest test_gui_layout -v
+
+      - name: Background planner worker
+        working-directory: tests
+        run: python -m unittest test_planner_worker -v
+
+      - name: UI scaling
+        working-directory: tests
+        run: python -m unittest test_scaling -v
 
   lint:
     name: lint (pyflakes via ruff)
