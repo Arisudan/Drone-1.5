@@ -1,0 +1,24 @@
+#!/bin/bash
+# IMX415 (CAM1) -> software ISP -> Iris hardware H.264 -> RTP -> OpenHD external camera input.
+# Needs kernel 7.0.11 + upstream Iris firmware (see /home/radxa/firmware-iris).
+#
+# Iris quirks this works around:
+#  - encoder only advertises 1-8 fps, so camera caps claim 8/1; libcamera still
+#    delivers the sensor's real ~30 fps with real timestamps.
+#  - rate control budgets as if the stream were 1 fps, so VIDEO_BITRATE below is
+#    the desired bitrate divided by the real frame rate.
+WIDTH=${WIDTH:-1280}
+HEIGHT=${HEIGHT:-720}
+REAL_FPS=${REAL_FPS:-30}
+TARGET_BPS=${TARGET_BPS:-4000000}          # what actually goes on air
+VIDEO_BITRATE=$(( TARGET_BPS / REAL_FPS ))  # what Iris must be told
+GOP=${GOP:-$REAL_FPS}                        # one keyframe per second
+
+exec gst-launch-1.0 -e \
+  libcamerasrc \
+  ! "video/x-raw,format=RGBA,width=${WIDTH},height=${HEIGHT},framerate=8/1" \
+  ! videoconvert ! "video/x-raw,format=NV12" \
+  ! v4l2h264enc extra-controls="controls,video_bitrate=${VIDEO_BITRATE},video_peak_bitrate=${VIDEO_BITRATE},video_bitrate_mode=1,video_gop_size=${GOP},prepend_sps_and_pps_to_idr=1" \
+  ! h264parse config-interval=-1 \
+  ! rtph264pay pt=96 mtu=1400 config-interval=-1 \
+  ! udpsink host=127.0.0.1 port=5500 sync=false

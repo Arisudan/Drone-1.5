@@ -1,0 +1,7 @@
+{
+    "dualcam_primary_video_allocated_bandwidth_perc": 60,
+    "enable_audio": 1,
+    "primary_camera_type": 2,
+    "secondary_camera_type": 255,
+    "switch_primary_and_secondary": false
+}

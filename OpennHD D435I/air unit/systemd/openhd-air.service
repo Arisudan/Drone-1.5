@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenHD air unit
+After=network.target NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/bin/openhd -a
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

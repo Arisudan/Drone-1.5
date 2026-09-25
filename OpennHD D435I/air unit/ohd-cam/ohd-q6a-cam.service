@@ -1,0 +1,14 @@
+[Unit]
+Description=Q6A IMX415 camera -> Iris H.264 -> OpenHD external camera (UDP 5500)
+After=network.target
+
+[Service]
+User=radxa
+Group=video
+Environment=TARGET_BPS=4000000
+ExecStart=/home/radxa/ohd-cam/ohd-q6a-cam.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

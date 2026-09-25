@@ -1,0 +1,29 @@
+{
+    "air_recording": 0,
+    "camera_rotation_degree": 0,
+    "enable_streaming": true,
+    "enable_ultra_secure_encryption": false,
+    "force_sw_encode": false,
+    "h26x_bitrate_kbits": 11000,
+    "h26x_intra_refresh_type": -1,
+    "h26x_keyframe_interval": 5,
+    "h26x_num_slices": 0,
+    "infiray_custom_control_zoom_absolute_colorpalete": 34817,
+    "openhd_brightness": 100,
+    "openhd_contrast": 100,
+    "openhd_flip": 0,
+    "openhd_saturation": 100,
+    "openhd_sharpness": 100,
+    "rpi_libcamera_awb_index": 0,
+    "rpi_libcamera_denoise_index": 0,
+    "rpi_libcamera_ev_value": 0,
+    "rpi_libcamera_exposure_index": 0,
+    "rpi_libcamera_metering_index": 0,
+    "rpi_libcamera_shutter_microseconds": 0,
+    "streamed_video_format": {
+        "framerate": 30,
+        "height": 480,
+        "videoCodec": "h264",
+        "width": 640
+    }
+}
