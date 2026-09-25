@@ -1,0 +1,11 @@
+{
+    "ethernet_operating_mode": 0,
+    "wifi_client_interface": "",
+    "wifi_client_password": "",
+    "wifi_client_ssid": "",
+    "wifi_hotspot_interface_override": "",
+    "wifi_hotspot_mode": 0,
+    "wifi_hotspot_password": "",
+    "wifi_hotspot_ssid": "",
+    "wifi_operating_mode": 1
+}

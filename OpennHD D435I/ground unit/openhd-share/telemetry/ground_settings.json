@@ -1,0 +1,16 @@
+{
+    "enable_rc_over_joystick": false,
+    "fc_sys_id": 1,
+    "gnd_uart_baudrate": 115200,
+    "gnd_uart_connection_type": "",
+    "gnd_uart_flow_control": false,
+    "openhd_uart_priority_fc": 1,
+    "openhd_uart_priority_openhd": 2,
+    "openhd_uart_priority_rc": 3,
+    "openhd_uart_telemetry_baudrate": 115200,
+    "openhd_uart_telemetry_connection": "",
+    "openhd_uart_telemetry_enabled": true,
+    "openhd_uart_telemetry_flow_control": false,
+    "rc_channel_mapping": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18",
+    "rc_over_joystick_update_rate_hz": 30
+}
