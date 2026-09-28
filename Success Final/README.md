@@ -1,5 +1,4 @@
 # Drone 1.5 - Radxa Drone
----
 
 ## 2026-09-15 Update
 
