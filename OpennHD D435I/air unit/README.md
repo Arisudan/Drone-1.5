@@ -24,8 +24,15 @@ Full write-up of every problem hit and fixed while getting this working: see the
 | `openhd-share/interface/networking_settings.json` | `/usr/local/share/openhd/interface/networking_settings.json` | Ethernet/network-forwarding settings (unused on this board, left at defaults). |
 | `openhd-share/video/air_camera_generic.json` | `/usr/local/share/openhd/video/air_camera_generic.json` | Declares the primary camera as an "external" camera (type 2) — i.e. video is fed in externally via RTP, not captured by OpenHD itself. |
 | `openhd-share/video/EXTERNAL_0.json` | `/usr/local/share/openhd/video/EXTERNAL_0.json` | Settings for that external camera slot: resolution/fps label, bitrate, keyframe interval, etc. |
-| `openhd-share/telemetry/air_settings.json` | `/usr/local/share/openhd/telemetry/air_settings.json` | Flight-controller serial port, baud rate, and related telemetry settings. |
+| `openhd-share/telemetry/air_settings.json` | `/usr/local/share/openhd/telemetry/air_settings.json` | Flight-controller serial port, baud rate, and related telemetry settings. Currently points at `/dev/ttyACM0` — see the FC connection note below for why. |
 
-## Known open issue
+## Flight controller (PX4) connection
 
-The Wi‑Fi adapter (`rtl88x2bu_ohd` driver, TP-Link Archer T3U Plus) has a confirmed driver bug: it never actually switches to the frequency configured in `wifibroadcast_settings.json`, always staying on channel 1 (2412MHz) regardless of what's requested. The regulatory-domain fix above is still necessary and correct, but does not fix this separate issue. Both the air and ground units currently just operate on channel 1 as a workaround. See the full write-up for details.
+**Use the Pixhawk's own USB port, plugged into a USB port on the Radxa — not the 40-pin GPIO header.** This board's GPIO header UART (physically labelled `UART6`, exposed in Linux as `/dev/ttyHS1`) was tested directly wired to the FC's TELEM2 port and never produced valid MAVLink data, even after confirming the wiring was crossed correctly, the baud rate matched (`SER_TEL2_BAUD` = 115200), and after fixing the FC's `MAV_2_CONFIG` parameter and rebooting it. The most likely explanation is a voltage mismatch: PX4 TELEM ports are 3.3V TTL, while this board's GPIO header is commonly 1.8V logic.
+
+The Pixhawk's own USB port sidesteps this entirely (verified with 2100+ correctly-parsed MAVLink messages in a 6 second test, including a working `HEARTBEAT`): plug it into any USB port on the Radxa, it shows up as `/dev/ttyACM0`, and that's what `air_settings.json` above is configured for.
+
+## Known open issues
+
+- **Wi‑Fi adapter frequency bug**: the `rtl88x2bu_ohd` driver (TP-Link Archer T3U Plus) never actually switches to the frequency configured in `wifibroadcast_settings.json`, always staying on channel 1 (2412MHz) regardless of what's requested. The regulatory-domain fix above is still necessary and correct, but does not fix this separate issue. Both the air and ground units currently just operate on channel 1 as a workaround. See the full write-up for details.
+- **D435I USB fragility**: the camera's USB3 connection has been observed to drop and re-enumerate on a different `/dev/videoN` node when the board is physically handled (e.g. while wiring other peripherals nearby). The capture script auto-detects the node each start, so a restart of `ohd-q6a-cam.service` recovers it — but the cable itself is worth checking/reseating if video ever stops unexpectedly.
