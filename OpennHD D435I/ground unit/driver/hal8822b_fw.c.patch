@@ -1,0 +1,15 @@
+--- a/hal/rtl8822b/hal8822b_fw.c
++++ b/hal/rtl8822b/hal8822b_fw.c
+@@ -13,10 +13,10 @@
+ *
+ ******************************************************************************/
+ 
+-#ifdef CONFIG_RTL8822B
+-
+ #include "drv_types.h"
+ 
++#ifdef CONFIG_RTL8822B
++
+ #ifdef LOAD_FW_HEADER_FROM_DRIVER
+ 
+ #if (defined(CONFIG_AP_WOWLAN) || (DM_ODM_SUPPORT_TYPE & (ODM_AP)))
