@@ -52,7 +52,8 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame, QSizePolicy, QStackedWidget, QComboBox,
-    QMessageBox, QMenu, QAction, QApplication, QButtonGroup
+    QMessageBox, QMenu, QAction, QApplication, QButtonGroup, QListWidget,
+    QListWidgetItem
 )
 
 from core.path_planner import AStarPathPlanner
@@ -79,6 +80,25 @@ from core.map_render import (
 RAW_MAP_LUT = map_render.RAW_MAP_LUT
 THIN_MAP_LUT = map_render.THIN_MAP_LUT
 
+# Drone glyph zoom behaviour. REF is the zoom (px per metre) at which the glyph
+# is drawn at its designed size - the canvas default; MIN/MAX bound how far it
+# follows zoom in either direction.
+DRONE_GLYPH_REF_SCALE = 36.0
+DRONE_GLYPH_MIN_SCALE = 0.4
+DRONE_GLYPH_MAX_SCALE = 3.0
+
+
+def _point_in_polygon(x: float, y: float, poly) -> bool:
+    """Even-odd test, same rule the planner uses to rasterise zones."""
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[(i + 1) % n]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+    return inside
+
 
 class SLAMMapCanvas(QWidget):
     """
@@ -94,6 +114,10 @@ class SLAMMapCanvas(QWidget):
     # only for a right-click that did NOT pan - see mouseReleaseEvent.
     context_menu_requested = pyqtSignal(object, float, float)
     ruler_changed = pyqtSignal(float, int)   # running total metres, point count
+    # Keep-out zones changed: the full list of polygons in world (x, y).
+    keepout_changed = pyqtSignal(object)
+    # Mission stops or their planned legs changed: (stops, legs).
+    mission_changed = pyqtSignal(object, object)
     # (grid, resolution, origin_x, origin_y, start_world, goal_world). The owning
     # widget forwards this to the planner thread; the answer comes back through
     # apply_plan(). The canvas never calls the planner itself any more.
@@ -196,6 +220,30 @@ class SLAMMapCanvas(QWidget):
         # say "Planning..." rather than showing a stale path as if it were
         # current. Planning is asynchronous now - see request_replan/apply_plan.
         self.planning: bool = False
+
+        # Multi-stop mission. goal_pose is always the LAST stop, so every path
+        # that only knows about a single goal (the goal crosshair, the main
+        # window's staged-goal handling) keeps working unchanged; the stops
+        # before it are what makes it a mission.
+        self.mission_stops: List[Tuple[float, float]] = []
+        self.mission_legs: list = []
+
+        # Operator keep-out zones: polygons in world (x, y). Drawn by dragging
+        # with the Keep-out tool active; the planner treats them as walls.
+        self.keepout_zones: List[List[Tuple[float, float]]] = []
+        self.keepout_active: bool = False
+        self._keepout_press_px = None          # screen QPoint of drag start
+        self._keepout_now_px = None            # screen QPoint under the cursor
+
+        # Inflation band, built on the planner thread (see
+        # SLAMMapWidget.request_inflation). Geometry is carried with the image
+        # because the map it was built from can differ from the one now shown.
+        self.inflation_qimage = None
+        self.inflation_geom = None             # (resolution, origin_x, origin_y)
+        self.inflation_visible: bool = True
+        # Set by the owner just before a side panel opens or closes, so the
+        # next resize keeps the map still under the cursor (see resizeEvent).
+        self._hold_left_edge_on_resize: bool = False
 
         # Map freshness. A frozen map looks exactly like a correct one, which is
         # the whole problem: if the bridge dies mid-flight the last picture sits
@@ -424,7 +472,13 @@ class SLAMMapCanvas(QWidget):
         return total
 
     def set_goal(self, x: float, y: float):
-        """Set goal pose in world coordinates and compute collision-free path."""
+        """Set goal pose in world coordinates and compute collision-free path.
+
+        A single goal is a one-stop mission: this replaces any mission in
+        progress, exactly as a plain left-click always has.
+        """
+        self.mission_stops = [(x, y)]
+        self.mission_legs = []
         self.goal_pose = (x, y)
         # A new goal starts a fresh trail recording, replacing whatever was left
         # on screen from the previous goal run (kept visible until now so it
@@ -434,10 +488,112 @@ class SLAMMapCanvas(QWidget):
         self._replan_path()
         self.update()
 
+    # ── multi-stop missions ─────────────────────────────────────────
+
+    def add_mission_stop(self, x: float, y: float):
+        """Append a stop to the mission (Shift+click, or the context menu).
+
+        With no mission yet this is the same as set_goal, so the first
+        Shift+click behaves like a normal click rather than silently doing
+        nothing.
+        """
+        if not self.mission_stops:
+            self.set_goal(x, y)
+            return
+        self.mission_stops.append((x, y))
+        self.goal_pose = (x, y)
+        self._mission_edited()
+
+    def remove_mission_stop(self, index: int):
+        """Drop one stop. Removing the only stop clears the goal."""
+        if not (0 <= index < len(self.mission_stops)):
+            return
+        del self.mission_stops[index]
+        if not self.mission_stops:
+            self.clear_goal()
+            return
+        self.goal_pose = self.mission_stops[-1]
+        self._mission_edited()
+
+    def move_mission_stop(self, index: int, delta: int):
+        """Reorder: move stop `index` by `delta` places (-1 up, +1 down)."""
+        j = index + delta
+        if not (0 <= index < len(self.mission_stops)) or not (0 <= j < len(self.mission_stops)):
+            return
+        stops = self.mission_stops
+        stops[index], stops[j] = stops[j], stops[index]
+        self.goal_pose = stops[-1]
+        self._mission_edited()
+
+    def _mission_edited(self):
+        """Any change to the stops invalidates the old route - replan it."""
+        self.mission_legs = []
+        self.mission_changed.emit(list(self.mission_stops), [])
+        self._replan_path()
+        self.update()
+
+    def is_mission(self) -> bool:
+        return len(self.mission_stops) > 1
+
+    # ── keep-out zones ──────────────────────────────────────────────
+
+    def set_keepout_active(self, active: bool):
+        """While active, left-drag draws a keep-out rectangle instead of
+        staging a goal. Mutually exclusive with the ruler (the widget enforces
+        it) - both repurpose left-click."""
+        self.keepout_active = bool(active)
+        self._keepout_press_px = None
+        self._keepout_now_px = None
+        self.setCursor(Qt.CrossCursor if active else Qt.ArrowCursor)
+        self.update()
+
+    def add_keepout_zone(self, polygon):
+        pts = [(float(x), float(y)) for x, y in polygon]
+        if len(pts) >= 3:
+            self.keepout_zones.append(pts)
+            self._keepouts_edited()
+
+    def remove_keepout_at(self, x: float, y: float) -> bool:
+        """Remove the most recently drawn zone containing (x, y)."""
+        for i in range(len(self.keepout_zones) - 1, -1, -1):
+            if _point_in_polygon(x, y, self.keepout_zones[i]):
+                del self.keepout_zones[i]
+                self._keepouts_edited()
+                return True
+        return False
+
+    def zone_at(self, x: float, y: float) -> bool:
+        return any(_point_in_polygon(x, y, z) for z in self.keepout_zones)
+
+    def clear_keepouts(self):
+        if self.keepout_zones:
+            self.keepout_zones = []
+            self._keepouts_edited()
+
+    def _keepouts_edited(self):
+        """Tell the owner (it pushes zones into the shared planner), then
+        replan: a route planned before a zone was drawn may cross it."""
+        self.keepout_changed.emit([list(z) for z in self.keepout_zones])
+        if self.goal_pose is not None:
+            self._replan_path()
+        self.update()
+
+    def set_inflation_image(self, image, geom):
+        self.inflation_qimage = image
+        self.inflation_geom = geom
+        self.update()
+
+    def set_inflation_visible(self, visible: bool):
+        self.inflation_visible = bool(visible)
+        self.update()
+
     def clear_goal(self):
         """Clear current goal pose and planned path. Deliberately leaves the
         trail alone - it stays visible as a record of this run until the next
         goal is set (see set_goal()) or it's cleared manually."""
+        self.mission_stops = []
+        self.mission_legs = []
+        self.mission_changed.emit([], [])
         self.goal_pose = None
         self.planned_waypoints = []
         self.planned_distance = 0.0
@@ -485,6 +641,24 @@ class SLAMMapCanvas(QWidget):
             return
 
         gx, gy = self.goal_pose
+        stops = list(self.mission_stops) or [(gx, gy)]
+        if self.occupancy_grid is None and len(stops) > 1:
+            # No map: straight lines through every stop, flagged as unplanned.
+            dist, here = 0.0, (self.drone_x, self.drone_y)
+            for st in stops:
+                dist += math.hypot(st[0] - here[0], st[1] - here[1])
+                here = st
+            self.planned_waypoints = list(stops)
+            self.planned_distance = dist
+            self.planned_est_time = dist / 0.5
+            self.path_status_msg = (
+                f"[WARNING] No SLAM map loaded. Direct lines through "
+                f"{len(stops)} stops: {dist:.2f}m")
+            self.planning = False
+            self.goal_staged.emit(gx, gy, self.planned_waypoints, dist,
+                                  self.planned_est_time)
+            self.update()
+            return
         if self.occupancy_grid is None:
             dist = math.hypot(gx - self.drone_x, gy - self.drone_y)
             self.planned_waypoints = [(gx, gy)]
@@ -501,9 +675,12 @@ class SLAMMapCanvas(QWidget):
 
         self.planning = True
         self.path_status_msg = "Planning..."
+        # A mission is sent as a list of stops, a single goal as one point;
+        # the planner thread tells them apart by type (see PlannerWorker).
+        target = stops if len(stops) > 1 else (gx, gy)
         self.plan_requested.emit(
             self.occupancy_grid, self.map_res, self.map_ox, self.map_oy,
-            (self.drone_x, self.drone_y), (gx, gy))
+            (self.drone_x, self.drone_y), target)
         self.update()
 
     # Kept as the old name so nothing that calls it breaks; it is now a request.
@@ -518,6 +695,8 @@ class SLAMMapCanvas(QWidget):
         gx, gy = self.goal_pose
 
         if result and result.get("success"):
+            self.mission_legs = list(result.get("legs") or [])
+            self.mission_changed.emit(list(self.mission_stops), self.mission_legs)
             self.planned_waypoints = result["waypoints"]
             self.planned_distance = result["total_distance_m"]
             self.planned_est_time = result.get("est_flight_time_s", 0.0)
@@ -532,6 +711,8 @@ class SLAMMapCanvas(QWidget):
             self.planned_est_time = 0.0
             message = (result or {}).get("message", "No clear path")
             self.path_status_msg = f"[BLOCKED] {message}"
+            self.mission_legs = list((result or {}).get("legs") or [])
+            self.mission_changed.emit(list(self.mission_stops), self.mission_legs)
             self.goal_staged.emit(gx, gy, [], 0.0, 0.0)
         self.update()
 
@@ -570,6 +751,21 @@ class SLAMMapCanvas(QWidget):
     # unintended movement a hand makes while clicking, and well below the
     # smallest movement anyone makes when meaning to drag.
     RIGHT_CLICK_SLOP_PX = 6
+    # A keep-out drag smaller than this in either direction is a slip, not a zone.
+    KEEPOUT_MIN_PX = 6
+
+    def resizeEvent(self, event):
+        """Keep the map still when a side panel takes or returns width.
+
+        The view is centred on the canvas, so narrowing it by a panel's width
+        moved the whole map sideways by half of that - including under the
+        cursor, on the very click that added the second mission stop. Only
+        panel toggles do this; an ordinary window resize still recentres.
+        """
+        if self._hold_left_edge_on_resize and event.oldSize().width() > 0:
+            self.pan_x += (event.oldSize().width() - event.size().width()) / 2.0
+            self._hold_left_edge_on_resize = False
+        super().resizeEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
         cx = self.width() / 2.0 + self.pan_x
@@ -580,6 +776,13 @@ class SLAMMapCanvas(QWidget):
             if self.ruler_active:
                 # Measuring, not commanding. See set_ruler_active.
                 self.add_ruler_point(wx, wy)
+            elif self.keepout_active:
+                self._keepout_press_px = event.pos()
+                self._keepout_now_px = event.pos()
+            elif event.modifiers() & Qt.ShiftModifier:
+                # Shift+click appends a stop: the QGroundControl convention
+                # of building a route by clicking points in order.
+                self.add_mission_stop(wx, wy)
             else:
                 self.set_goal(wx, wy)
         elif event.button() in (Qt.RightButton, Qt.MiddleButton):
@@ -593,6 +796,10 @@ class SLAMMapCanvas(QWidget):
                 self._right_moved = False
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._keepout_press_px is not None:
+            self._keepout_now_px = event.pos()
+            self.update()
+            return
         if self.ruler_active and not self._dragging_pan:
             cx = self.width() / 2.0 + self.pan_x
             cy = self.height() / 2.0 + self.pan_y
@@ -622,6 +829,21 @@ class SLAMMapCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and self._keepout_press_px is not None:
+            a, b = self._keepout_press_px, event.pos()
+            self._keepout_press_px = self._keepout_now_px = None
+            if abs(a.x() - b.x()) >= self.KEEPOUT_MIN_PX and abs(a.y() - b.y()) >= self.KEEPOUT_MIN_PX:
+                # Convert all four SCREEN corners, not two world corners: with
+                # the map rotated, a screen rectangle is a rotated rectangle in
+                # the world, and the zone must be what the operator drew.
+                cx = self.width() / 2.0 + self.pan_x
+                cy = self.height() / 2.0 + self.pan_y
+                corners = [(a.x(), a.y()), (b.x(), a.y()), (b.x(), b.y()), (a.x(), b.y())]
+                self.add_keepout_zone(
+                    [self._screen_to_world(sx, sy, cx, cy) for sx, sy in corners])
+            else:
+                self.update()
+            return
         if event.button() == Qt.RightButton:
             was_click = not self._right_moved
             self._dragging_pan = False
@@ -644,6 +866,13 @@ class SLAMMapCanvas(QWidget):
         """Escape clears an in-progress measurement before anything else sees it."""
         if event.key() == Qt.Key_Escape and (self.ruler_points or self.ruler_cursor):
             self.clear_ruler()
+            return
+        if event.key() == Qt.Key_Escape and self._keepout_press_px is not None:
+            self._keepout_press_px = self._keepout_now_px = None
+            self.update()
+            return
+        if event.key() in (Qt.Key_Backspace, Qt.Key_Delete) and self.mission_stops:
+            self.remove_mission_stop(len(self.mission_stops) - 1)
             return
         super().keyPressEvent(event)
 
@@ -689,6 +918,11 @@ class SLAMMapCanvas(QWidget):
         # Live 2D Occupancy Grid (if loaded)
         self._draw_occupancy_grid(p, cx, cy)
 
+        # Planner inflation band, then operator keep-out zones: both are
+        # "the vehicle may not go here", drawn above the map, below the route.
+        self._draw_inflation(p, cx, cy)
+        self._draw_keepouts(p, cx, cy)
+
         # Trajectory Breadcrumb Trail
         self._draw_trail(p, cx, cy)
 
@@ -697,6 +931,9 @@ class SLAMMapCanvas(QWidget):
 
         # Goal Pose Crosshair
         self._draw_goal_crosshair(p, cx, cy)
+
+        # Numbered mission stops (only when there is more than one)
+        self._draw_mission_stops(p, cx, cy)
 
         # Measure-tool polyline (drawn with the scene so it stays pinned to the
         # world as the map is rotated or panned)
@@ -816,6 +1053,83 @@ class SLAMMapCanvas(QWidget):
             p.setOpacity(RVIZ_MAP_THIN_ALPHA)
             p.drawImage(target_rect, self.map_thin_qimage)
             p.setOpacity(1.0)
+
+    def _draw_inflation(self, p: QPainter, cx: float, cy: float):
+        """The planner's inflated margin, from the same mask the search uses."""
+        if not self.inflation_visible or self.inflation_qimage is None or not self.inflation_geom:
+            return
+        img = self.inflation_qimage
+        if img.isNull():
+            return
+        res, ox, oy = self.inflation_geom
+        rows, cols = img.height(), img.width()
+        target = QRectF(cx + oy * self.scale,
+                        cy - (ox + rows * res) * self.scale,
+                        cols * res * self.scale,
+                        rows * res * self.scale)
+        p.drawImage(target, img)
+
+    def _draw_keepouts(self, p: QPainter, cx: float, cy: float):
+        """Keep-out zones: red, hatched, dashed edge - unmistakably not a map
+        feature - plus the in-progress drag preview."""
+        danger = QColor(PALETTE.get("danger", "#f85149"))
+        zones = list(self.keepout_zones)
+        if not zones and self._keepout_press_px is None:
+            return
+        p.save()
+        fill = QColor(danger)
+        fill.setAlpha(45)
+        hatch = QColor(danger)
+        hatch.setAlpha(110)
+        edge = QPen(danger, 1.8, Qt.DashLine)
+        for zone in zones:
+            poly = QPolygonF([self._world_to_screen(x, y, cx, cy) for x, y in zone])
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(fill))
+            p.drawPolygon(poly)
+            p.setBrush(QBrush(hatch, Qt.BDiagPattern))
+            p.drawPolygon(poly)
+            p.setPen(edge)
+            p.setBrush(Qt.NoBrush)
+            p.drawPolygon(poly)
+            c = poly.boundingRect().center()
+            label = QRectF(c.x() - 34, c.y() - 8, 68, 16)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(QColor(13, 17, 23, 200)))
+            p.drawRoundedRect(label, 3, 3)
+            p.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(label, Qt.AlignCenter, "KEEP-OUT")
+        p.restore()
+
+        if self._keepout_press_px is not None and self._keepout_now_px is not None:
+            # The preview is drawn in screen space, un-rotated, because that
+            # is the rectangle the operator is dragging.
+            p.save()
+            p.resetTransform()
+            a, b = self._keepout_press_px, self._keepout_now_px
+            rect = QRectF(QPointF(a), QPointF(b)).normalized()
+            p.setPen(QPen(danger, 1.5, Qt.DashLine))
+            p.setBrush(QBrush(fill))
+            p.drawRect(rect)
+            p.restore()
+
+    def _draw_mission_stops(self, p: QPainter, cx: float, cy: float):
+        """Numbered stop markers, so the order the vehicle will fly them is on
+        the map itself and not only in the list."""
+        if len(self.mission_stops) < 2:
+            return
+        p.save()
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        accent = QColor(PALETTE.get("accent", "#58a6ff"))
+        for i, (x, y) in enumerate(self.mission_stops):
+            pt = self._world_to_screen(x, y, cx, cy)
+            p.setPen(QPen(QColor(226, 232, 240), 1.8))
+            p.setBrush(QBrush(accent))
+            p.drawEllipse(pt, 9, 9)
+            p.setPen(QColor(13, 17, 23))
+            p.drawText(QRectF(pt.x() - 9, pt.y() - 9, 18, 18), Qt.AlignCenter, str(i + 1))
+        p.restore()
 
     def _draw_trail(self, p: QPainter, cx: float, cy: float):
         if not self.trail_visible or len(self.trail) < 2:
@@ -963,6 +1277,20 @@ class SLAMMapCanvas(QWidget):
         p.setPen(QPen(QColor(56, 189, 248, 140), 1, Qt.DashLine))
         p.setBrush(QBrush(QColor(56, 189, 248, 35)))
         p.drawPolygon(fov_cone)
+
+        # The airframe scales with the map. It used to be drawn in fixed
+        # pixels, so zooming in left a thumbnail-sized icon on a huge room and
+        # zooming out left a large icon covering the walls around it - the one
+        # symbol whose size the operator reads against the map told them
+        # nothing. It is now proportional to zoom (1.0 at the default 36 px/m,
+        # so the default view looks exactly as before) and clamped: below the
+        # floor it becomes an unreadable dot, above the ceiling it hides the
+        # cells the operator zoomed in to inspect. Pens scale with it, so line
+        # weights stay in proportion. The FOV cone above is already in metres
+        # and is deliberately left outside this transform.
+        k = max(DRONE_GLYPH_MIN_SCALE,
+                min(DRONE_GLYPH_MAX_SCALE, self.scale / DRONE_GLYPH_REF_SCALE))
+        p.scale(k, k)
 
         arm_len = 16.0
 
@@ -1529,6 +1857,37 @@ class SLAMMapWidget(QWidget):
         self.canvas.context_menu_requested.connect(self._on_map_context_menu)
         self.canvas.ruler_changed.connect(self._on_ruler_changed)
         self.canvas.plan_requested.connect(self._on_plan_requested)
+        self.canvas.keepout_changed.connect(self._on_keepout_changed)
+        self.canvas.mission_changed.connect(self._on_mission_changed)
+
+        # Map-editing tools live in a vertical strip on the map's own left edge
+        # - QGroundControl's Plan View convention - not in the toolbar row,
+        # which is already full at the minimum window size (test_gui_layout).
+        self.map_tool_strip = QFrame(self.canvas)
+        self.map_tool_strip.setObjectName("mapToolStrip")
+        strip = QVBoxLayout(self.map_tool_strip)
+        strip.setContentsMargins(0, 0, 0, 0)
+        strip.setSpacing(4)
+        self.btn_inflation = self._map_tool(
+            "Inflation",
+            "Show the planner's safety margin: cells the vehicle's centre cannot "
+            "enter because its body would touch a wall or keep-out zone "
+            "(RViz costmap 'inscribed' cyan)",
+            checkable=True)
+        self.btn_inflation.setParent(self.map_tool_strip)
+        self.btn_inflation.setChecked(True)
+        self.btn_inflation.toggled.connect(self.canvas_set_inflation_visible)
+        strip.addWidget(self.btn_inflation)
+        self.btn_keepout = self._map_tool(
+            "Keep-out",
+            "Draw keep-out zones. While active, left-drag draws a rectangle the "
+            "planner will never route through. Right-click a zone to remove it.",
+            checkable=True)
+        self.btn_keepout.setParent(self.map_tool_strip)
+        self.btn_keepout.toggled.connect(self._on_keepout_toggled)
+        strip.addWidget(self.btn_keepout)
+        self.map_tool_strip.adjustSize()
+        self.map_tool_strip.move(8, 8)
         # Needed for the canvas keyPressEvent (Esc clears a measurement) to be
         # reachable at all - without it the canvas never receives key events.
         self.canvas.setFocusPolicy(Qt.StrongFocus)
@@ -1544,7 +1903,15 @@ class SLAMMapWidget(QWidget):
         self.btn_rviz_close.clicked.connect(self.rviz_widget.stop_rviz)
         self.rviz_widget.rviz_state_changed.connect(self._on_rviz_state_changed)
 
-        layout.addWidget(self.view_stack, 1)
+        # The view stack shares a row with the mission panel, which only
+        # appears once the route has more than one stop.
+        view_row = QHBoxLayout()
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(6)
+        view_row.addWidget(self.view_stack, 1)
+        self.mission_panel = self._build_mission_panel()
+        view_row.addWidget(self.mission_panel)
+        layout.addLayout(view_row, 1)
 
         # Default to 2D Blueprint view on launch
         self._set_view_mode(0)
@@ -1704,6 +2071,9 @@ class SLAMMapWidget(QWidget):
         self.planner_worker = worker
         worker.plan_ready.connect(self._on_plan_ready)
         worker.quality_ready.connect(self._on_quality_ready)
+        worker.inflation_ready.connect(self._on_inflation_ready)
+        # Zones drawn before the worker existed must reach its planner too.
+        worker.planner.set_keepout_zones(self.canvas.keepout_zones)
 
     def _on_plan_requested(self, grid, resolution, origin_x, origin_y,
                            start, goal):
@@ -1712,11 +2082,19 @@ class SLAMMapWidget(QWidget):
         if worker is None:
             # No worker attached (bench use, tests): plan inline rather than
             # leaving the goal permanently stuck on "Planning...".
-            self.canvas.apply_plan(self.canvas.planner.plan(
-                grid, resolution, origin_x, origin_y, start, goal))
+            planner = self.canvas.planner
+            if isinstance(goal, list):
+                result = planner.plan_route(grid, resolution, origin_x, origin_y, start, goal)
+            else:
+                result = planner.plan(grid, resolution, origin_x, origin_y, start, goal)
+            self.canvas.apply_plan(result)
             return
-        self._plan_token = worker.request_plan(
-            grid, resolution, origin_x, origin_y, start, goal)
+        if isinstance(goal, list):
+            self._plan_token = worker.request_route(
+                grid, resolution, origin_x, origin_y, start, goal)
+        else:
+            self._plan_token = worker.request_plan(
+                grid, resolution, origin_x, origin_y, start, goal)
 
     def _on_plan_ready(self, token: int, result):
         """Apply a plan, but only the one we are still waiting for.
@@ -1729,6 +2107,146 @@ class SLAMMapWidget(QWidget):
             return
         self._plan_token = None
         self.canvas.apply_plan(result)
+
+    # ── inflation layer ────────────────────────────────────────────
+
+    def canvas_set_inflation_visible(self, visible: bool):
+        self.canvas.set_inflation_visible(visible)
+        if visible:
+            self.request_inflation()
+
+    def request_inflation(self):
+        """Rebuild the inflation band on the planner thread (~50 ms on a large
+        map - far too slow for the GUI thread, which also feeds the OFFBOARD
+        setpoint pump). Skipped while the layer is hidden."""
+        if not self.canvas.inflation_visible:
+            return
+        grid = self.canvas.occupancy_grid
+        if grid is None or self.canvas.map_res <= 0:
+            return
+        worker = getattr(self, "planner_worker", None)
+        if worker is None:
+            from core.map_render import build_inflation_image
+            raw, inflated = self.canvas.planner.inflated_mask(
+                grid, self.canvas.map_res, self.canvas.map_ox, self.canvas.map_oy)
+            self.canvas.set_inflation_image(
+                build_inflation_image(raw, inflated),
+                (self.canvas.map_res, self.canvas.map_ox, self.canvas.map_oy))
+            return
+        self._inflation_token = worker.request_inflation(
+            grid, self.canvas.map_res, self.canvas.map_ox, self.canvas.map_oy)
+
+    def _on_inflation_ready(self, token: int, image, geom):
+        if token != getattr(self, "_inflation_token", None):
+            return
+        self._inflation_token = None
+        self.canvas.set_inflation_image(image, geom)
+
+    # ── keep-out zones ─────────────────────────────────────────────
+
+    def _on_keepout_toggled(self, checked: bool):
+        if checked and self.btn_ruler.isChecked():
+            self.btn_ruler.setChecked(False)   # both repurpose left-click
+        self.canvas.set_keepout_active(checked)
+        if checked:
+            self.canvas.setFocus()
+
+    def _on_keepout_changed(self, zones):
+        """Push zones into every planner that could route the aircraft.
+
+        The worker's planner is the one the main window flies with - flight
+        detours and the in-flight collision check both use it - so a zone that
+        only reached the canvas's fallback planner would be drawn on screen
+        and ignored in the air.
+        """
+        self.canvas.planner.set_keepout_zones(zones)
+        worker = getattr(self, "planner_worker", None)
+        if worker is not None:
+            worker.planner.set_keepout_zones(zones)
+        self.request_inflation()
+
+    # ── mission panel ──────────────────────────────────────────────
+
+    def _build_mission_panel(self) -> QFrame:
+        panel = QFrame(self)
+        panel.setObjectName("missionPanel")
+        panel.setProperty("class", "cardFrame")
+        panel.setFixedWidth(px(230))
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+        title = QLabel("MISSION", panel)
+        title.setObjectName("cardHeading")
+        v.addWidget(title)
+        self.lbl_mission_stats = QLabel("", panel)
+        self.lbl_mission_stats.setObjectName("fieldSubLabel")
+        self.lbl_mission_stats.setWordWrap(True)
+        v.addWidget(self.lbl_mission_stats)
+        self.list_mission = QListWidget(panel)
+        self.list_mission.setToolTip(
+            "Stops in flight order. Shift+click the map to add, Backspace removes the last.")
+        v.addWidget(self.list_mission, 1)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        for text, tip, fn in (
+                ("▲", "Move selected stop earlier", lambda: self._move_selected(-1)),
+                ("▼", "Move selected stop later", lambda: self._move_selected(+1)),
+                ("✕", "Remove selected stop", self._remove_selected),
+                ("Clear", "Clear the whole mission", self._handle_clear_goal)):
+            b = QPushButton(text, panel)
+            b.setObjectName("mapTool")
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        v.addLayout(row)
+        hint = QLabel("Shift+click adds a stop", panel)
+        hint.setObjectName("fieldSubLabel")
+        v.addWidget(hint)
+        panel.setVisible(False)
+        return panel
+
+    def _selected_stop(self) -> int:
+        row = self.list_mission.currentRow()
+        return row if row >= 0 else -1
+
+    def _move_selected(self, delta: int):
+        i = self._selected_stop()
+        if i < 0:
+            return
+        self.canvas.move_mission_stop(i, delta)
+        self.list_mission.setCurrentRow(max(0, min(len(self.canvas.mission_stops) - 1, i + delta)))
+
+    def _remove_selected(self):
+        i = self._selected_stop()
+        if i >= 0:
+            self.canvas.remove_mission_stop(i)
+
+    def _on_mission_changed(self, stops, legs):
+        """Refresh the list and the stats line. Leg figures appear only once
+        the route has been planned; until then the stops are listed bare."""
+        show = len(stops) > 1
+        if show == self.mission_panel.isHidden():
+            self.canvas._hold_left_edge_on_resize = True
+        self.mission_panel.setVisible(show)
+        current = self.list_mission.currentRow()
+        self.list_mission.clear()
+        for i, (x, y) in enumerate(stops):
+            leg = legs[i] if i < len(legs) else None
+            leg_txt = f"  {leg['distance_m']:.1f}m" if leg else ""
+            self.list_mission.addItem(QListWidgetItem(
+                f"{i + 1}. N{x:+.2f} E{y:+.2f}{leg_txt}"))
+        if 0 <= current < self.list_mission.count():
+            self.list_mission.setCurrentRow(current)
+        if legs and len(legs) == len(stops):
+            total = sum(l["distance_m"] for l in legs)
+            t = sum(l.get("est_flight_time_s", 0.0) for l in legs)
+            self.lbl_mission_stats.setText(
+                f"{len(stops)} stops  •  {total:.2f} m  •  ~{t:.0f} s")
+        elif legs:
+            self.lbl_mission_stats.setText(
+                f"{len(stops)} stops  •  blocked at stop {len(legs) + 1}")
+        else:
+            self.lbl_mission_stats.setText(f"{len(stops)} stops  •  planning…")
 
     def request_map_quality(self):
         """Score the current map. Cheap to ask, answered on the worker thread."""
@@ -1907,6 +2425,18 @@ class SLAMMapWidget(QWidget):
         act_fly.triggered.connect(lambda: self._request_fly_here(wx, wy))
         menu.addAction(act_fly)
 
+        act_stop = QAction("Add mission stop here", menu)
+        act_stop.setToolTip("Append this point to the route (same as Shift+click)")
+        act_stop.triggered.connect(lambda: self.canvas.add_mission_stop(wx, wy))
+        menu.addAction(act_stop)
+
+        if self.canvas.mission_stops:
+            act_pop = QAction("Remove last stop", menu)
+            act_pop.setToolTip("Backspace does the same on the map")
+            act_pop.triggered.connect(lambda: self.canvas.remove_mission_stop(
+                len(self.canvas.mission_stops) - 1))
+            menu.addAction(act_pop)
+
         # Altitude submenu mirrors the toolbar selector rather than duplicating
         # its list, so the two can never drift apart.
         alt_menu = menu.addMenu("Cruise altitude")
@@ -1930,6 +2460,16 @@ class SLAMMapWidget(QWidget):
         act_centre = QAction("Centre view here", menu)
         act_centre.triggered.connect(lambda: self._centre_view_on(wx, wy))
         menu.addAction(act_centre)
+
+        menu.addSeparator()
+        if self.canvas.zone_at(wx, wy):
+            act_rm_zone = QAction("Remove this keep-out zone", menu)
+            act_rm_zone.triggered.connect(lambda: self.canvas.remove_keepout_at(wx, wy))
+            menu.addAction(act_rm_zone)
+        act_clear_zones = QAction("Clear all keep-out zones", menu)
+        act_clear_zones.setEnabled(bool(self.canvas.keepout_zones))
+        act_clear_zones.triggered.connect(self.canvas.clear_keepouts)
+        menu.addAction(act_clear_zones)
 
         menu.addSeparator()
 
@@ -1987,6 +2527,8 @@ class SLAMMapWidget(QWidget):
     # -------------------------------------------------------------------------
 
     def _on_ruler_toggled(self, checked: bool):
+        if checked and getattr(self, "btn_keepout", None) is not None and self.btn_keepout.isChecked():
+            self.btn_keepout.setChecked(False)
         self.canvas.set_ruler_active(checked)
         self.lbl_ruler.setVisible(checked)
         if checked:
@@ -2082,6 +2624,7 @@ class SLAMMapWidget(QWidget):
         if now - getattr(self, "_last_quality_request", 0.0) >= 1.0:
             self._last_quality_request = now
             self.request_map_quality()
+            self.request_inflation()
 
     def load_bench_mock_map(self):
         """Generate and display realistic bench indoor floorplan for testing."""
@@ -2108,7 +2651,15 @@ class SLAMMapWidget(QWidget):
         of a flight; that instruction now lives on the canvas overlay, next to
         where the click happens.
         """
-        if waypoints:
+        n_stops = len(self.canvas.mission_stops)
+        if waypoints and n_stops > 1:
+            self.lbl_path_info.setText(
+                f"MISSION  {n_stops} stops   \u2022   {dist:.2f} m   "
+                f"\u2022   {len(waypoints)} WP   \u2022   ~{est_time:.0f}s")
+            self.lbl_path_info.setToolTip("Planned obstacle-aware route through every stop")
+            self._set_state(self.lbl_path_info, "ok")
+            self.btn_execute_path.setEnabled(True)
+        elif waypoints:
             self.lbl_path_info.setText(
                 f"GOAL  N {gx:+.2f}  E {gy:+.2f}   \u2022   {dist:.2f} m   "
                 f"\u2022   {len(waypoints)} WP   \u2022   ~{est_time:.0f}s")

@@ -1373,6 +1373,17 @@ class DroneGCSMainWindow(QMainWindow):
                     f"Reached Waypoint W{self.current_wpt_idx+1} ({curr_target[0]:+.2f}, {curr_target[1]:+.2f})"
                 )
                 self.audio.alert(Severity.INFO, key=None)
+                # A reached waypoint that is (within a wall-snap) the next
+                # mission stop retires that stop, so a later detour does not
+                # send the vehicle back to it.
+                remaining = getattr(self, "_mission_stops_remaining", None)
+                if remaining and math.hypot(remaining[0][0] - curr_target[0],
+                                            remaining[0][1] - curr_target[1]) < 0.6:
+                    done = remaining.pop(0)
+                    if remaining:
+                        self.console.log_success(
+                            f"Mission stop reached ({done[0]:+.2f}, {done[1]:+.2f}) - "
+                            f"{len(remaining)} to go")
                 self.current_wpt_idx += 1
                 if self.current_wpt_idx < len(self.active_waypoints):
                     next_wpt = self.active_waypoints[self.current_wpt_idx]
@@ -1918,6 +1929,16 @@ class DroneGCSMainWindow(QMainWindow):
             )
             self.toast.show_message("Warning: Vision Odometry Degraded", "#d29922", 4000)
 
+        # Remember the mission's stops so an in-flight detour can re-route
+        # through the ones not yet reached. Taken from the canvas only when its
+        # route ends where this path ends - "Fly here now" and other callers
+        # pass their own single-goal path.
+        stops = list(getattr(self.page_slam.canvas, "mission_stops", []) or [])
+        end = waypoints[-1]
+        if not (stops and math.hypot(stops[-1][0] - end[0], stops[-1][1] - end[1]) < 0.6):
+            stops = [tuple(end)]
+        self._mission_stops_remaining = [tuple(st) for st in stops]
+
         # 3. Ground Takeoff vs In-Air Transition Check
         selected_alt = self.page_slam.get_cruise_altitude()
         self.cruise_z = -abs(selected_alt)
@@ -2277,8 +2298,16 @@ class DroneGCSMainWindow(QMainWindow):
         grid, res, ox, oy = self.latest_map_data
         final_goal = self.active_waypoints[-1]
         self._detour_generation = self._path_generation
-        self._detour_token = self.planner_worker.request_plan(
-            grid, res, ox, oy, (t.x, t.y), final_goal)
+        remaining = list(getattr(self, "_mission_stops_remaining", None) or [])
+        if len(remaining) > 1:
+            # A mission: detour through every stop not yet reached. Planning
+            # only to the final waypoint - as a single goal did - would drop
+            # the intermediate stops without a word.
+            self._detour_token = self.planner_worker.request_route(
+                grid, res, ox, oy, (t.x, t.y), remaining)
+        else:
+            self._detour_token = self.planner_worker.request_plan(
+                grid, res, ox, oy, (t.x, t.y), final_goal)
         self.console.log_info("Searching for a detour around the obstacle...")
 
     def _on_detour_ready(self, token: int, result) -> None:

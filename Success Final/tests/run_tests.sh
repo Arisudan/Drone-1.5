@@ -21,4 +21,5 @@ fi
 # test_gui_layout is last: it imports drone_gcs, whose module body re-execs
 # the interpreter to inject ROS 2 library paths.
 python3 -m unittest ${HERMETIC} test_smoke test_statustext test_command_ack test_motor_test test_video_sources \
-    test_rviz_palette test_gui_features test_planner_worker test_param_codec test_params_tab test_gui_layout -v
+    test_rviz_palette test_gui_features test_planner_worker test_param_codec test_params_tab test_drone_glyph_zoom test_keepout_mission \
+    test_gui_layout -v

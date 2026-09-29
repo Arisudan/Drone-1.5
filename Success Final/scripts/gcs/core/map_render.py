@@ -139,3 +139,29 @@ def build_map_image(grid: np.ndarray, thin: bool) -> QImage:
     lut = THIN_MAP_LUT if thin else RAW_MAP_LUT
     rgba = np.ascontiguousarray(lut[grid.view(np.uint8)][::-1])
     return QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+
+
+# Inflation band colour: RViz's costmap "inscribed" cyan (value 99), translucent.
+# The band marks cells the vehicle's CENTRE cannot enter because its body would
+# touch an obstacle - exactly what RViz's costmap scheme shows as cyan, so the
+# 2D canvas and the embedded RViz view keep one meaning for the colour.
+INFLATION_RGBA = (0, 255, 255, 70)
+
+
+def build_inflation_image(raw_mask: np.ndarray, inflated_mask: np.ndarray) -> QImage:
+    """Render the inflation band (inflated but not itself an obstacle) as RGBA.
+
+    Obstacles are left transparent: the map layers already draw them, and the
+    band is only the margin the planner adds around them. Same row flip and
+    thread-safe copy as build_map_image, so it can be built on the planner
+    thread and handed straight to the canvas.
+    """
+    if raw_mask is None or inflated_mask is None or raw_mask.shape != inflated_mask.shape:
+        return QImage()
+    h, w = raw_mask.shape
+    band = (inflated_mask > 0) & ~raw_mask.astype(bool)
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[band] = INFLATION_RGBA
+    rgba = np.ascontiguousarray(rgba[::-1])
+    return QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
+

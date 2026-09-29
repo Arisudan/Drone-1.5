@@ -91,6 +91,10 @@ jobs:
         working-directory: tests
         run: python -m unittest test_rviz_palette -v
 
+      - name: Keep-out zones, multi-stop missions, inflation layer
+        working-directory: tests
+        run: python -m unittest test_keepout_mission test_drone_glyph_zoom -v
+
       # These four need PyQt5. Run without it they do not fail - they skip
       # (60/60, 8/8 and 12/18 respectively), which in the numpy-only job would
       # have reported green while testing nothing. Measured in an isolated

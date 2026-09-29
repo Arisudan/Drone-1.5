@@ -68,6 +68,53 @@ def _inflate_obstacles_numpy(obstacle_mask: np.ndarray, radius_cells: int) -> np
     return inflated.astype(np.uint8)
 
 
+def rasterise_zones(zones, shape: Tuple[int, int], resolution: float,
+                    origin_x: float, origin_y: float) -> np.ndarray:
+    """Boolean mask of the grid cells whose centre lies inside any zone.
+
+    ``zones`` is a sequence of polygons, each a sequence of (x, y) world points
+    in the planner's frame (x = North, y = East, metres). A cell belongs to a
+    zone when its centre does, using even-odd ray casting, so rectangles,
+    L-shapes and any other simple polygon behave the same way.
+
+    Only each polygon's bounding box is tested, not the whole grid: a keep-out
+    zone is typically a few square metres of a map that can be 1000 x 1000
+    cells, and testing every cell for every zone would cost more than the A*
+    search it is feeding.
+    """
+    h, w = shape
+    mask = np.zeros((h, w), dtype=bool)
+    if resolution <= 0:
+        return mask
+    for zone in zones or ():
+        pts = [(float(x), float(y)) for x, y in zone]
+        if len(pts) < 3:
+            continue
+        xs = [q[0] for q in pts]
+        ys = [q[1] for q in pts]
+        r0 = max(0, int(math.floor((min(xs) - origin_x) / resolution)))
+        r1 = min(h - 1, int(math.floor((max(xs) - origin_x) / resolution)))
+        c0 = max(0, int(math.floor((min(ys) - origin_y) / resolution)))
+        c1 = min(w - 1, int(math.floor((max(ys) - origin_y) / resolution)))
+        if r1 < r0 or c1 < c0:
+            continue                      # zone lies wholly off this map
+        rr, cc = np.mgrid[r0:r1 + 1, c0:c1 + 1]
+        px = origin_x + (rr + 0.5) * resolution
+        py = origin_y + (cc + 0.5) * resolution
+        inside = np.zeros(px.shape, dtype=bool)
+        n = len(pts)
+        for i in range(n):
+            xi, yi = pts[i]
+            xj, yj = pts[(i + 1) % n]
+            if yi == yj:
+                continue                  # horizontal edge never crosses the ray
+            crosses = ((yi > py) != (yj > py)) & (
+                px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside ^= crosses
+        mask[r0:r1 + 1, c0:c1 + 1] |= inside
+    return mask
+
+
 class AStarPathPlanner:
     """
     2D Grid Path Planner with obstacle inflation, corner-cutting prevention,
@@ -77,6 +124,55 @@ class AStarPathPlanner:
     def __init__(self, robot_radius_m: float = 0.25, treat_unknown_as_obstacle: bool = False):
         self.robot_radius_m = robot_radius_m
         self.treat_unknown_as_obstacle = treat_unknown_as_obstacle
+        # Operator-drawn keep-out zones: a tuple of polygons in world (x, y).
+        # Replaced whole, never mutated in place, because this planner is read
+        # from the planner thread while the GUI thread edits zones - swapping
+        # one immutable reference is atomic, editing a shared list is not.
+        self.keepout_zones: tuple = ()
+
+    # ── obstacle model ──────────────────────────────────────────────
+
+    def set_keepout_zones(self, zones) -> None:
+        """Replace every keep-out zone at once (see keepout_zones)."""
+        self.keepout_zones = tuple(tuple((float(x), float(y)) for x, y in z)
+                                   for z in (zones or ()))
+
+    def _build_masks(self, grid: np.ndarray, resolution: float, origin_x: float,
+                     origin_y: float, block_unknown: bool):
+        """-> (keep-out mask, inflated obstacle mask) for this grid.
+
+        Keep-out cells are added to the obstacles BEFORE inflation, so the
+        vehicle keeps one robot radius clear of a zone's edge exactly as it
+        does from a wall. Inflating walls and then pasting zones on top would
+        let a route skim a zone boundary with no margin at all.
+
+        plan() and check_path_collision() both come through here. They used to
+        each build the mask inline, and a keep-out zone that only one of them
+        honoured would mean a route planned around a zone and an in-flight
+        collision check that did not know it was there.
+        """
+        keepout = rasterise_zones(self.keepout_zones, grid.shape, resolution,
+                                  origin_x, origin_y)
+        obstacle_mask = (grid >= OCC_THRESH) | ((grid < 0) if block_unknown else False)
+        obstacle_mask = obstacle_mask | keepout
+        inflation_cells = max(1, int(math.ceil(self.robot_radius_m / resolution)))
+        return keepout, _inflate_obstacles_numpy(obstacle_mask, inflation_cells)
+
+    def inflated_mask(self, grid: np.ndarray, resolution: float, origin_x: float,
+                      origin_y: float, treat_unknown_as_obstacle: Optional[bool] = None):
+        """-> (obstacle mask incl. keep-out, inflated mask), for display.
+
+        The tactical map draws exactly this - the same mask the search uses -
+        rather than a separately computed look-alike, so what the operator sees
+        as "the vehicle cannot go here" is what the planner acts on.
+        """
+        block_unknown = (self.treat_unknown_as_obstacle
+                         if treat_unknown_as_obstacle is None
+                         else treat_unknown_as_obstacle)
+        keepout, inflated = self._build_masks(grid, resolution, origin_x,
+                                              origin_y, block_unknown)
+        raw = (grid >= OCC_THRESH) | keepout
+        return raw, inflated
 
     def plan(
         self,
@@ -87,9 +183,13 @@ class AStarPathPlanner:
         start_world: Tuple[float, float],
         goal_world: Tuple[float, float],
         treat_unknown_as_obstacle: Optional[bool] = None,
+        _masks=None,
     ) -> Dict[str, Any]:
         """
         Plan shortest collision-free path from start_world to goal_world.
+
+        ``_masks`` is private: plan_route() builds the masks once and hands them
+        to every leg, instead of re-inflating the whole map per stop.
 
         Args:
             grid: 2D numpy array (H, W) where >=OCC_THRESH is obstacle, -1 unknown, else free.
@@ -122,10 +222,10 @@ class AStarPathPlanner:
 
         block_unknown = self.treat_unknown_as_obstacle if treat_unknown_as_obstacle is None else treat_unknown_as_obstacle
 
-        # 1. Build Inflated Obstacle Mask using pure NumPy (compatible with all NumPy 1.x and 2.x versions)
-        inflation_cells = max(1, int(math.ceil(self.robot_radius_m / resolution)))
-        obstacle_mask = (grid >= OCC_THRESH) | ((grid < 0) if block_unknown else False)
-        inflated_obstacles = _inflate_obstacles_numpy(obstacle_mask, inflation_cells)
+        # 1. Obstacles (occupied, unknown if asked, keep-out zones), inflated.
+        if _masks is None:
+            _masks = self._build_masks(grid, resolution, origin_x, origin_y, block_unknown)
+        keepout, inflated_obstacles = _masks
 
         # 2. Convert World Coordinates to Grid Indices using math.floor for negative coordinates
         def world_to_grid(x: float, y: float) -> Tuple[int, int]:
@@ -141,11 +241,48 @@ class AStarPathPlanner:
         start_r, start_c = world_to_grid(start_world[0], start_world[1])
         goal_r, goal_c = world_to_grid(goal_world[0], goal_world[1])
 
+        # A goal outside the grid is outside the SLAM data altogether. It used
+        # to be clamped to the map edge for the search and then written back as
+        # the final waypoint (step 6), so the last leg flew a straight line from
+        # the edge of the map to the clicked point - through space no sensor had
+        # seen, with no A* and no collision check. Refuse it instead. The start
+        # is still clamped: the vehicle is where it is, and a pose a cell or two
+        # off a freshly started map must not strand it.
+        if not (0 <= goal_r < h and 0 <= goal_c < w):
+            return {
+                "success": False,
+                "waypoints": [],
+                "total_distance_m": 0.0,
+                "est_flight_time_s": 0.0,
+                "message": "Goal is outside the mapped area.",
+            }
+
         # Clamp start & goal within bounds
         start_r = max(0, min(h - 1, start_r))
         start_c = max(0, min(w - 1, start_c))
         goal_r = max(0, min(h - 1, goal_r))
         goal_c = max(0, min(w - 1, goal_c))
+
+        # A goal the operator placed inside a keep-out zone is refused outright,
+        # not snapped to the nearest free cell the way a goal inside a wall is.
+        # A wall-snap corrects imprecise clicking; moving a goal out of a zone
+        # the operator drew would quietly overrule an explicit instruction.
+        if keepout[goal_r, goal_c]:
+            return {
+                "success": False,
+                "waypoints": [],
+                "total_distance_m": 0.0,
+                "est_flight_time_s": 0.0,
+                "message": "Goal is inside a keep-out zone.",
+            }
+        if keepout[start_r, start_c]:
+            return {
+                "success": False,
+                "waypoints": [],
+                "total_distance_m": 0.0,
+                "est_flight_time_s": 0.0,
+                "message": "Vehicle is inside a keep-out zone - fly it out or remove the zone.",
+            }
 
         # Check if start is inside obstacle; if so, snap to nearest free cell
         if inflated_obstacles[start_r, start_c] > 0:
@@ -309,6 +446,74 @@ class AStarPathPlanner:
             + (" (Goal moved clear of an obstacle)" if goal_was_snapped else ""),
         }
 
+    def plan_route(
+        self,
+        grid: np.ndarray,
+        resolution: float,
+        origin_x: float,
+        origin_y: float,
+        start_world: Tuple[float, float],
+        stops: List[Tuple[float, float]],
+        treat_unknown_as_obstacle: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Plan a multi-stop mission: start -> stop 1 -> stop 2 -> ... -> last.
+
+        Each leg is an independent A* search from where the previous leg really
+        ended (a goal snapped off a wall ends slightly off the click), and the
+        legs are joined into one waypoint list, so the flight side executes a
+        mission exactly as it executes a single goal.
+
+        Returns plan()'s dict plus ``legs`` (per-leg distance and waypoints) and
+        ``stop_indices`` (the index in ``waypoints`` where each stop is reached).
+        If any leg fails the whole route fails and ``failed_leg`` says which -
+        flying the reachable half of a mission is not what was asked for.
+        """
+        base = {"success": False, "waypoints": [], "total_distance_m": 0.0,
+                "est_flight_time_s": 0.0, "traverses_unknown": False,
+                "legs": [], "stop_indices": [], "message": ""}
+        if not stops:
+            base["message"] = "No stops in mission."
+            return base
+        if grid is None or grid.ndim != 2 or grid.shape[0] < 3 or grid.shape[1] < 3 or resolution <= 0:
+            base["message"] = "Invalid occupancy grid dimensions or resolution."
+            return base
+
+        block_unknown = (self.treat_unknown_as_obstacle
+                         if treat_unknown_as_obstacle is None
+                         else treat_unknown_as_obstacle)
+        masks = self._build_masks(grid, resolution, origin_x, origin_y, block_unknown)
+
+        waypoints: List[Tuple[float, float]] = []
+        legs = []
+        stop_indices = []
+        total_d = total_t = 0.0
+        unknown = False
+        here = start_world
+        for i, stop in enumerate(stops):
+            leg = self.plan(grid, resolution, origin_x, origin_y, here, stop,
+                            treat_unknown_as_obstacle=block_unknown, _masks=masks)
+            if not leg.get("success"):
+                out = dict(base, legs=legs, stop_indices=stop_indices,
+                           waypoints=waypoints, failed_leg=i)
+                out["message"] = f"Stop {i + 1}: {leg.get('message', 'no path')}"
+                return out
+            leg_wps = list(leg["waypoints"])
+            waypoints.extend(leg_wps)
+            stop_indices.append(len(waypoints) - 1)
+            legs.append({"stop": i, "distance_m": leg["total_distance_m"],
+                         "est_flight_time_s": leg.get("est_flight_time_s", 0.0),
+                         "waypoints": leg_wps})
+            total_d += leg["total_distance_m"]
+            total_t += leg.get("est_flight_time_s", 0.0)
+            unknown = unknown or bool(leg.get("traverses_unknown"))
+            here = leg_wps[-1] if leg_wps else stop
+
+        return {"success": True, "waypoints": waypoints,
+                "total_distance_m": total_d, "est_flight_time_s": total_t,
+                "traverses_unknown": unknown, "legs": legs,
+                "stop_indices": stop_indices,
+                "message": f"Mission: {len(stops)} stops, {total_d:.2f} m"}
+
     def check_path_collision(
         self,
         grid: np.ndarray,
@@ -332,9 +537,8 @@ class AStarPathPlanner:
 
         h, w = grid.shape
         block_unknown = self.treat_unknown_as_obstacle if treat_unknown_as_obstacle is None else treat_unknown_as_obstacle
-        inflation_cells = max(1, int(math.ceil(self.robot_radius_m / resolution)))
-        obstacle_mask = (grid >= OCC_THRESH) | ((grid < 0) if block_unknown else False)
-        inflated_obstacles = _inflate_obstacles_numpy(obstacle_mask, inflation_cells)
+        _keepout, inflated_obstacles = self._build_masks(
+            grid, resolution, origin_x, origin_y, block_unknown)
 
         def world_to_grid(x: float, y: float) -> Tuple[int, int]:
             r = int(math.floor((x - origin_x) / resolution))

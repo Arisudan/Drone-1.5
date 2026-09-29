@@ -77,6 +77,8 @@ class PlannerWorker(QThread):
     collision_ready = pyqtSignal(int, bool, object, float)
     # (token, MapQuality) - live map scoring, same thread, lowest priority
     quality_ready = pyqtSignal(int, object)
+    # (token, QImage, (resolution, origin_x, origin_y)) - the inflation band
+    inflation_ready = pyqtSignal(int, object, object)
     # (job kind, milliseconds) - lets the caller see how long work actually took
     job_timing = pyqtSignal(str, float)
 
@@ -92,6 +94,7 @@ class PlannerWorker(QThread):
         self._pending_plan: Optional[tuple] = None
         self._pending_collision: Optional[tuple] = None
         self._pending_quality: Optional[tuple] = None
+        self._pending_inflation: Optional[tuple] = None
         self._tokens = itertools.count(1)
 
         # Stop on application shutdown as well as on the owner's closeEvent.
@@ -121,6 +124,31 @@ class PlannerWorker(QThread):
         with self._wake:
             self._pending_plan = (token, grid, resolution, origin_x, origin_y,
                                   start, goal)
+            self._wake.notify()
+        return token
+
+    def request_route(self, grid: np.ndarray, resolution: float,
+                      origin_x: float, origin_y: float,
+                      start: Tuple[float, float],
+                      stops: Sequence[Tuple[float, float]]) -> int:
+        """Queue a multi-stop mission plan. Shares the plan slot with
+        request_plan - a route and a single goal are the same question
+        ("how do I get there from here") and the newer one wins. Answered on
+        plan_ready, with plan_route()'s result dict."""
+        token = self._next_token()
+        with self._wake:
+            self._pending_plan = (token, grid, resolution, origin_x, origin_y,
+                                  start, [tuple(p) for p in stops])
+            self._wake.notify()
+        return token
+
+    def request_inflation(self, grid: np.ndarray, resolution: float,
+                          origin_x: float, origin_y: float) -> int:
+        """Queue the inflation-band image for display. Same priority as the
+        map-quality score: it informs the operator, it never gates a decision."""
+        token = self._next_token()
+        with self._wake:
+            self._pending_inflation = (token, grid, resolution, origin_x, origin_y)
             self._wake.notify()
         return token
 
@@ -154,6 +182,7 @@ class PlannerWorker(QThread):
             self._pending_plan = None
             self._pending_collision = None
             self._pending_quality = None
+            self._pending_inflation = None
 
     def stop(self) -> None:
         """Stop the thread and wait for it. Idempotent and safe to call twice."""
@@ -172,7 +201,8 @@ class PlannerWorker(QThread):
         while self._running:
             with self._wake:
                 if (self._pending_collision is None and self._pending_plan is None
-                        and self._pending_quality is None):
+                        and self._pending_quality is None
+                        and self._pending_inflation is None):
                     # Timed wait rather than an indefinite one so stop() is
                     # always honoured promptly.
                     #
@@ -189,13 +219,18 @@ class PlannerWorker(QThread):
                 # wall, and it must not wait behind a 300 ms search.
                 job_collision = self._pending_collision
                 self._pending_collision = None
-                job_plan = job_quality = None
+                job_plan = job_quality = job_inflation = None
                 if job_collision is None:
                     job_plan = self._pending_plan
                     self._pending_plan = None
                     if job_plan is None:
-                        job_quality = self._pending_quality
-                        self._pending_quality = None
+                        # Inflation before quality: it changes where the
+                        # operator will click next; the quality score does not.
+                        job_inflation = self._pending_inflation
+                        self._pending_inflation = None
+                        if job_inflation is None:
+                            job_quality = self._pending_quality
+                            self._pending_quality = None
 
             if not self._running:
                 break
@@ -203,6 +238,8 @@ class PlannerWorker(QThread):
                 self._run_collision(job_collision)
             elif job_plan is not None:
                 self._run_plan(job_plan)
+            elif job_inflation is not None:
+                self._run_inflation(job_inflation)
             elif job_quality is not None:
                 self._run_quality(job_quality)
 
@@ -224,7 +261,10 @@ class PlannerWorker(QThread):
         token, grid, res, ox, oy, start, goal = job
         started = time.perf_counter()
         try:
-            result = self.planner.plan(grid, res, ox, oy, start, goal)
+            if isinstance(goal, list):      # a mission: list of stops
+                result = self.planner.plan_route(grid, res, ox, oy, start, goal)
+            else:
+                result = self.planner.plan(grid, res, ox, oy, start, goal)
         except Exception:
             log.exception("path planning failed")
             result = {"success": False, "waypoints": [], "total_distance_m": 0.0,
@@ -243,3 +283,17 @@ class PlannerWorker(QThread):
             return
         self.job_timing.emit("quality", (time.perf_counter() - started) * 1000.0)
         self.quality_ready.emit(token, quality)
+
+    def _run_inflation(self, job) -> None:
+        token, grid, res, ox, oy = job
+        started = time.perf_counter()
+        try:
+            from core.map_render import build_inflation_image
+            raw, inflated = self.planner.inflated_mask(grid, res, ox, oy)
+            image = build_inflation_image(raw, inflated)
+        except Exception:
+            log.exception("inflation layer failed")
+            return
+        self.job_timing.emit("inflation", (time.perf_counter() - started) * 1000.0)
+        self.inflation_ready.emit(token, image, (res, ox, oy))
+
