@@ -5,9 +5,10 @@ actual folder tree, so a new reader can find "what does X do" in one pass instea
 opening every file. Build artifacts (`.venv/`, `__pycache__/`, `build/`, `install/`,
 `log/`) are excluded since they're generated, not source.
 
-For the *why* behind design decisions, real-hardware numbers, and the full troubleshooting
-history, see [`gotalldone.md`](gotalldone.md) and [`Progress.md`](Progress.md) instead —
-this file is purely a navigation aid.
+For how to install/run the pipeline, see [`setup.md`](setup.md). For how to use the GCS
+application, see [`guide.md`](guide.md). For the *why* behind design decisions,
+real-hardware numbers, and the full troubleshooting history, see [`Progress.md`](Progress.md)
+instead — this file is purely a navigation aid.
 
 ## Start here
 
@@ -47,6 +48,10 @@ Everything else in this guide is reference material for once those two are runni
 │   ├── mavlink-router.conf
 │   └── rtabmap_drone.rviz
 ├── docs
+│   ├── images
+│   │   ├── motor_frame_heading_arrow.png
+│   │   ├── params_tab_phase1.png
+│   │   └── slam_drone_icon_redesign.png
 │   └── slam_evaluation.md
 ├── launch
 │   ├── d435i_stereo_imu.launch.py
@@ -126,15 +131,15 @@ Everything else in this guide is reference material for once those two are runni
 │   └── test_telemetry.py
 ├── CMakeLists.txt
 ├── Drone_1.5.params
-├── GetItCorrect.md
-├── gotalldone.md
+├── guide.md
 ├── mav.tlog
 ├── mav.tlog.raw
 ├── package.xml
 ├── Progress.md
 ├── README.md
 ├── requirements.txt
-└── run_drone_slam.sh
+├── run_drone_slam.sh
+└── setup.md
 ```
 
 ## What each file does
@@ -144,6 +149,7 @@ Everything else in this guide is reference material for once those two are runni
 - **rtabmap_drone.rviz** — Saved RViz2 layout used by `rviz_embed_widget.py` for the embedded 3D SLAM/point-cloud view.
 
 ### `docs/`
+- **images/** — Screenshots referenced from `Progress.md` (motor frame heading arrow, Parameters tab, SLAM drone icon redesign) — evidence, not source.
 - **slam_evaluation.md** — The map-quality acceptance protocol: what to measure on the 2.5 cm occupancy grid, how to capture a run, and the numeric pass/fail threshold for each metric. Read this before arguing about whether a map is "good".
 
 ### `launch/`
@@ -212,7 +218,7 @@ Everything else in this guide is reference material for once those two are runni
 ### `scripts/` (top level)
 - **d435i_video_streamer.py** — Onboard node that JPEG-compresses the D435i color stream and serves it as an MJPEG HTTP stream to the GCS.
 - **map_thinning_node.py** — Post-processes RTAB-Map's raw occupancy grid: purges noise blobs and skeletonizes walls to a single-pixel outline (`/map_thin`).
-- **obstacle_distance_bridge.py** — Raycasts the occupancy grid into a 72-sector MAVLink `OBSTACLE_DISTANCE` ring for PX4's avoidance/failsafe layer (currently decoupled from the main launch — see `gotalldone.md` dev log #17).
+- **obstacle_distance_bridge.py** — Raycasts the occupancy grid into a 72-sector MAVLink `OBSTACLE_DISTANCE` ring for PX4's avoidance/failsafe layer (currently decoupled from the main launch — see `Progress.md`'s Phase 1 entry).
 - **px4_vision_bridge.py** — Converts RTAB-Map's `/odom` pose into MAVLink `VISION_POSITION_ESTIMATE` packets and feeds them to the Pixhawk's EKF2.
 - **tcp_map_streamer_node.py** — Streams the occupancy grid map (and handles the SLAM map reset command) over a raw TCP socket, as a fallback when native ROS 2 discovery over Wi-Fi is unreliable.
 - **wall_boundary_node.py** — Extracts vectorized wall/room-boundary polygons from the occupancy grid for flight-safety visualization.
@@ -238,11 +244,11 @@ Everything else in this guide is reference material for once those two are runni
   assigned), `EKF2_EV_CTRL = 0` (vision fusion off) and a different board rotation, so anything
   diffed against it read as broken when the aircraft was fine. Re-export it after parameter work
   rather than letting it drift again.
-- **GetItCorrect.md** — Short one-page summary of the system's sensor → SLAM → EKF2 data flow.
-- **gotalldone.md** — Full historical runbook, Q&A troubleshooting log, and an archived full snapshot of an earlier README.
+- **guide.md** — User guide to the GCS application itself: architecture, every workspace/tab, keyboard shortcuts, the guided-confirm safety gate. GUI content only — no install steps, no history.
 - **mav.tlog** / **mav.tlog.raw** — Raw MAVLink telemetry log recordings (binary flight-log dumps, not source code).
 - **package.xml** — ROS 2 package manifest (name, maintainer, build type).
-- **Progress.md** — Running development log of milestones, real-hardware findings, and what was fixed and why.
-- **README.md** — Current short project summary (points to `gotalldone.md` for full history).
+- **Progress.md** — The project's single chronological engineering log: every real problem hit on hardware, why, and exactly what changed. Sensor → SLAM → EKF2 data flow, milestones, real-hardware findings, and a Known Issues & Roadmap section.
+- **README.md** — Current short project summary (points to `guide.md`/`Progress.md` for details).
 - **requirements.txt** — Python pip dependencies for the whole pipeline + GCS app.
 - **run_drone_slam.sh** — Launch script for the onboard SLAM pipeline (sources ROS 2 + workspace, runs `drone_rtabmap_all.launch.py`).
+- **setup.md** — Everything needed for a fresh install: prerequisites, `mavlink-router` setup, build/launch commands, published ROS 2 topics, and FAQ/troubleshooting. Pipeline-side only — no GUI content.

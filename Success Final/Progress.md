@@ -2,8 +2,24 @@
 
 **Project**: Drone-1.5 / Flop Autonomous Indoor Drone System  
 **Hardware Stack**: Radxa Dragon Q6A SBC, Auterion Pixhawk 6X FMU, Intel RealSense D435i Depth Camera  
-**Software Stack**: ROS 2 Jazzy, RTAB-Map SLAM, PX4 Autopilot, MAVLink 2.0 (`mavlink-routerd`), Python 3 Tkinter GCS  
-**Last Updated**: 2026-09-08  
+**Software Stack**: ROS 2 Jazzy, RTAB-Map SLAM, PX4 Autopilot, MAVLink 2.0 (`mavlink-routerd`), Python 3 (early Tkinter prototype, superseded by the current PyQt5 `Drone-GCS` app — see [`guide.md`](guide.md))  
+**Last Updated**: 2026-09-29  
+
+This is the project's single chronological engineering log — every real problem hit on hardware, what caused it, and exactly what was changed. For installing/running the pipeline, see [`setup.md`](setup.md); for how to use the GCS application itself, see [`guide.md`](guide.md).
+
+---
+
+## Table of Contents
+
+1. [Executive Summary & Core Objectives](#1-executive-summary--core-objectives)
+2. [Hardware Topology & Network Infrastructure](#2-hardware-topology--network-infrastructure)
+3. [Detailed Engineering Phases: From Scratch to Final Execution](#3-detailed-engineering-phases-from-scratch-to-final-execution)
+4. [Summary of Codebase Modifications](#4-summary-of-codebase-modifications)
+5. [Standard Operating Procedures](#5-standard-operating-procedures-how-to-run-everything)
+6. [End-to-End Live Verification Test Logs](#6-end-to-end-live-verification-test-logs)
+7. [GCS Milestones (11 onward)](#gcs-milestones) — the PyQt5 `Drone-GCS` rewrite and every subsequent feature/fix
+8. [ROS 2 Pipeline & Flight-REPL Engineering Log](#ros-2-pipeline--flight-repl-engineering-log) — SLAM/PX4-side debugging, consolidated from `gotalldone.md`
+9. [Known Issues & Roadmap](#known-issues--roadmap)
 
 ---
 
@@ -89,6 +105,11 @@ The visual SLAM pipeline had previously been altered with artificial obstacle av
    - Symlinked `/home/radxa/ros2_ws/src/rtabmap_drone_pkg` to `/home/radxa/Flop`.
    - Verified clean compilation with `colcon build --packages-select rtabmap_drone_pkg --symlink-install`.
    - Live verified `/map` ($0.025$m, $350 \times 326$, $4303$ occupied cells), `/map_thin` ($1262$ skeleton pixels), and `/wall_boundaries` ($5$ vectorized safe polygons).
+
+#### Additional Root-Cause Detail (found on a later regression of this same problem)
+This exact symptom (`/map_thin` degraded/not publishing) recurred once more later in the project, traced to two more specific causes beyond the QoS/resolution issues above:
+- **CPU contention was the original reason** `CellSize`/`GlobalFullUpdate` had been compromised to `0.05`/`false` in the first place — the 72-sector raycasting loop in `obstacle_distance_bridge.py` was driving Radxa ARM-core CPU usage up, and those two grid parameters were loosened to compensate. Fixed properly by decoupling obstacle detection (removing that node from the launch file) instead of trading away map resolution.
+- **A launch-parameter typo**: `drone_rtabmap_all.launch.py` passed `min_wall_cluster_size: 20` to `map_thinning_node.py`, which actually reads `min_wall_area_pixels` — ROS 2 silently ignored the unrecognized key, so the noise-purge threshold silently reverted to a default that was too aggressive at the coarser 5cm grid.
 
 ---
 
@@ -351,7 +372,38 @@ python3 ~/live_status.py --port tcp:172.16.101.84:5760
 
 ---
 
-## Milestone 11: Next-Generation Aviation Ground Control Station (`Drone-GCS` & `Radxa-Monitor`)
+## GCS Milestones
+
+Everything from here on tracks the PyQt5 `Drone-GCS` rewrite (superseding the Tkinter prototype in §3-6 above) and every feature/fix made to it since. See [`guide.md`](guide.md) for what the application looks like and does *today*; this section is the "why" and "what changed" behind it.
+
+| # | Milestone |
+|---|---|
+| 11 | [Next-Generation Aviation GCS (`Drone-GCS` & `Radxa-Monitor`)](#milestone-11-next-generation-aviation-ground-control-station-drone-gcs--radxa-monitor) |
+| 12 | [Industrial-Grade Drone-GCS & Radxa-Monitor Overhaul](#milestone-12-industrial-grade-drone-gcs--radxa-monitor-overhaul) |
+| 13 | [Live 2D SLAM Skeleton, A* Path Planning, & Control Dispatcher](#milestone-13-live-2d-slam-skeleton-map_thin-visualization-a-collision-free-path-planning--proven-control-dispatcher-integration) |
+| 14 | [Autonomous Flight Pipeline & Safety Hardening](#milestone-14-autonomous-flight-pipeline--safety-hardening-all-6-solutions-implemented) |
+| — | [RealSense D435i Live RGB Video Streaming over Wi-Fi](#milestone-realsense-d435i-live-rgb-video-streaming-over-wi-fi-implemented) |
+| — | [Real-Hardware Validation & Multi-Network Field Findings](#milestone-real-hardware-validation--multi-network-field-findings) |
+| — | [GCS Industrial Cockpit Redesign](#milestone-gcs-industrial-cockpit-redesign) |
+| — | [Remote SLAM Map Reset (Headless-Safe)](#milestone-remote-slam-map-reset-headless-safe) |
+| — | [Third Network Preset (`DroneNet`) & File-Structure Guide](#milestone-third-network-preset-dronenet--file-structure-guide) |
+| — | [RGB Codec Split → Merge-Back Exercise](#milestone-rgb-codec-split--merge-back-exercise-verified-live-both-directions) |
+| — | [Real-Hardware C2 Round-Trip Validation](#milestone-real-hardware-c2-command--control-round-trip-validation) |
+| — | [Pixhawk USB → Physical UART Migration](#milestone-pixhawk-usb--physical-uart-migration-real-hardware-multiple-failure-modes-found--fixed) |
+| — | [COMMAND_ACK Console Spam Fix (Token-Based Dedup)](#milestone-command_ack-console-spam-fix-token-based-dedup) |
+| — | [Root-Caused Why Arm/Motor Telemetry Never Worked](#milestone-root-caused-why-armmotor-telemetry-never-worked-all-day-two-real-flight-controller-config-bugs-not-gcs-bugs) |
+| — | [Third IMU (Accel 2) Hardware Mismatch](#milestone-third-imu-accel-2-hardware-mismatch-found-and-worked-around) |
+| — | [One-Command Headless Pipeline Launcher + SSH/Display Architecture](#milestone-one-command-headless-pipeline-launcher-camerash--clarified-sshdisplay-architecture) |
+| — | [Command Safety Redesign, RC/GCS Arbitration, ELRS Failsafe Fix](#milestone-command-safety-redesign-rcgcs-arbitration-hardening-and-elrs-failsafe-fix-real-hardware-end-to-end-verified) |
+| — | [COMMAND_ACK Dedup Refinement (IN_PROGRESS Case)](#milestone-command_ack-dedup-refinement-in_progress-case) |
+| — | [ROS2 TCP Map Bridge Disconnect Announcement & Console Colour Routing](#milestone-ros2-tcp-map-bridge-disconnect-announcement--console-colour-routing) |
+| — | [SLAM Tab Safety-Gate Audit (ABORT PATH Fix)](#milestone-slam-tab-safety-gate-audit-abort-path-fix) |
+| — | [Bench Motor-Test Telemetry Reflection & Frame Arrow Redesign](#milestone-bench-motor-test-telemetry-reflection--frame-arrow-redesign) |
+| — | [GCS Internal Consistency Audit](#milestone-gcs-internal-consistency-audit-clearance-radius-occupancy-threshold-arm-state-sync) |
+| — | [Offscreen Layout/Clipping Audit Across the Whole GCS](#milestone-offscreen-layoutclipping-audit-across-the-whole-gcs) |
+| — | [Read-Only Parameters Tab & SLAM Drone Icon Redesign](#milestone-read-only-parameters-tab--slam-drone-icon-redesign) |
+
+### Milestone 11: Next-Generation Aviation Ground Control Station (`Drone-GCS` & `Radxa-Monitor`)
 
 Following the deep-dive analysis of `walle_gcs` (PyQt5, QPainter aviation HUD, 2D SLAM viewer, toast alerts, threaded workers), we developed and validated a modular, aviation-grade PyQt5 Ground Control Station system for **Drone-1.5 / Flop**.
 
@@ -413,7 +465,7 @@ Per operational requirements, the system is decoupled into two dedicated applica
 
 ---
 
-## Milestone 12: Industrial-Grade Drone-GCS & Radxa-Monitor Overhaul
+### Milestone 12: Industrial-Grade Drone-GCS & Radxa-Monitor Overhaul
 
 To eliminate all prototype limitations and meet enterprise aerospace standards, we conducted a comprehensive line-by-line overhaul of the Ground Control Station suite, resolving all 10 identified backend and visual issues.
 
@@ -453,7 +505,7 @@ Motor PWMs:   [1000, 1000, 1000, 1000] µs (Idle)
 
 ---
 
-## Milestone 13: Live 2D SLAM Skeleton (/map_thin) Visualization, A* Collision-Free Path Planning, & Proven Control Dispatcher Integration
+### Milestone 13: Live 2D SLAM Skeleton (/map_thin) Visualization, A* Collision-Free Path Planning, & Proven Control Dispatcher Integration
 
 Following operator review and flight requirements, Drone-GCS was upgraded with complete SLAM perception, autonomous path planning, and the proven control interface from `drone_gcs_gui.py`.
 
@@ -507,7 +559,7 @@ Following operator review and flight requirements, Drone-GCS was upgraded with c
 
 ---
 
-## Milestone 14: Autonomous Flight Pipeline & Safety Hardening (All 6 Solutions Implemented)
+### Milestone 14: Autonomous Flight Pipeline & Safety Hardening (All 6 Solutions Implemented)
 
 ### 1. Pre-Flight Safety & Altitude Interlock for Path Execution
 - **Disarm Interlock**: In [drone_gcs.py](file:///home/radxa/Flop/scripts/gcs/drone_gcs.py), clicking `✈ EXECUTE PATH` when the drone is disarmed is immediately rejected with a prominent red notification toast and log alert (`❌ FLIGHT INTERLOCK REJECTED: Drone is DISARMED!`).
@@ -546,7 +598,7 @@ Following operator review and flight requirements, Drone-GCS was upgraded with c
 
 ---
 
-## Milestone: RealSense D435i Live RGB Video Streaming over Wi-Fi (IMPLEMENTED)
+### Milestone: RealSense D435i Live RGB Video Streaming over Wi-Fi (IMPLEMENTED)
 **Trigger Command**: `camron` · **Completed**: 2026-09-15 · Depth stream intentionally left disabled (RGB only)
 
 ### What Was Built:
@@ -575,7 +627,7 @@ Layer by layer, ROS topic to browser/GCS pixel:
 
 ---
 
-## Milestone: Real-Hardware Validation & Multi-Network Field Findings
+### Milestone: Real-Hardware Validation & Multi-Network Field Findings
 
 Everything in the previous milestone was validated against a **synthetic** ROS `Image`. This pass re-ran it against the actual physical D435i, and separately investigated why the drone/GCS link kept breaking when switching Wi-Fi networks.
 
@@ -603,7 +655,7 @@ Everything in the previous milestone was validated against a **synthetic** ROS `
 
 ---
 
-## Milestone: GCS Industrial Cockpit Redesign
+### Milestone: GCS Industrial Cockpit Redesign
 
 A multi-pass visual/UX cleanup of the header, the FPV tab, and the Cockpit PFD, driven entirely by iterative operator feedback against real rendered screenshots (not just code review) — every layout claim below was verified by actually rendering the widget offscreen and inspecting the PNG, not just reasoning about `QHBoxLayout` math (which was wrong on the first attempt more than once, caught only by looking at the render).
 
@@ -624,7 +676,7 @@ The "Overlay Aviation HUD" checkbox and all its drawing code (horizon ladder, cr
 
 ---
 
-## Milestone: Remote SLAM Map Reset (Headless-Safe)
+### Milestone: Remote SLAM Map Reset (Headless-Safe)
 
 The drone's Radxa has no display/keyboard/mouse — every control happens from the GCS laptop. This adds a way to wipe the live SLAM map and restart mapping from empty without physical access to the Radxa, researched against the actual installed `rtabmap_ros` (0.22.1) source rather than assumed, and verified against the real running pipeline, not just unit-constructed.
 
@@ -646,12 +698,12 @@ Confirmed via the real `rtabmap_ros` source (`CoreWrapper.cpp`) that `/rtabmap/r
 
 ---
 
-## Milestone: Third Network Preset (`DroneNet`) & File-Structure Guide
+### Milestone: Third Network Preset (`DroneNet`) & File-Structure Guide
 
 1. **`DroneNet` preset** added to the GCS header's Network dropdown ([scripts/gcs/ui/top_status_strip.py](file:///home/radxa/Flop/scripts/gcs/ui/top_status_strip.py)) — a NetworkManager connection-sharing/hotspot link where the Radxa is always the gateway at `10.42.0.1`. Pure data-driven change: one new tuple in `KNOWN_NETWORKS`, no backend wiring needed since the existing `network_changed(ip)` signal already fans any preset out to MAVLink, the TCP map bridge, and the FPV stream together. Verified offscreen: dropdown lists all four options and `DroneNet` correctly fills `10.42.0.1`.
 2. **`help.md`** created — a full file-by-file guide to the repo: a real `tree`-generated folder structure (build artifacts excluded) followed by a one-line, source-verified description of every one of the ~57 real files, grouped to mirror the tree. Purely a navigation aid for a new reader; no other docs were touched.
 
-## Milestone: RGB Codec Split → Merge-Back Exercise (Verified Live Both Directions)
+### Milestone: RGB Codec Split → Merge-Back Exercise (Verified Live Both Directions)
 
 At the operator's request, the JPEG-encode/frame-extraction logic in [scripts/d435i_video_streamer.py](file:///home/radxa/Flop/scripts/d435i_video_streamer.py) was split into a standalone `scripts/rgb_frame_codec.py` (zero ROS dependency, two functions: `extract_bgr_frame()` and `encode_jpeg()`), then — same day, on a follow-up request — merged straight back into the single original file. Both directions were verified for real, not just compiled:
 - **Split**: unit-tested the new module (rgb8/bgr8 channel handling, unsupported-encoding rejection, row-padding tolerance, JPEG round-trip decode), rebuilt the ROS package, then ran the **full real pipeline on actual hardware** — live numbers unchanged (~21-24 FPS, ~34 kB/frame, ~6 Mbit/s).
@@ -659,7 +711,7 @@ At the operator's request, the JPEG-encode/frame-extraction logic in [scripts/d4
 - **Conclusion carried forward**: one file vs. two files is purely a code-organization/shareability choice — runtime cost is identical either way (same functions, same process; the only difference is one extra one-time module `import` at startup).
 - **Process-management slip caught mid-test**: after the merge-back, a shutdown attempt sent `SIGINT` to the wrong PID (the `nohup` bash wrapper, not the real `ros2 launch` process), leaving orphaned nodes holding port 8080 and triggering a respawn-loop on the next launch. Caught via `ss`/`ps` inspection, fully cleaned up, relaunched once cleanly.
 
-## Milestone: Real-Hardware C2 (Command & Control) Round-Trip Validation
+### Milestone: Real-Hardware C2 (Command & Control) Round-Trip Validation
 
 Verified the actual production command path end-to-end — **GCS laptop (real Wi-Fi) → Radxa `mavlink-router` → Pixhawk (USB) → reply back the same way** — using this project's own diagnostic tools plus a new instrumented latency test, rather than assuming it works because telemetry is visible in the UI.
 
@@ -672,7 +724,7 @@ Verified the actual production command path end-to-end — **GCS laptop (real Wi
 
 ---
 
-## Milestone: Pixhawk USB → Physical UART Migration (Real Hardware, Multiple Failure Modes Found & Fixed)
+### Milestone: Pixhawk USB → Physical UART Migration (Real Hardware, Multiple Failure Modes Found & Fixed)
 
 The Radxa↔Pixhawk 6X link was switched from USB to a direct UART wire on the 40-pin GPIO header. This looked like a one-line config change at first and turned into a genuine multi-layer debugging exercise across udev, device-tree overlays, and MAVLink baud configuration — all diagnosed and fixed live against the real board, not assumed.
 
@@ -693,7 +745,7 @@ The Radxa↔Pixhawk 6X link was switched from USB to a direct UART wire on the 4
 
 ---
 
-## Milestone: COMMAND_ACK Console Spam Fix (Token-Based Dedup)
+### Milestone: COMMAND_ACK Console Spam Fix (Token-Based Dedup)
 
 While driving the real GCS app through a full command walkthrough (`help`, `mode`, `arm`, `takeoff`, `yaw`, `move`, `kill`), the console log occasionally flooded with dozens of identical `[ACCEPTED] Pixhawk confirmed <cmd> in X.XXs` lines for a single dispatched command - most dramatically ~90 lines for one `NAV_TAKEOFF`.
 
@@ -702,7 +754,7 @@ While driving the real GCS app through a full command walkthrough (`help`, `mode
 - **Verified live**: re-ran the exact repro sequence with instrumentation - only 2 real slot calls for the `takeoff` command in a run that had shown ~90 console lines before the fix, confirming the apparent "flood" was collapsing correctly. `help`'s `SET_MESSAGE_INTERVAL` burst still correctly shows all its distinct results (6 accepted + 1 failed), proving the fix doesn't over-suppress either.
 - **A real lesson from this debugging session**: an early middle version of this fix looked like it worked (my own throwaway test harness showed clean output), but was actually a measurement artifact in that harness's crude line-count diffing - only proven correct once verified against a call-counter placed directly in the actual code path, not by trusting a wrapper script's output.
 
-## Milestone: Root-Caused Why Arm/Motor Telemetry Never Worked All Day (Two Real Flight-Controller Config Bugs, Not GCS Bugs)
+### Milestone: Root-Caused Why Arm/Motor Telemetry Never Worked All Day (Two Real Flight-Controller Config Bugs, Not GCS Bugs)
 
 A long, real-hardware diagnostic chain (battery connected, props confirmed off) found and fixed two genuine Pixhawk configuration defects that had nothing to do with the GCS application - the app's connect/arm/telemetry code was correct the whole time.
 
@@ -715,7 +767,7 @@ A long, real-hardware diagnostic chain (battery connected, props confirmed off) 
 
 ---
 
-## Milestone: Third IMU (Accel 2) Hardware Mismatch Found and Worked Around
+### Milestone: Third IMU (Accel 2) Hardware Mismatch Found and Worked Around
 
 Even after the EKF2 and PWM-mixer fixes, arm reliability stayed inconsistent across sessions - health checks would flicker between clean and blocked in ways that didn't track any of the previously-found causes. Root-caused with real IMU data comparison, not guesswork.
 
@@ -725,7 +777,7 @@ Even after the EKF2 and PWM-mixer fixes, arm reliability stayed inconsistent acr
 - **Final live verification**: post-reboot, `SYS_STATUS` showed `unhealthy=0x00000000` (fully clean, `CAL_ACC2_PRIO=0` persisted), and a genuine `arm` succeeded from `OFFBOARD` mode (real flight log created). Confirms the accelerometer mismatch - not the earlier EKF2/heading/mode issues - was the last remaining source of session-to-session arm inconsistency.
 - **Open item, flagged rather than assumed**: this is very likely a physical mounting/damper issue specific to that one IMU unit on this Pixhawk 6X (three IMUs are individually vibration-isolated), not something purely in software. Worth a physical inspection of that unit's mounting when convenient - not urgent, since excluding it from service is a complete and correct workaround either way.
 
-## Milestone: One-Command Headless Pipeline Launcher (`camera.sh`) + Clarified SSH/Display Architecture
+### Milestone: One-Command Headless Pipeline Launcher (`camera.sh`) + Clarified SSH/Display Architecture
 
 Discussed and resolved a real point of confusion about which machine needs a display for what, once the Radxa is actually mounted on the drone with no HDMI/monitor attached.
 
@@ -736,7 +788,7 @@ Discussed and resolved a real point of confusion about which machine needs a dis
 
 ---
 
-## Milestone: Command Safety Redesign, RC/GCS Arbitration Hardening, and ELRS Failsafe Fix (Real Hardware, End-to-End Verified)
+### Milestone: Command Safety Redesign, RC/GCS Arbitration Hardening, and ELRS Failsafe Fix (Real Hardware, End-to-End Verified)
 
 Later the same day, pushed the code so far to the laptop and to `Arisudan/Drone-1.5` (`Success Final/` folder, commit `8d86354`) on GitHub, then continued into a real flight-safety hardening pass — driven by an unplanned finding that arming had effectively no safety net configured on the flight controller itself.
 
@@ -762,6 +814,137 @@ Later the same day, pushed the code so far to the laptop and to `Arisudan/Drone-
 - Re-tested live: `RC_RECEIVER` health now correctly flips to `MISSING`/`FAIL` within ~0.1s of transmitter power-off, with channels freezing at PX4's own safe hold values - PX4 can now actually tell the difference between "RC present" and "RC gone."
 - **Confirmed via a live arm-while-RC-off attempt**: rejection during this pass was traced via `SYS_STATUS` to the already-known vision/heading-lock issue, not RC - `RC_RECEIVER` itself correctly read `ok`/`MISSING` in both states, isolating the RC arbitration fix as genuinely working end-to-end, independent of the unrelated vision precondition.
 - Copied the full project (excluding build artifacts) to `/home/radxa/radioslave drone` as a verified snapshot for the next work stream, leaving the original `Flop` folder untouched.
+
+---
+
+### Milestone: COMMAND_ACK Dedup Refinement (IN_PROGRESS Case)
+
+Auditing the token-based dedup mechanism above against every `MAV_RESULT` code PX4 can send (not just the ACCEPTED/REJECTED path it was originally tested against) found one real gap.
+
+- **Problem**: the dedup key was `token` alone. If PX4 acks a dispatch with `MAV_RESULT_IN_PROGRESS` (5) first and then follows up with the *real* final result (`ACCEPTED`/`FAILED`/...) for the same dispatch, that second ACK carries the same token and was silently dropped as a "duplicate" — the operator would see "still executing" and never learn the real outcome.
+- **Also found**: results `UNSUPPORTED`/`FAILED`/`IN_PROGRESS`/`CANCELLED` all fell through into one generic `[REJECTED]` message and red colour, even though `IN_PROGRESS` isn't a rejection and `CANCELLED` means superseded by a newer command, not a failure.
+- **Fix**: dedup key changed to `(token, result_code)` — a true wire-level retransmit (same token *and* same result) is still suppressed, but a genuinely different ACK for the same dispatch now gets through. Added explicit message/colour branches for all 7 codes PX4 sends.
+- **Verification**: unit-tested (synthetic IN_PROGRESS→ACCEPTED pair, both reported; a genuine retransmit still suppressed). ⚠️ Not yet re-tested against a real ACK burst on hardware — whether PX4 on this airframe ever actually emits `IN_PROGRESS` in practice is unconfirmed.
+
+### Milestone: ROS2 TCP Map Bridge Disconnect Announcement & Console Colour Routing
+
+Prompted by a direct question about whether "Connected"/"Disconnected" actually show correctly for the TCP map bridge fallback client.
+
+- **Problem**: the retry loop's `except` block had no status emission at all, so a dropped or never-started bridge produced total silence forever, with nothing but the map going stale to tell the operator. Every ROS2 status line (connect notice, decode errors, invalid frames) also routed through the same neutral-grey log level, so a real failure and a routine notice looked identical.
+- **Fix**: added a `"Disconnected from TCP Map Bridge at {host}:{port}"` emission on every path that drops the connection, firing exactly once per real transition (not once per 3-second retry). Console routing now keys off message content: Connected → green, Disconnected → red, invalid-length/decode-error (recoverable) → amber, anything else containing "error" → red, everything else → neutral grey.
+- **Verification**: unit-tested the transition state machine and the colour-routing table. ⚠️ Not verified against a real bridge drop on the Radxa.
+
+### Milestone: SLAM Tab Safety-Gate Audit (ABORT PATH Fix)
+
+Found while repositioning the guided-confirm slider to float above whichever button triggers it (QGroundControl-style) instead of a fixed spot in the command column.
+
+- **Problem**: the Tactical SLAM tab's `ABORT PATH` button was wired straight to its real executor (stop, land, clear waypoints), bypassing the same slide-to-confirm gate every other guarded action (arm, disarm, takeoff, kill) already goes through.
+- **Fix**: reconnected the signal through the confirm-request path, so the slider now shows (anchored above the ABORT button) and only calls the real executor once the operator actually drags it through.
+- **Verification**: exercised through the offscreen test suite (window construction, signal wiring, anchor positioning). ⚠️ Not flown — aborting a path has no bench-safe way to verify short of an actual flight in progress.
+
+### Milestone: Bench Motor-Test Telemetry Reflection & Frame Arrow Redesign
+
+- **Problem**: the Motors tab's PWM bars and frame diagram are updated by exactly one path — real `SERVO_OUTPUT_RAW` telemetry. A bench actuator test (`MAV_CMD_ACTUATOR_TEST`) dispatches the command but never touches that path, so unless PX4 reports the resulting output back through telemetry fast enough (unconfirmed either way), the bars sat at idle while a motor was, per the operator, audibly spinning.
+- **Fix**: the motor widget now also reflects the *commanded* throttle immediately on dispatch, and resets every channel to idle on any stop path (hold-release, STOP ALL, safety-ack expiry, sequence advance). A real telemetry value simply overwrites this once it arrives.
+- **Also in this pass**: rotated the frame diagram's heading arrow 180° and moved it from a floating marker above the frame into the body hub itself — one heading indicator instead of a separate arrow-plus-label reading as two different things.
+- **Verification**: unit-tested the optimistic-update/reset paths; confirmed offscreen the redrawn arrow renders inside the hub at every tested size/scale.
+
+![Redesigned frame heading arrow, rendered offscreen inside the body hub](docs/images/motor_frame_heading_arrow.png)
+
+### Milestone: GCS Internal Consistency Audit (Clearance Radius, Occupancy Threshold, Arm-State Sync)
+
+An audit of the SLAM tab's own code (not from a reported symptom) found three numbers had quietly drifted apart across files:
+
+| Value | Before | After |
+|---|---|---|
+| Robot clearance radius (fallback planner in `slam_map_widget.py`, used whenever no `PlannerWorker` is attached) | 0.22 m | 0.25 m (matching the real flight planner in `drone_gcs.py`, confirmed as the true footprint value) |
+| Drawn "safety corridor" width & tight-clearance warning distance | Independent hardcoded values, disagreeing with the planner's own radius | Both derived from the same `robot_radius_m` the active planner actually uses |
+| Occupancy-obstacle threshold (3 hardcoded copies across `path_planner.py`/`slam_map_widget.py`) | `grid >= 50` | `grid >= OCC_THRESH` (65) — the constant `docs/slam_evaluation.md` already documents as standard |
+| Sidebar footer arm/mode state | Updated only by the 30Hz UI-tick timer, could briefly disagree with the header badge (updated per telemetry packet) | Both driven from the same telemetry-update event |
+
+Checked with the existing hermetic test suite plus new assertions; the clearance-radius question was resolved by asking the operator directly for the real footprint value rather than guessing between the two numbers already in the code.
+
+### Milestone: Offscreen Layout/Clipping Audit Across the Whole GCS
+
+Rather than waiting for a bug report, the whole GCS was rendered offscreen (`QT_QPA_PLATFORM=offscreen`) at every window size × UI-scale combination the station claims to support, comparing every visible label/button's rendered width against what its own text needs.
+
+- **Found**: real text clipping in the header badges, the SLAM toolbar buttons, the Cockpit control column, and the Config tab's stream-URL field — none of it visible at the one size/scale combination anyone had actually looked at directly before.
+- **Root cause**: several controls had no minimum-width floor at all, so Qt's layout engine compressed them below what their own text needed, clipping letters with no ellipsis.
+- **Fix**: added font-metrics-based width-flooring helpers and applied them across the header, SLAM toolbar, Cockpit page, and Config tab.
+- **Second-order bug found mid-fix**: giving the header's telemetry badges a correct width floor removed slack the badge-overlap and toast-notification-band logic had been quietly relying on — properly floored badges could then overlap *each other* instead. Fixed by promoting the telemetry strip to a real widget (so its own minimum size is respected) and making the notification-band spacer shrink before ever letting a badge overlap.
+- **Verification**: the layout test suite was extended with these exact checks built permanently in, so a future regression fails CI automatically. ⚠️ All checked offscreen only — no operator has looked at the real station on a real small screen since.
+
+### Milestone: Read-Only Parameters Tab & SLAM Drone Icon Redesign
+
+Two smaller additions, neither a bug fix:
+
+- **Parameters tab** (Ctrl+9): a live PX4 parameter table (search, sortable), populated from the standard MAVLink parameter protocol (`PARAM_REQUEST_LIST`/`PARAM_VALUE`), decoded through the same IEEE-754 bit-cast logic documented earlier in this log, factored into one shared `param_codec.py` instead of a third copy. Read-only for now — writing a parameter (with the same guarded-confirm treatment ARM/DISARM get, plus a mandatory readback) is a deliberate later phase.
+- **SLAM drone icon redesign**: replaced a plain circle plus a separate floating chevron with one arrow-shaped fuselage that carries the heading itself.
+- **Verification**: both exercised via the offscreen test suite and rendered screenshots below. ⚠️ Neither has been seen against a real MAVLink parameter stream or a real moving drone icon yet — the Parameters tab was tested with a synthetic 250-parameter burst, and the icon redesign with synthetic pose data.
+
+![The Parameters tab, rendered offscreen with 30 synthetic parameters](docs/images/params_tab_phase1.png)
+
+![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](docs/images/slam_drone_icon_redesign.png)
+
+---
+
+## ROS 2 Pipeline & Flight-REPL Engineering Log
+
+This section consolidates the pipeline/flight-controller-side debugging history that was previously kept in a separate file (`gotalldone.md`, now retired) — it predates and runs alongside the GCS milestones above, and covers the ROS 2 SLAM package deployment and the `px4_control.py` flight REPL, rather than the GUI application.
+
+### Milestone: ROS 2 Pipeline Deployment Sync & Early SLAM/PX4 Debugging
+
+1. **Deployed package had silently diverged from the working source tree**: the actual ROS package built by `colcon`/`ros2 launch` was an older, less-safe copy than the working tree, which had already received same-day fixes. Diffed both trees, copied every changed file across, and rebuilt. **Lesson carried forward**: every code change since has been applied to both trees and diff-checked before moving on.
+2. **`px4_vision_bridge.py` was missing safety-critical fixes** (found because of #1): the stale deployed copy had none of the lost/degenerate-frame rejection, the MAVLink socket receive-buffer drain, or the mavlink-router-routing default — all already fixed in the working tree, brought in by the sync above. Verified live: correctly dropped 10,000+ degenerate frames (`cov0=9999`) rather than forwarding a bad pose to EKF2.
+3. **Bench SLAM tracking failure looked like a bug, wasn't**: with the camera stationary, `stereo_odometry` reported zero matches/inliers continuously — a genuine environmental limitation (no parallax with a static camera), not a bug, confirmed via `slam_health_monitor.py`'s own diagnosis. (Side fix: that monitor script itself crashed on its first tick due to a tuple-unpacking bug, fixed in one line.) Panning the camera toward a textured scene produced real tracking, proving the pipeline was healthy the whole time.
+4. **`ros2 node list` showed only one node** after a long idle period — a stale ROS 2 CLI discovery daemon cache, not an actual node failure. Fixed with `ros2 daemon stop && ros2 daemon start`.
+5. **System clock jump permanently wedged `stereo_odometry`**: the machine's clock had jumped backward while the process was idle, latching a "previous timestamp" baseline it could never get past once the clock settled (busy-looping at ~100% CPU rejecting every frame). Fixed with a clean stack restart once NTP re-synced.
+6. **Physical Pixhawk USB link silently died mid-session**: a genuine USB re-enumeration (device number changed) left `mavlink-router` holding a stale file handle while still reporting `active (running)`. Fixed with `sudo systemctl restart mavlink-router`; happened twice in the same session (once for an already-occurred re-enumeration, once after a deliberate cable replug).
+7. **`verify_ekf2_params.py` had the same "wrong system" bug** later found and fixed in `px4_control.py` (see below): a plain `wait_heartbeat()` isn't reliably populated on a mavlink-router-shared link with multiple systems on the bus. Fixed by filtering for a real autopilot heartbeat. Once fixed, confirmed the documented-working EKF2 config (`EV_CTRL=15`, `GPS_CTRL=0`, `HGT_REF=3`, `OF_CTRL=1`/`RNG_CTRL=1`).
+
+### Milestone: Adopting `px4_control.py` as the Primary Flight REPL
+
+- **Evaluated and adopted** a third-party PX4 offboard-control CLI/REPL script (`arm`/`disarm`/`mode`/`takeoff`/`land`/`rtl`/`goto`/`vel`/`move`/`yaw`/`mission`/`pattern`), directly compatible with the mavlink-router setup. Copied into `scripts/diagnostics/px4_control.py`, wired into `CMakeLists.txt` as a proper `ros2 run` executable.
+- **Bug: wrong-system targeting** (same class as #7 above) — `Fleet.connect()`'s plain `wait_heartbeat()` could latch onto `sysid=0` instead of the real FMU. Fixed the same way; verified live (`status` correctly showed `sysid=1`, `arm` correctly rejected with no battery, `takeoff` force-armed into OFFBOARD successfully, `disarm` cleanly returned to a safe state).
+- **Bug: `Mode` always showed `UNKNOWN`** — `print_status()` used an ArduPilot-style mode decoder, not PX4's packed custom-mode encoding. Fixed with a proper `px4_mode_name()` decoder; independently confirmed against a raw heartbeat probe.
+- **Learned**: OFFBOARD mode cannot "stay" without a live process — it requires a continuous ≥2 Hz setpoint stream, and once the commanding REPL exits, PX4's OFFBOARD-loss failsafe switches away automatically. There is no way to "leave it in OFFBOARD" without a process staying alive to keep streaming.
+
+### Milestone: Obstacle-Avoidance Safety Layer & RTAB-Map Rate Tuning
+
+- **Obstacle-avoidance / EV-failsafe layer wired up for the first time**: `px4_vision_bridge.py` gained a fan-out of every good vision estimate to the safety layer's listening port, and a new `obstacle_distance_bridge.py` node raycasts a 72-sector ring directly against RTAB-Map's own occupancy grid (this airframe has no lidar) and reports it as a real `OBSTACLE_DISTANCE` message. **Bug found and fixed, blocking the whole thing**: `px4_control.py` never set `MAVLINK20`, so its own connection defaulted to MAVLink v1, whose message-ID field can't even represent `OBSTACLE_DISTANCE` (a v2-only message) — fixed with one line. Verified live: both halves of the safety layer (`Avoidance: ON`, `Localization: ON`) driven by real sensor data.
+- **RTAB-Map map-update rate tuning**: `/map` was publishing irregularly (~0.6-1 Hz, gaps up to ~4.9s, growing as the map grew) — traced to `Grid/CellSize` being 4x more expensive than necessary, `Grid/GlobalFullUpdate` recomputing the entire grid every publish, and a detection rate already below what was actually being achieved. Tuned to `CellSize=0.05`/`GlobalFullUpdate=false`/`DetectionRate=3.0`; confirmed live at ~1.3-2.3 Hz with the worst-case gap capped at ~1.2s (versus unbounded growth before). *(This was itself later reverted back to the high-definition `0.025` setting — see Phase 1 above and its "Additional Root-Cause Detail" note — once the real driver of the CPU cost, `obstacle_distance_bridge.py`'s raycasting, was decoupled instead of trading away resolution.)*
+- **Two conceptual clarifications, for the record**: (1) different components in this stack are deliberately multi-rate — PX4's OFFBOARD hard ≥2 Hz requirement, IMU's ~200 Hz needs, and RTAB-Map's own throttled detection rate all serve different purposes, and forcing one shared rate would break something. (2) the drone's real height is tracked continuously by SLAM and fused into EKF2 — what's actually fixed is the 2D occupancy grid's height *band* (0.30-2.0m relative to the floor, not to the drone's current altitude), making the obstacle ring altitude-blind by construction. Left unchanged at the operator's request, documented here so the limitation isn't silently forgotten.
+
+### Milestone: Pipeline Resilience — Surviving a `mavlink-router` Restart
+
+- **Problem**: restarting `mavlink-router` (needed to recover from #6 above) took down the *entire* pipeline, not just the PX4 bridge — `ros2 launch`'s default behavior on any node exiting unexpectedly is to tear down the whole launch tree.
+- **Fix, two parts**: `px4_vision_bridge.py`'s incoming-data drain now explicitly distinguishes a real connection failure from the normal "nothing to read this tick" case, marking the connection dead immediately so the existing reconnect logic kicks in right away; and the bridge node is now `respawn=True` in the launch file, matching the same pattern already used for the camera node's own USB-recovery.
+- **Verified live**: launched the full pipeline, restarted `mavlink-router` while running — log showed the reconnect sequence firing exactly as designed, and all 6 pipeline processes kept the exact same PIDs throughout.
+
+---
+
+## Known Issues & Roadmap
+
+| # | Issue | Where it was found |
+|---|---|---|
+| 1 | `drone_rtabmap_all.launch.py` declares `min_obstacle_height`/`max_obstacle_height`/`cell_size` as launch arguments, but they are **not actually wired** to the hardcoded values in `rtabmap_slam.launch.py` — passing them on the command line currently has no effect. | — |
+| 2 | No real flight (motors/battery/airframe) has occurred — every fix and test in this document was validated on the bench only. | — |
+| 3 | `DroneBridge5`'s AP isolation was worked around (wired LAN port), not fixed at the source — needs admin access to the unit to actually disable isolation. | Real-Hardware Validation & Multi-Network Field Findings |
+| 4 | The wired-Ethernet workaround for `DroneBridge5` silently takes over the Radxa's default route (no internet on that AP); not yet fixed with an explicit route-metric override. | Real-Hardware Validation & Multi-Network Field Findings |
+| 5 | Whether a WiFi interface cycling down/up during a network switch causes a brief local DDS discovery hiccup was flagged as possible but never tested live. | Real-Hardware Validation & Multi-Network Field Findings |
+| 6 | `HTIC_RND`'s 50-260 ms C2 round-trip latency (matching plain ping RTT) is functionally fine today but not investigated further (channel congestion? adapter power-saving?). Worth a closer look if it gets worse. | Real-Hardware C2 Round-Trip Validation |
+| 7 | Couldn't inspect `mavlink-router`'s own internal log during C2 validation (no `sudo` in-session) — conclusions rest on application-level ACK rates, not router-internal accounting. | Real-Hardware C2 Round-Trip Validation |
+| 8 | Enabling UART6 permanently disables I²C bus 6 on the Radxa (same physical hardware block) — nothing found using that bus, but not exhaustively scanned. | Pixhawk USB → Physical UART Migration |
+| 9 | The UART6 link runs at 115200 baud, noticeably lower throughput than the old USB link. Not a problem today; raising `SER_TELx_BAUD` is the fix if a future feature needs it. | Pixhawk USB → Physical UART Migration |
+| 10 | The EKF2 and `PWM_MAIN_FUNC` parameter fixes were set via live `PARAM_SET` but **not explicitly saved to flash** — the same failure mode that caused the original EKF2 regression. A future power cycle will likely revert both unless saved first. | Root-Caused Why Arm/Motor Telemetry Never Worked |
+| 11 | Heading-estimate stability does not persist across a tracking reset — needs a fresh yaw rotation every time tracking is re-acquired after sitting idle, not just once per boot. Not yet documented as a standard pre-arm checklist step. | Root-Caused Why Arm/Motor Telemetry Never Worked |
+| 12 | `Drone_1.5.params` (the static export at the repo root) drifts stale each time a live parameter fix is made without a fresh re-export — confirmed stale at least twice already. | Root-Caused Why Arm/Motor Telemetry Never Worked, Third IMU Hardware Mismatch |
+| 13 | IMU2's physical mounting/damper on the Pixhawk 6X hasn't been visually inspected — the software workaround (`CAL_ACC2_PRIO=0`) is complete on its own, but the root physical cause is unconfirmed. | Third IMU Hardware Mismatch |
+| 14 | No systemd auto-start unit exists yet for the main pipeline — `camera.sh` still needs to be run manually over SSH after each Radxa boot. | One-Command Headless Pipeline Launcher |
+| 15 | Whether PX4 on this airframe ever actually emits `MAV_RESULT_IN_PROGRESS` in practice is unconfirmed — the dedup fix is correct either way, but nobody has observed one live. | COMMAND_ACK Dedup Refinement |
+| 16 | The ROS2 TCP Map Bridge disconnect announcement hasn't been watched happen on a real bridge drop — the state machine is unit-tested in isolation only. | ROS2 TCP Map Bridge Disconnect Announcement |
+| 17 | Whether PX4 reports `SERVO_OUTPUT_RAW` at all for an `ACTUATOR_TEST`-driven output, or just too slowly to notice, is unconfirmed — the bars no longer depend on the answer. | Bench Motor-Test Telemetry Reflection |
+| 18 | The Parameters tab is read-only — no `PARAM_SET`, no write-then-verify, no guided-confirm gate for a reboot-required parameter. Also untested against a real vehicle's full parameter set (only a synthetic 250-parameter burst so far). | Read-Only Parameters Tab & SLAM Drone Icon Redesign |
 
 ---
 *Report compiled and validated by Antigravity Autonomous Systems Engineering Team.*

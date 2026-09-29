@@ -13,7 +13,7 @@ integrated in a single GCS session over one network.
 - GCS `drone_gcs.py` header now has a Network dropdown (`HTIC_RND` / `DroneBridge5`)
   that auto-fills the Radxa's IP for MAVLink, the TCP map bridge, and the video stream
   together.
-- Full details, history, and troubleshooting log: see [`gotalldone.md`](gotalldone.md).
+- GUI usage: see [`guide.md`](guide.md). Engineering history: see [`Progress.md`](Progress.md).
 
 ---
 
@@ -34,4 +34,4 @@ The Tactical SLAM tab's live 2D map view got an accuracy and usability pass:
   auto-follow camera, rotation/zoom controls, and the Reset Map button (wipes the SLAM
   database and restarts mapping from scratch — safe for a headless Radxa with no display,
   keyboard, or mouse attached).
-- Full details, history, and troubleshooting log: see [`gotalldone.md`](gotalldone.md).
+- GUI usage: see [`guide.md`](guide.md). Engineering history: see [`Progress.md`](Progress.md).

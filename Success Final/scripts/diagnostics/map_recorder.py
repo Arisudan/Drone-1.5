@@ -33,7 +33,8 @@ OUTPUT (one directory per run):
 
 VIO LOSS:
   RTAB-Map's stereo_odometry publishes covariance 9999.0 when tracking is lost
-  (gotalldone.md dev log #6). That sentinel is captured per sample as `lost`,
+  (see Progress.md's "ROS 2 Pipeline Deployment Sync" milestone). That sentinel
+  is captured per sample as `lost`,
   so an evaluation can say what fraction of a run had no usable odometry
   instead of guessing from a map that merely looks smeared.
 

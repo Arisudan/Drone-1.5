@@ -67,7 +67,7 @@ FREE_THRESH = 25
 DEFAULT_SWEEP_RADIUS_M = 3.5
 
 # RTAB-Map's stereo_odometry publishes this covariance when tracking is lost
-# (see gotalldone.md dev log #6, "cov0 = 9999.0").
+# (see Progress.md's "ROS 2 Pipeline Deployment Sync" milestone, "cov0 = 9999.0").
 VO_LOST_COV = 9999.0
 
 # Acceptance thresholds. Sources: docs/slam_evaluation.md.

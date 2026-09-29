@@ -11,7 +11,7 @@ THE FAULT THIS FIXES:
   first". No amount of re-sending the arm command helps - PX4's commander gates
   arming on preflight health, so the command is received and refused, not lost.
 
-THE CAUSE (see gotalldone.md dev log #26):
+THE CAUSE (see Progress.md, "Third IMU (Accel 2) Hardware Mismatch" milestone):
   This airframe's IMU2 accelerometer disagrees with the primary by ~1.1 m/s2 on
   the horizontal axes - well past PX4's own COM_ARM_IMU_ACC=0.7 tolerance, and
   confirmed independently by PX4's own calibration routine naming "Accel 2

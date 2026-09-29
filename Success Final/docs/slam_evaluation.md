@@ -9,7 +9,7 @@ captured by [`scripts/diagnostics/map_recorder.py`](../scripts/diagnostics/map_r
 `map_eval.py` exits non-zero when a graded metric is outside limits, so it can gate a
 release the same way a test suite does.
 
-> **Why this exists.** `gotalldone.md`'s own "known, unaddressed loose ends" records that
+> **Why this exists.** `Progress.md`'s own "Known Issues & Roadmap" section records that
 > no real flight has validated the map and that drift has never been measured. Nothing in
 > this repo could previously answer *"is the map good?"* with a number. This closes that.
 
@@ -109,8 +109,9 @@ Recording is read-only: it subscribes to `/map`, `/map_thin` and `/odom` and nev
 publishes or commands anything, so it is safe to run during a real flight.
 
 **Before the trajectory starts**, do the standard tracking-init move — a slow yaw rotation
-until VIO locks. `gotalldone.md` dev log #25 notes heading-estimate stability does not
-survive a tracking reset, so this has to happen on *every* run, not once per boot. A run
+until VIO locks. `Progress.md`'s "Root-Caused Why Arm/Motor Telemetry Never Worked All Day"
+milestone notes heading-estimate stability does not survive a tracking reset, so this has
+to happen on *every* run, not once per boot. A run
 that begins with lost odometry produces a map that fails for a reason that has nothing to
 do with the mapping code.
 
@@ -230,4 +231,4 @@ against a synthetic grid (see `tests/test_map_eval.py`).
   are the two metrics that genuinely need surveying work. Everything else is free.
 - **This grades the map, not the flight.** A map can pass every threshold here and still
   be unsafe to fly if `obstacle_distance_bridge.py` is not wired into the launch file
-  (currently it is not — see `gotalldone.md` dev log #17).
+  (currently it is not — see `Progress.md`'s Phase 1, "Pipeline Decoupling").
