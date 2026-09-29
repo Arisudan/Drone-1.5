@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (
 )
 
 from core.telemetry import TelemetrySnapshot
-from ui.scaling import px
+from ui.scaling import px, fit_min_width, grow_min_width
 from ui.battery_badge import BatteryBadge
 
 # The networks this rig is actually deployed on. Picking one here just fills in the
@@ -129,9 +129,9 @@ class TopStatusStrip(QFrame):
         conn_box.setContentsMargins(0, 0, 0, 0)
         conn_box.setSpacing(SPACING)
 
-        lbl_net = QLabel("Net:")
-        lbl_net.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
-        conn_box.addWidget(lbl_net)
+        self.lbl_net = QLabel("Net:")
+        self.lbl_net.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
+        conn_box.addWidget(self.lbl_net)
 
         self.network_combo = QComboBox(self)
         # Name only, not "Name (IP)" - the IP is already shown right next to this in the
@@ -146,11 +146,14 @@ class TopStatusStrip(QFrame):
             "\n".join(f"{name}: {ip}" for name, ip in KNOWN_NETWORKS)
         )
         self.network_combo.currentIndexChanged.connect(self._on_network_selected)
+        # padding (20) + border (2) + drop-down arrow well (18) + slack
+        fit_min_width(self.network_combo,
+                      [n for n, _ in KNOWN_NETWORKS] + ["Custom..."], h_pad_px=46)
         conn_box.addWidget(self.network_combo)
 
-        lbl_ip = QLabel("IP:")
-        lbl_ip.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
-        conn_box.addWidget(lbl_ip)
+        self.lbl_ip = QLabel("IP:")
+        self.lbl_ip.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
+        conn_box.addWidget(self.lbl_ip)
 
         self.ip_input = QLineEdit(KNOWN_NETWORKS[0][1], self)
         self.ip_input.setFixedWidth(px(120))
@@ -158,9 +161,9 @@ class TopStatusStrip(QFrame):
         self.ip_input.textEdited.connect(self._on_ip_hand_edited)
         conn_box.addWidget(self.ip_input)
 
-        lbl_proto = QLabel("Proto:")
-        lbl_proto.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
-        conn_box.addWidget(lbl_proto)
+        self.lbl_proto = QLabel("Proto:")
+        self.lbl_proto.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
+        conn_box.addWidget(self.lbl_proto)
 
         self.proto_combo = QComboBox(self)
         self.proto_combo.addItem("UDP", "udp")
@@ -169,9 +172,9 @@ class TopStatusStrip(QFrame):
         self.proto_combo.currentIndexChanged.connect(self._on_protocol_changed)
         conn_box.addWidget(self.proto_combo)
 
-        lbl_port = QLabel("Port:")
-        lbl_port.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
-        conn_box.addWidget(lbl_port)
+        self.lbl_port = QLabel("Port:")
+        self.lbl_port.setStyleSheet("color: #8b949e; font-weight: bold; font-size: 11px;")
+        conn_box.addWidget(self.lbl_port)
 
         self.port_input = QLineEdit("14550", self)
         self.port_input.setFixedWidth(px(70))  # 60 clipped the leading digit of "14550"
@@ -191,6 +194,7 @@ class TopStatusStrip(QFrame):
         self.btn_toggle = QPushButton("CONNECT", self)
         self.btn_toggle.setObjectName("btnConnect")
         self.btn_toggle.clicked.connect(self._handle_connect_toggle)
+        fit_min_width(self.btn_toggle, ["CONNECT", "DISCONNECT"], h_pad_px=28)
         conn_box.addWidget(self.btn_toggle)
 
         # Left-aligned so the controls sit directly above the RX/TX and VIO NED
@@ -208,12 +212,16 @@ class TopStatusStrip(QFrame):
 
         self.badge_arm = QLabel("DISARMED", self)
         self.badge_arm.setObjectName("badgeDisarmed")
+        fit_min_width(self.badge_arm, ["ARMED", "DISARMED"], h_pad_px=28)
         mode_arm_box.addWidget(self.badge_arm)
 
         self.badge_mode = QLabel("MODE: DISCONNECTED", self)
         # font-size matches QLabel#badgeArmed/#badgeDisarmed in styles.py so the
         # pair reads as one control rather than two sizes of label.
         self.badge_mode.setStyleSheet("background-color: rgba(31, 111, 235, 0.13); color: #58a6ff; border: 1px solid #1f6feb; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px; letter-spacing: 1px;")
+        # flight_mode is open-ended (any PX4 custom-mode string) - grown at
+        # every setText() below rather than enumerated here.
+        grow_min_width(self.badge_mode, h_pad_px=26)
         mode_arm_box.addWidget(self.badge_mode)
 
         # Battery in the very corner, laptop-style: voltage, cell, percentage.
@@ -229,17 +237,31 @@ class TopStatusStrip(QFrame):
         row2 = QHBoxLayout()
         row2.setSpacing(SPACING)
 
-        telemetry_strip = QHBoxLayout()
+        # A QWidget, not a bare layout: row2 (below) needs a real minimumSize
+        # to protect as a hard floor when space runs short, and a nested
+        # QHBoxLayout added via addLayout() does not carry that the same way
+        # a widget does - measured live, row2 compressed this below its own
+        # children's floors (overlapping the badges) while leaving the
+        # notification spacer beside it untouched at its full reservation.
+        self.telemetry_strip_widget = QWidget(self)
+        telemetry_strip = QHBoxLayout(self.telemetry_strip_widget)
+        telemetry_strip.setContentsMargins(0, 0, 0, 0)
         telemetry_strip.setSpacing(SPACING)
 
         # D435i VIO Badge (LOCKED / LOST, matching the HUD's own wording)
         self.badge_vio = QLabel("VIO: LOST", self)
         self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        # These three badges' text is open-ended (age suffixes, RSSI values) -
+        # floored here on the initial text, then grown further in
+        # update_telemetry() as wider values are actually seen.
+        fit_min_width(self.badge_vio, ["VIO: LOCKED (3.0s)", "VIO: NO DATA"], h_pad_px=20)
         telemetry_strip.addWidget(self.badge_vio)
 
         # Vision Confidence / Fusion Badge (Replaces dead GPS badge on GPS-denied airframe)
         self.badge_vision_conf = QLabel("EKF2: NO VISION", self)
         self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        fit_min_width(self.badge_vision_conf,
+                      ["EKF2: DEGRADED (3.0s)", "EKF2: LOST (999s)"], h_pad_px=20)
         telemetry_strip.addWidget(self.badge_vision_conf)
         self.badge_gps = self.badge_vision_conf  # Backward-compatible alias
 
@@ -250,6 +272,7 @@ class TopStatusStrip(QFrame):
         # (this ELRS receiver reports rssi=255/"unknown" even on a healthy link).
         self.badge_rc = QLabel("RC: NO DATA", self)
         self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        fit_min_width(self.badge_rc, ["RC: OK RSSI 254", "RC: NO DATA"], h_pad_px=20)
         telemetry_strip.addWidget(self.badge_rc)
 
         # Audio mute. A control rather than a badge, because muting is something
@@ -261,18 +284,25 @@ class TopStatusStrip(QFrame):
         self.btn_mute.setToolTip("Mute or unmute spoken and tonal alerts (Ctrl+M)")
         self.btn_mute.clicked.connect(self._on_mute_clicked)
         self._style_mute(False, True)
+        fit_min_width(self.btn_mute,
+                      ["\U0001F507 NO AUDIO", "\U0001F507 MUTED", "\U0001F50A AUDIO"], h_pad_px=24)
         telemetry_strip.addWidget(self.btn_mute)
 
         # Badges left-aligned so they sit directly beneath the connection
         # controls above them: one column of things you set, one column of
         # things the vehicle reports back.
-        row2.addLayout(telemetry_strip)
+        row2.addWidget(self.telemetry_strip_widget)
         # Reserved notification band. The toast lives in this gap, so the gap is
         # a real layout requirement rather than incidental slack: without a
         # floor it collapses on a narrow window and the toast has nowhere to go
-        # that is not already occupied by a badge.
-        row2.addSpacerItem(QSpacerItem(px(110), 0, QSizePolicy.MinimumExpanding,
-                                       QSizePolicy.Minimum))
+        # that is not already occupied by a badge. Kept as an attribute (not a
+        # one-off addSpacerItem) because _relayout_rows shrinks this floor,
+        # never the badges, when row2 as a whole does not fit - see there for
+        # why a smaller reservation is the lesser problem.
+        self._notif_spacer = QSpacerItem(px(110), 0, QSizePolicy.MinimumExpanding,
+                                         QSizePolicy.Minimum)
+        row2.addItem(self._notif_spacer)
+        self._row2 = row2
 
         # Arm state and flight mode sit on the second line, directly beneath the
         # battery: the header's right-hand column is then "how is the vehicle",
@@ -292,6 +322,7 @@ class TopStatusStrip(QFrame):
 
         self._row1 = row1
         self._conn_on_own_row = False
+        self._captions_hidden = False
 
         layout.addLayout(rows, 1)
 
@@ -310,6 +341,18 @@ class TopStatusStrip(QFrame):
                             for n in self._BAND_LEFT + self._BAND_RIGHT)
                 if w is not None]
 
+    def _rect_in_self(self, w) -> QRect:
+        """`w`'s geometry, mapped into this widget's own coordinate space.
+
+        The _BAND_LEFT badges live inside telemetry_strip_widget, not as
+        direct children of this widget - their raw .geometry() is relative to
+        that container, not to `self`, so it has to be mapped rather than
+        used as-is (this broke live once already: every notification landed
+        on top of the connection controls in row 1 instead of the row 2 gap).
+        """
+        top_left = w.mapTo(self, w.rect().topLeft())
+        return QRect(top_left, w.size())
+
     def notification_rect(self) -> QRect:
         """The clear band on row 2, in this widget's own coordinates.
 
@@ -321,7 +364,7 @@ class TopStatusStrip(QFrame):
             for name in names:
                 w = getattr(self, name, None)
                 if w is not None and not w.isHidden():
-                    out.append(w)
+                    out.append(self._rect_in_self(w))
             return out
 
         left = present(self._BAND_LEFT)
@@ -330,9 +373,9 @@ class TopStatusStrip(QFrame):
             return QRect()
 
         gap = px(10)
-        x = max(w.geometry().right() for w in left) + 1 + gap
-        limit = min(w.geometry().left() for w in right) - gap
-        reference = left[-1].geometry()
+        x = max(r.right() for r in left) + 1 + gap
+        limit = min(r.left() for r in right) - gap
+        reference = left[-1]
         return QRect(x, reference.top(), max(0, limit - x), reference.height())
 
     # Extra width demanded before the connection controls are allowed back up
@@ -390,6 +433,91 @@ class TopStatusStrip(QFrame):
             self._row1.insertWidget(0, self.conn_panel)
             self.sub_lbl.setVisible(True)
             self._conn_on_own_row = False
+
+        # Second tier: `rows` (which holds both row1 and row_conn) is a sibling
+        # of the brand block in the outer layout, not full-width - so even
+        # alone on its own row, conn_panel still sits to the right of the same
+        # brand-block width `needed` already accounts for. On a genuinely
+        # small screen (a ~1024px-wide embedded/field display) at a large UI
+        # scale, that is still not enough room, and conn_panel's own children
+        # (CONNECT, the badges) render past its right edge with no further
+        # fallback - measured live on a 1024x600 panel at 1.35x. Drop the
+        # field captions (Net:/IP:/Proto:/Port:) next: every field they label
+        # already carries the same information in its own tooltip.
+        if self._conn_on_own_row:
+            brand_width = self.title_lbl.sizeHint().width() + self.SPACING * 3
+            conn_needed = self.conn_panel.sizeHint().width() + brand_width
+            if not self._captions_hidden and available < conn_needed:
+                for lbl in (self.lbl_net, self.lbl_ip, self.lbl_proto, self.lbl_port):
+                    lbl.setVisible(False)
+                self._captions_hidden = True
+            elif self._captions_hidden and available > conn_needed + self._RELAYOUT_HYSTERESIS_PX:
+                for lbl in (self.lbl_net, self.lbl_ip, self.lbl_proto, self.lbl_port):
+                    lbl.setVisible(True)
+                self._captions_hidden = False
+        elif self._captions_hidden:
+            for lbl in (self.lbl_net, self.lbl_ip, self.lbl_proto, self.lbl_port):
+                lbl.setVisible(True)
+            self._captions_hidden = False
+
+        self._relayout_row2()
+
+    def _relayout_row2(self) -> None:
+        """Shrink the reserved notification band before the telemetry badges
+        so row2 fits, rather than let them overlap.
+
+        `rows` sits to the right of the same brand block `needed` above
+        already accounts for, exactly like row1 - so row2 (telemetry badges +
+        the reserved notification gap + the mode/arm pair) can run short of
+        room at the same screen sizes that trip the row1 tiers, even though
+        each individual badge already has its own text-fit floor. Those
+        floors are a hard `setMinimumWidth` each, so when the total is still
+        short, Qt's only remaining move is to let adjacent badges overlap
+        (found live at 1220x700 and 1280x760 @1.35x, sizes this station is
+        explicitly meant to support) - worse than a badge ever being. The
+        notification spacer is the one thing in row2 allowed to give:
+        notification_rect() already treats an empty result as "no safe place
+        to show a toast right now", so shrinking - even to 0 - degrades a
+        transient, recoverable display, never a badge an operator is reading.
+
+        A closed-form estimate of "how much" (brand width + every badge's
+        floor + spacings) was tried first and measured wrong against the real
+        layout: QHBoxLayout does not actually treat a plain widget's
+        minimumSizeHint as a hard floor the way it treats a QSpacerItem's
+        declared minimum - under real space pressure it compressed
+        `telemetry_strip_widget` to 405px against its own reported 527px
+        minimum (overlapping the badges inside it) while the notification
+        spacer sat completely untouched at its full reservation right next to
+        it. That is directly measurable (the widget's own `.geometry().width()`
+        against its own `.minimumSizeHint().width()`), which is what this
+        checks, rather than re-deriving the same number from badge widths and
+        guessed spacing - the same lesson this file's toast-anchor history
+        already learned the hard way (see the header comment above
+        _BAND_LEFT/_BAND_RIGHT): verify the real rendered geometry, never a
+        formula standing in for it.
+        """
+        if not hasattr(self, "_notif_spacer"):
+            return
+        full_reservation = px(110)
+        for _ in range(3):
+            self._row2.activate()
+            deficit = (self.telemetry_strip_widget.minimumSizeHint().width()
+                      - self.telemetry_strip_widget.geometry().width())
+            current = self._notif_spacer.sizeHint().width()
+            if deficit > 0:
+                target = max(0, current - deficit)
+            elif current < full_reservation:
+                # Slack reappeared (window grew back) - restore toward the
+                # full reservation; growing back can never create an overlap,
+                # since telemetry_strip_widget was exactly satisfied (deficit
+                # == 0) or had room to spare (deficit < 0) to get here.
+                target = min(full_reservation, current - deficit)
+            else:
+                break
+            if target == current:
+                break
+            self._notif_spacer.changeSize(target, 0, QSizePolicy.MinimumExpanding,
+                                          QSizePolicy.Minimum)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -513,6 +641,13 @@ class TopStatusStrip(QFrame):
 
         # Mode
         self.badge_mode.setText(f"MODE: {t.flight_mode}")
+
+        # These four badges above just took whichever of several runtime-only
+        # strings applies this tick (a PX4 mode name, an RSSI reading, a
+        # staleness age) - grow each floor to whatever is actually showing
+        # rather than trying to enumerate every string up front.
+        for badge in (self.badge_vio, self.badge_vision_conf, self.badge_rc, self.badge_mode):
+            grow_min_width(badge, h_pad_px=26)
 
         # Arm
         if t.armed:

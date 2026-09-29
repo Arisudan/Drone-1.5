@@ -531,6 +531,7 @@ class ValueGridWidget(QWidget):
 
         title = QLabel("TELEMETRY VALUES", self)
         title.setObjectName("cardHeading")
+        title.setWordWrap(True)
         bar.addWidget(title)
 
         self.lbl_hint = QLabel("", self)

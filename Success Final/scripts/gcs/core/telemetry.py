@@ -79,6 +79,11 @@ MAV_RESULT_NAMES = {
     4: "FAILED",
     5: "IN_PROGRESS",
     6: "CANCELLED",
+    # Rare for the commands this GCS actually sends, but real pymavlink
+    # MAV_RESULT values - without these, either one prints as a raw
+    # RES_7/RES_8 fallback instead of a name (see last_ack_result below).
+    7: "COMMAND_LONG_ONLY",
+    8: "COMMAND_INT_ONLY",
 }
 
 # SYS_STATUS onboard_control_sensors_* bit for the RC receiver, used to detect
@@ -97,6 +102,8 @@ MAV_CMD_NAMES = {
     20: "NAV_RETURN_TO_LAUNCH",
     185: "EMERGENCY_KILL",
     511: "SET_MESSAGE_INTERVAL",
+    209: "DO_MOTOR_TEST",
+    310: "ACTUATOR_TEST",
 }
 
 

@@ -15,7 +15,7 @@ DATA FLOW & INTERFACES:
                    MAV_CMD_COMPONENT_ARM_DISARM (normal & force 21196),
                    SET_POSITION_TARGET_LOCAL_NED (20 Hz daemon),
                    MAV_CMD_SET_MESSAGE_INTERVAL (telemetry rates),
-                   MAV_CMD_DO_MOTOR_TEST (bench actuator test, clamped + expiring).
+                   MAV_CMD_ACTUATOR_TEST (bench motor test, clamped + expiring).
   * MAVLink In:    HEARTBEAT, LOCAL_POSITION_NED, ATTITUDE, SYS_STATUS,
                    SERVO_OUTPUT_RAW, STATUSTEXT, COMMAND_ACK.
   * Qt Signals:    telemetry_updated(TelemetrySnapshot),
@@ -53,7 +53,13 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from pymavlink import mavutil
 
 from core.telemetry import TelemetrySnapshot
+from core.param_codec import decode_param_value
 
+
+
+# Not in pymavlink's ardupilotmega dialect, so spelled out here (common.xml).
+MAV_CMD_ACTUATOR_TEST = 310
+ACTUATOR_OUTPUT_FUNCTION_MOTOR1 = 1
 
 class MAVLinkWorker(QThread):
     """Worker thread running continuous MAVLink RX/TX loops."""
@@ -69,6 +75,9 @@ class MAVLinkWorker(QThread):
     statustext_received = pyqtSignal(str, int)          # Emits (text, severity)
     command_ack_received = pyqtSignal(int, int, str, str)  # Emits (cmd_id, result_code, cmd_name, result_str)
     rates_updated = pyqtSignal(float, float)            # Emits (rx_rate, tx_rate)
+    # Emits (name, decoded_value, param_type, index, total_count) for every
+    # PARAM_VALUE - see request_param_list() and core/param_codec.py.
+    param_value_received = pyqtSignal(str, object, int, int, int)
 
     def __init__(
         self,
@@ -109,6 +118,12 @@ class MAVLinkWorker(QThread):
         # for that cmd_id is reported; further ACKs against the same token are true
         # retransmit duplicates and are suppressed, while a fresh dispatch of the same
         # command type always gets its own fresh token and is reported once more.
+        #
+        # The dedup key is (token, result_code), not token alone: PX4 can legally
+        # ack a single dispatch twice with *different* content - MAV_RESULT_
+        # IN_PROGRESS (5) first, then the real final result (ACCEPTED/FAILED/...)
+        # once it finishes - and keying on token alone silently ate that second,
+        # genuinely different ACK as a "duplicate" of the first.
         self._ack_dispatch_token: dict = {}
         self._ack_reported_token: dict = {}
 
@@ -153,6 +168,25 @@ class MAVLinkWorker(QThread):
         """Call immediately before sending a MAV_CMD - see the dedup comment on
         _ack_dispatch_token in __init__ for why this exists."""
         self._ack_dispatch_token[cmd_id] = self._ack_dispatch_token.get(cmd_id, 0) + 1
+
+    def request_param_list(self) -> bool:
+        """Ask the vehicle to stream every parameter it holds.
+
+        Read-only: PARAM_REQUEST_LIST triggers a bulk PARAM_VALUE stream from
+        the vehicle (standard MAVLink parameter protocol) - this never sends
+        PARAM_SET. The vehicle decides its own pace and order; the caller
+        (ui/params_tab.py) accumulates whatever arrives via
+        param_value_received rather than this method blocking for it.
+        """
+        if self.master is None:
+            return False
+        try:
+            self.master.mav.param_request_list_send(
+                self.target_system, self.target_component)
+            self.tx_count += 1
+            return True
+        except Exception:
+            return False
 
     def connect_endpoint(self, host: str, port: int, protocol: str = "udp"):
         """Configure endpoint and start thread."""
@@ -504,12 +538,30 @@ class MAVLinkWorker(QThread):
             # Suppress true retransmit duplicates for the dispatch currently in
             # flight for this cmd_id, while still reporting the first ACK of every
             # fresh dispatch (see _begin_command_dispatch / class docstring above).
+            # Keyed on (token, result_code): an IN_PROGRESS ack followed by the
+            # real final ack for the same dispatch must still get through.
             token = self._ack_dispatch_token.get(cmd_id)
-            if token is not None and self._ack_reported_token.get(cmd_id) == token:
+            key = (token, res_code)
+            if token is not None and self._ack_reported_token.get(cmd_id) == key:
                 return
-            self._ack_reported_token[cmd_id] = token
+            self._ack_reported_token[cmd_id] = key
 
             self.command_ack_received.emit(cmd_id, res_code, cmd_name, res_str)
+
+        elif msg_type == "PARAM_VALUE":
+            if self.target_system > 0 and msg.get_srcSystem() != self.target_system:
+                return
+            name = getattr(msg, "param_id", "")
+            # param_id is a fixed-size char array on the wire - trailing NUL
+            # padding, not part of the name.
+            if isinstance(name, bytes):
+                name = name.decode("ascii", errors="replace")
+            name = name.strip("\x00")
+            if not name:
+                return
+            value = decode_param_value(msg.param_value, msg.param_type)
+            self.param_value_received.emit(
+                name, value, msg.param_type, msg.param_index, msg.param_count)
 
         elif msg_type == "STATUSTEXT":
             # Item 24: Safe decode of STATUSTEXT bytes before string operations
@@ -850,7 +902,13 @@ class MAVLinkWorker(QThread):
 
     def test_actuator(self, motor_index: int, throttle_pct: float,
                       timeout_s: float = None) -> bool:
-        """Spin one motor at a bench-test throttle via MAV_CMD_DO_MOTOR_TEST.
+        """Spin one motor at a bench-test throttle via MAV_CMD_ACTUATOR_TEST.
+
+        Not MAV_CMD_DO_MOTOR_TEST (209): PX4 v1.14+ Commander has no handler
+        for it and answers every one with MAV_RESULT_UNSUPPORTED. ACTUATOR_TEST
+        (310) is what QGroundControl's Actuators page uses. PX4 still requires
+        COM_MOT_TEST_EN=1, the vehicle disarmed, and the safety switch off
+        (if one is fitted), and caps each test at 3 s.
 
         `motor_index` is 1-based, matching both PX4's own numbering and the M1-M4
         labels on the motor workspace.
@@ -871,19 +929,17 @@ class MAVLinkWorker(QThread):
         timeout = max(0.0, min(10.0, timeout))
 
         try:
-            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST)
+            self._begin_command_dispatch(MAV_CMD_ACTUATOR_TEST)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
-                mavutil.mavlink.MAV_CMD_DO_MOTOR_TEST,
+                MAV_CMD_ACTUATOR_TEST,
                 0,
-                float(int(motor_index)),                                   # p1 motor number (1-based)
-                float(mavutil.mavlink.MOTOR_TEST_THROTTLE_PERCENT),        # p2 throttle type
-                throttle,                                                  # p3 throttle value
-                timeout,                                                   # p4 timeout (s)
-                0.0,                                                       # p5 motor count (0 = just this one)
-                float(mavutil.mavlink.MOTOR_TEST_ORDER_DEFAULT),           # p6 test order
-                0.0
+                throttle / 100.0,                                  # p1 output value, 0..1 for a motor
+                timeout,                                           # p2 timeout (s); <= 0 releases control
+                0.0, 0.0,                                          # p3, p4 reserved
+                float(ACTUATOR_OUTPUT_FUNCTION_MOTOR1 + int(motor_index) - 1),  # p5 output function
+                0.0, 0.0                                           # p6, p7 reserved
             )
             self.tx_count += 1
             return True
@@ -892,7 +948,7 @@ class MAVLinkWorker(QThread):
             return False
 
     def stop_all_motor_tests(self, motor_count: int = 8) -> bool:
-        """Command zero throttle on every channel, with a zero timeout.
+        """Release every motor channel (zero timeout = ACTION_RELEASE_CONTROL).
 
         Sent to more channels than this airframe has on purpose. This is the
         stop path; addressing a channel that does not exist costs one ignored

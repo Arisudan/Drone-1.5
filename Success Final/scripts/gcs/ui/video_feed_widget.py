@@ -54,7 +54,7 @@ if "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 import numpy as np
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
@@ -84,7 +84,7 @@ NETWORK_CAPTURE_OPTIONS = (
     "rtsp_transport;tcp|timeout;5000000|stimeout;5000000"
     "|max_delay;500000|fflags;nobuffer"
 )
-from ui.scaling import px
+from ui.scaling import px, fit_min_width
 
 #: URL schemes that go through FFmpeg and therefore want the options above.
 NETWORK_SCHEMES = ("rtsp://", "rtsps://", "udp://", "rtp://", "rtmp://", "tcp://")
@@ -253,6 +253,67 @@ class VideoSink(QLabel):
         self.setText(self._placeholder)
 
 
+class FullscreenVideoWindow(QWidget):
+    """A real top-level fullscreen viewport onto the FPV stream.
+
+    Shared by every camera-feed pane in the app (the FPV tab, the Cockpit
+    HUD) rather than one fullscreen window per pane - they already all show
+    the same broadcast frames (see VideoSink's own docstring on why there is
+    only one capture thread), so a second instance would add nothing but
+    another idle decode-free copy of the same pixmap. Esc, or a click
+    anywhere on the feed, exits back to the normal window.
+    """
+
+    closed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle("Drone FPV - Fullscreen")
+        self.setStyleSheet("background-color: #000000;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.sink = VideoSink("NO VIDEO FEED", self)
+        self.sink.setStyleSheet(
+            "background-color: #000000; border: none; color: #6e7681;"
+            " font-size: 14px; font-weight: bold; letter-spacing: 1px;")
+        layout.addWidget(self.sink)
+
+        self._hint = QLabel(
+            "Press Esc or click anywhere to exit fullscreen", self.sink)
+        self._hint.setStyleSheet(
+            "color: rgba(255, 255, 255, 200); background: rgba(0, 0, 0, 140);"
+            " font-size: 11px; font-weight: bold; padding: 5px 12px;"
+            " border-radius: 4px;")
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.timeout.connect(self._hint.hide)
+
+    def open(self) -> None:
+        """Enter fullscreen, re-showing the exit hint for a few seconds."""
+        self._hint.adjustSize()
+        self._hint.move(px(16), px(16))
+        self._hint.show()
+        self._hint_timer.start(3000)
+        self.showFullScreen()
+        self.raise_()
+        self.activateWindow()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._exit_fullscreen()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        self._exit_fullscreen()
+
+    def _exit_fullscreen(self) -> None:
+        self.showNormal()
+        self.hide()
+        self.closed.emit()
+
+
 class FloatingVideoWindow(QWidget):
     """Frameless always-on-top FPV window, draggable anywhere on the desktop.
 
@@ -269,6 +330,7 @@ class FloatingVideoWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.resize(328, 220)
         self._drag_offset = None
+        self._pre_fullscreen_geometry = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(1, 1, 1, 1)
@@ -294,6 +356,15 @@ class FloatingVideoWindow(QWidget):
             "color: #6e7681; font-size: 8px; background: transparent;")
         bar.addWidget(hint)
         bar.addStretch()
+        btn_full = QPushButton("\u26f6", self)
+        btn_full.setFixedSize(px(18), px(18))
+        btn_full.setToolTip("Fullscreen (Esc to exit)")
+        btn_full.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #8b949e;"
+            " font-size: 12px; font-weight: bold; padding: 0; min-height: 0; }"
+            "QPushButton:hover { color: #58a6ff; }")
+        btn_full.clicked.connect(self._toggle_fullscreen)
+        bar.addWidget(btn_full)
         btn_close = QPushButton("\u00d7", self)
         btn_close.setFixedSize(px(18), px(18))
         btn_close.setStyleSheet(
@@ -312,9 +383,29 @@ class FloatingVideoWindow(QWidget):
         self.hide()
         self.closed.emit()
 
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self._exit_fullscreen()
+        else:
+            self._pre_fullscreen_geometry = self.geometry()
+            self.showFullScreen()
+
+    def _exit_fullscreen(self) -> None:
+        self.showNormal()
+        if self._pre_fullscreen_geometry is not None:
+            self.setGeometry(self._pre_fullscreen_geometry)
+            self._pre_fullscreen_geometry = None
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.isFullScreen():
+            self._exit_fullscreen()
+            return
+        super().keyPressEvent(event)
+
     # Frameless windows have no system title bar, so dragging is ours to do.
+    # Not while fullscreen - there is nowhere on screen left to drag it to.
     def mousePressEvent(self, ev):
-        if ev.button() == Qt.LeftButton:
+        if ev.button() == Qt.LeftButton and not self.isFullScreen():
             self._drag_offset = ev.globalPos() - self.frameGeometry().topLeft()
             ev.accept()
 
@@ -337,6 +428,7 @@ class VideoFeedWidget(QWidget):
 
     # Re-emitted decoded frames, for any VideoSink that wants to mirror them.
     frame_broadcast = pyqtSignal(object)
+    fullscreen_requested = pyqtSignal()
 
     # The synthetic test pattern was dropped from the dropdown - it is a
     # bench aid, not a source anyone selects in flight. VideoCaptureThread
@@ -366,10 +458,12 @@ class VideoFeedWidget(QWidget):
         tb.addWidget(lbl_src)
 
         self.combo_source = QComboBox(self)
-        self.combo_source.addItems([
+        _source_items = [
             "Drone FPV (Wi-Fi MJPEG)",
             "Camera 0 (/dev/video0)", "Camera 1 (/dev/video1)", "Custom RTSP/HTTP URL",
-        ])
+        ]
+        self.combo_source.addItems(_source_items)
+        fit_min_width(self.combo_source, _source_items, h_pad_px=46)
         self.combo_source.currentIndexChanged.connect(self._on_source_changed)
         tb.addWidget(self.combo_source)
 
@@ -394,6 +488,15 @@ class VideoFeedWidget(QWidget):
         self.btn_capture = QPushButton("Start Video", self)
         self.btn_capture.clicked.connect(self._toggle_capture)
         tb.addWidget(self.btn_capture)
+
+        # Icon-only, matching the fullscreen buttons on the other camera
+        # panes (HUD, floating window) - the text form ("Fullscreen") was the
+        # difference between this toolbar fitting and overlapping the URL
+        # field at this station's narrowest supported size.
+        self.btn_fullscreen = QPushButton("⛶", self)
+        self.btn_fullscreen.setToolTip("Expand this feed to fill the whole screen (Esc to exit)")
+        self.btn_fullscreen.clicked.connect(self.fullscreen_requested)
+        tb.addWidget(self.btn_fullscreen)
 
         layout.addLayout(tb)
 

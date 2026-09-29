@@ -153,6 +153,7 @@ class SidebarNav(QFrame):
             ("Flight Terminal", 5),
             ("Flight Logs", 6),
             ("Configuration", 7),
+            ("Parameters", 8),
         ]
 
         for text, idx in items:

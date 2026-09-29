@@ -73,6 +73,14 @@ jobs:
         working-directory: tests
         run: python -m unittest test_statustext -v
 
+      - name: COMMAND_ACK dedup (IN_PROGRESS must not swallow the final ACK)
+        working-directory: tests
+        run: python -m unittest test_command_ack -v
+
+      - name: Motor test uses ACTUATOR_TEST (PX4 rejects DO_MOTOR_TEST)
+        working-directory: tests
+        run: python -m unittest test_motor_test -v
+
       - name: Video source handling (RTSP options, per-source URLs)
         working-directory: tests
         run: python -m unittest test_video_sources -v
@@ -101,6 +109,14 @@ jobs:
       - name: Background planner worker
         working-directory: tests
         run: python -m unittest test_planner_worker -v
+
+      - name: PX4 parameter decode (float32 bit-cast)
+        working-directory: tests
+        run: python -m unittest test_param_codec -v
+
+      - name: Parameters tab (batching, sort-stable row identity)
+        working-directory: tests
+        run: python -m unittest test_params_tab -v
 
       - name: UI scaling
         working-directory: tests

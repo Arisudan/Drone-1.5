@@ -55,7 +55,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QRectF, pyqtSignal
+from PyQt5.QtCore import Qt, QRectF, QPoint, QEvent, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QSlider,
@@ -312,6 +312,11 @@ class GuidedConfirmBar(QFrame):
     confirmed = pyqtSignal(str, float)   # action key, value (0.0 when no slider)
     cancelled = pyqtSignal(str)
 
+    # Gap between the bar's bottom edge and the top of the button it floats
+    # above, and the margin kept from the parent window's own edges.
+    ANCHOR_GAP_PX = 10
+    EDGE_MARGIN_PX = 6
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setProperty("class", "cardFrame")
@@ -321,6 +326,11 @@ class GuidedConfirmBar(QFrame):
         # visible regardless of setVisible(True), so asking Qt "is there a
         # slider?" silently returned a 0.0 altitude for a confirmed takeoff.
         self._has_slider = False
+        # The button this confirmation floats above (QGroundControl-style:
+        # the gesture appears right over the control it guards, not stashed
+        # in a fixed spot elsewhere in the column an operator has to look
+        # away to find). None means "centre in the parent" as a fallback.
+        self._anchor: Optional[QWidget] = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(px(12), px(9), px(12), px(10))
@@ -356,12 +366,19 @@ class GuidedConfirmBar(QFrame):
     def request(self, action: str, title: str, *, detail: str = "",
                 value_label: str = "", vmin: float = 0.0, vmax: float = 0.0,
                 vinit: float = 0.0, unit: str = "", step: float = 0.1,
-                danger: bool = False, confirm_text: str = "") -> None:
+                danger: bool = False, confirm_text: str = "",
+                anchor: Optional[QWidget] = None) -> None:
         """Show the bar for `action`. A zero-width range means no slider.
 
         Re-requesting while another action is pending replaces it outright and
         resets the knob - a half-dragged confirmation for a takeoff must never
         carry over into a kill.
+
+        `anchor` is the button this confirmation guards (ARM, TAKEOFF, the
+        SLAM tab's ABORT, ...) - the bar floats directly above it, the way
+        QGroundControl's own guided actions do, rather than at a fixed spot
+        in the command column an operator has to look away from the button
+        to find.
         """
         self._action = action
         colour = PALETTE["danger"] if danger else PALETTE["accent"]
@@ -384,7 +401,72 @@ class GuidedConfirmBar(QFrame):
 
         self.setStyleSheet(
             f"QFrame[class=\"cardFrame\"] {{ border: 1px solid {colour}; }}")
+        self._anchor = anchor
+        self._reposition()
         self.show()
+        self.raise_()
+
+    # ── floating placement ──────────────────────────────────────────
+
+    def _reposition(self) -> None:
+        """Float directly above `_anchor`, centred on it, clamped to the
+        parent's own bounds. Falls back to centring in the parent when there
+        is no anchor (or it has since been deleted/hidden)."""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        width = min(px(380), max(px(260), parent.width() - self.EDGE_MARGIN_PX * 2))
+        self.setFixedWidth(width)
+        self.adjustSize()
+        height = self.sizeHint().height()
+
+        anchor = self._anchor
+        try:
+            anchor_visible = anchor is not None and not anchor.isHidden()
+        except RuntimeError:            # anchor's C++ object was deleted
+            anchor_visible = False
+            self._anchor = None
+
+        if anchor_visible:
+            top_left = anchor.mapTo(parent, QPoint(0, 0))
+            x = top_left.x() + anchor.width() // 2 - width // 2
+            y = top_left.y() - height - self.ANCHOR_GAP_PX
+            # Not enough headroom above the button (ARM/DISARM sit right at
+            # the top of the command column) - drop below it instead of
+            # clamping to the window's top edge, which would overlap the
+            # very button this bar is meant to sit clear of.
+            if y < self.EDGE_MARGIN_PX:
+                y = top_left.y() + anchor.height() + self.ANCHOR_GAP_PX
+        else:
+            x = (parent.width() - width) // 2
+            y = (parent.height() - height) // 2
+
+        x = max(self.EDGE_MARGIN_PX, min(x, parent.width() - width - self.EDGE_MARGIN_PX))
+        y = max(self.EDGE_MARGIN_PX, min(y, parent.height() - height - self.EDGE_MARGIN_PX))
+        self.setGeometry(x, y, width, height)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Anchor buttons don't move on their own, but the window they and this
+        # bar both live in can be resized while a confirmation is pending -
+        # watch it the same way toast.py watches the header it floats beside.
+        top = self.window()
+        if top is not None and top is not self:
+            top.installEventFilter(self)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        top = self.window()
+        if top is not None and top is not self:
+            try:
+                top.removeEventFilter(self)
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize and self.isVisible():
+            self._reposition()
+        return super().eventFilter(obj, event)
 
     def cancel(self) -> None:
         """Dismiss without sending. Safe to call when nothing is pending."""

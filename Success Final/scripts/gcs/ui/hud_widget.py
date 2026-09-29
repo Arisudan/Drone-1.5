@@ -33,8 +33,9 @@ USAGE:
 from __future__ import annotations
 from typing import Optional
 
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QPainter, QColor
-from PyQt5.QtWidgets import QWidget, QSizePolicy
+from PyQt5.QtWidgets import QWidget, QSizePolicy, QPushButton
 
 from core.telemetry import TelemetrySnapshot
 from ui.scaling import px
@@ -43,6 +44,8 @@ from ui.video_feed_widget import VideoSink
 
 class HUDWidget(QWidget):
     """Minimal PFD: live speed tape, altitude tape, and a mode/armed banner - nothing else."""
+
+    fullscreen_requested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -63,6 +66,22 @@ class HUDWidget(QWidget):
         # cockpit shows attitude and what the aircraft is looking at together
         # instead of making the operator change tabs to see one or the other.
         self.video = VideoSink("FPV FEED - OPEN CAMERA TAB OR CONNECT", self)
+
+        self.btn_fullscreen = QPushButton("⛶", self.video)
+        self.btn_fullscreen.setToolTip(
+            "Expand this feed to fill the whole screen (Esc to exit)")
+        self.btn_fullscreen.setStyleSheet(
+            f"QPushButton {{ background: rgba(13, 17, 23, 160);"
+            f" border: 1px solid #30363d; border-radius: {px(4)}px;"
+            f" color: #c9d1d9; font-size: {px(13)}px; font-weight: bold; }}"
+            "QPushButton:hover { color: #58a6ff; border-color: #58a6ff; }")
+        # Square, sized from the glyph's own measured width rather than a
+        # guessed fixed size - "⛶" rendered wider than expected and clipped
+        # itself at every tested window size and scale.
+        self.btn_fullscreen.ensurePolished()
+        side = self.btn_fullscreen.fontMetrics().horizontalAdvance("⛶") + px(28)
+        self.btn_fullscreen.setFixedSize(side, side)
+        self.btn_fullscreen.clicked.connect(self.fullscreen_requested)
 
     def update_telemetry(self, t: TelemetrySnapshot):
         """Update HUD state from TelemetrySnapshot and trigger repaint."""
@@ -86,6 +105,8 @@ class HUDWidget(QWidget):
         self.video.setGeometry(margin, margin,
                                max(160, self.width() - 2 * margin),
                                max(90, self.height() - 2 * margin))
+        self.btn_fullscreen.move(
+            self.video.width() - self.btn_fullscreen.width() - px(6), px(6))
 
     def paintEvent(self, event):
         """Paint full aviation PFD cockpit overlay."""

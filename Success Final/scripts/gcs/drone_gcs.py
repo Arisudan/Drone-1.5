@@ -108,11 +108,12 @@ from ui.hud_widget import HUDWidget
 from ui.slam_map_widget import SLAMMapWidget
 from ui.cli_console import CLIConsoleWidget
 from ui.motor_widget import MotorWidget
-from ui.video_feed_widget import VideoFeedWidget, FloatingVideoWindow
+from ui.video_feed_widget import VideoFeedWidget, FloatingVideoWindow, FullscreenVideoWindow
 from ui.top_status_strip import TopStatusStrip
 from ui.sidebar_nav import SidebarNav
 from ui.logs_tab import LogsTabWidget
 from ui.config_tab import ConfigTabWidget
+from ui.params_tab import ParamsTabWidget
 from ui.value_grid import ValueGridWidget
 from ui.guided_confirm import GuidedConfirmBar
 from ui.shortcuts import install_shortcuts, ShortcutHelpOverlay
@@ -288,11 +289,16 @@ class DroneGCSMainWindow(QMainWindow):
         self.map_listener.status_updated.connect(self._on_ros2_status_updated)
         self.map_listener.start()
 
-        # One capture thread, three viewports: the FPV tab's own label, the
-        # cockpit's centre panel, and the draggable SLAM overlay.
+        # One capture thread, four viewports: the FPV tab's own label, the
+        # cockpit's centre panel, the draggable floating window, and the
+        # shared fullscreen window any of the others can expand into.
         self.fpv_float = FloatingVideoWindow(self)
+        self.fpv_fullscreen = FullscreenVideoWindow(self)
         self.page_fpv.frame_broadcast.connect(self.hud.video.on_frame)
         self.page_fpv.frame_broadcast.connect(self.fpv_float.sink.on_frame)
+        self.page_fpv.frame_broadcast.connect(self.fpv_fullscreen.sink.on_frame)
+        self.page_fpv.fullscreen_requested.connect(self.fpv_fullscreen.open)
+        self.hud.fullscreen_requested.connect(self.fpv_fullscreen.open)
 
         # Auto-connect to default autopilot endpoint on launch (UDP 14550)
         conn = self.settings.connection
@@ -372,7 +378,11 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_slam.execute_path_requested.connect(self._on_execute_path_requested)
         self.page_slam.pause_path_requested.connect(self._on_pause_path_requested)
         self.page_slam.resume_path_requested.connect(self._on_resume_path_requested)
-        self.page_slam.abort_path_requested.connect(self._on_abort_path_requested)
+        # Through _request_abort_path (the slide-to-confirm gate), not
+        # straight to the executor - this button used to abort and land
+        # immediately on a single click, with no confirmation at all, despite
+        # every other guarded action in this app going through GuidedConfirmBar.
+        self.page_slam.abort_path_requested.connect(self._request_abort_path)
         self.page_slam.altitude_changed.connect(self._on_cruise_altitude_changed)
         self.page_slam.reset_map_requested.connect(self._on_reset_map_requested)
         self.page_slam.fly_here_requested.connect(self._on_fly_here_requested)
@@ -404,6 +414,12 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_config = ConfigTabWidget(self.settings, self)
         self.page_config.settings_saved.connect(self._on_settings_saved)
         self.stack.addWidget(self.page_config)
+
+        # Page 8: PX4 Parameters - read-only for now, see ui/params_tab.py's
+        # module docstring for why a write path is a deliberate later phase.
+        self.page_params = ParamsTabWidget(self)
+        self.page_params.refresh_requested.connect(self._request_param_refresh)
+        self.stack.addWidget(self.page_params)
 
         work_col.addWidget(self.stack, 1)
 
@@ -687,13 +703,16 @@ class DroneGCSMainWindow(QMainWindow):
         rl.addWidget(grp_verif)
 
         # ---- Guided action confirmation ----
-        # Hidden until an action needs confirming. It sits directly above the
-        # console, in the column the operator is already looking at when they
-        # press a command button, rather than as a modal over the instruments.
+        # Hidden until an action needs confirming. A floating overlay parented
+        # directly to the main window (never added to `rl`'s layout - see
+        # GuidedConfirmBar._reposition), so it can float above whichever
+        # button actually triggered it - ARM/DISARM/TAKEOFF/etc. here on the
+        # Cockpit page, or the SLAM tab's ABORT PATH button on a different
+        # page entirely - the way QGroundControl's own guided actions do,
+        # rather than at one fixed spot an operator has to look away to find.
         self.confirm_bar = GuidedConfirmBar(self)
         self.confirm_bar.confirmed.connect(self._on_guided_confirmed)
         self.confirm_bar.cancelled.connect(self._on_guided_cancelled)
-        rl.addWidget(self.confirm_bar)
 
         # ---- Interactive Terminal / Console Bar ----
         self.console = CLIConsoleWidget(self)
@@ -817,6 +836,10 @@ class DroneGCSMainWindow(QMainWindow):
         self.lbl_footer_note = QLabel(
             "Vision engines unavailable - no onboard perception pipeline connected", self)
         self.lbl_footer_note.setObjectName("footerNote")
+        # This sentence only gets longer as engines are requested (see
+        # _refresh_vision_note) and the bar has no fixed height to clip
+        # against - word-wrap over a hard single-line clip at a narrow width.
+        self.lbl_footer_note.setWordWrap(True)
         fl.addWidget(self.lbl_footer_note)
         return bar
 
@@ -887,11 +910,29 @@ class DroneGCSMainWindow(QMainWindow):
         else:
             self.fpv_float.hide()
 
+        # Fetch the parameter list the first time the tab is opened, not on
+        # every connect - a full PX4 parameter set is 1000-1800+ messages,
+        # and the operator may never open this tab in a given session.
+        if page is self.page_params and not self.page_params.has_data():
+            self._request_param_refresh()
+
     def _position_fpv_float(self):
         """Park the floating viewport near the GCS's bottom-right on first show."""
         geo = self.geometry()
         self.fpv_float.move(geo.right() - self.fpv_float.width() - 40,
                             geo.bottom() - self.fpv_float.height() - 60)
+
+    def _request_param_refresh(self) -> None:
+        """(Re)fetch the full parameter list - the Parameters tab's only
+        entry point to the vehicle. Read-only: this only ever sends
+        PARAM_REQUEST_LIST, never PARAM_SET."""
+        if not (self.worker and self.worker.isRunning()):
+            self.page_params.refresh_unavailable(
+                "Not connected - connect to a vehicle first.")
+            return
+        self.page_params.begin_refresh()
+        if not self.worker.request_param_list():
+            self.page_params.refresh_unavailable("Could not send PARAM_REQUEST_LIST.")
 
     # -------------------------------------------------------------------------
     # Connection Management
@@ -925,7 +966,15 @@ class DroneGCSMainWindow(QMainWindow):
         self.worker.statustext_received.connect(self._on_statustext_received)
         self.worker.command_ack_received.connect(self._on_command_ack_received)
         self.worker.rates_updated.connect(self._on_rates_updated)
+        self.worker.param_value_received.connect(self.page_params.on_param_value)
         self.worker.start()
+        # A fresh connect may be a different vehicle with a different
+        # parameter set - whatever the Parameters tab showed before is no
+        # longer trustworthy. Cleared here, and only re-fetched if that tab
+        # is open (see _on_view_changed) or the operator clicks Refresh.
+        self.page_params.begin_refresh()
+        self.page_params.refresh_unavailable(
+            "Not fetched yet - open the Parameters tab or click Refresh.")
 
     def _disconnect_from_endpoint(self):
         if self.worker and self.worker.isRunning():
@@ -935,9 +984,11 @@ class DroneGCSMainWindow(QMainWindow):
             self.worker = None
             self.top_strip.set_connection_state(False, "Disconnected")
             self.toast.show_message("Disconnected from Drone", "#da3633")
+            self.page_params.set_connected(False)
 
     def _on_connection_changed(self, connected: bool, message: str):
         self.top_strip.set_connection_state(connected, message)
+        self.page_params.set_connected(connected)
         if connected:
             self.console.log_success(f"MAVLink Link: {message}")
             self.page_terminal.log_success(f"MAVLink Link: {message}")
@@ -1048,10 +1099,12 @@ class DroneGCSMainWindow(QMainWindow):
             target=getattr(self.exec_tracker, "req_dist", 0.0) or 0.0,
         )
 
-        if result_code != 0:
-            # Only the rejections are sounded. An accepted command already
-            # announces itself by the aircraft doing what was asked, and a tone
-            # on every ACK would cover the telemetry stream in beeps.
+        # Only genuine rejections/failures are sounded - not IN_PROGRESS (5,
+        # more is coming for this same dispatch) or CANCELLED (6, superseded
+        # by a newer command, not a failure of this one). An accepted command
+        # already announces itself by the aircraft doing what was asked, and a
+        # tone on every ACK would cover the telemetry stream in beeps.
+        if result_code in (1, 2, 3, 4) or result_code >= 7:
             self.audio.say(f"{cmd_name} rejected", Severity.WARN,
                            key=f"ack:{cmd_id}")
 
@@ -1070,6 +1123,30 @@ class DroneGCSMainWindow(QMainWindow):
             self.console.log_error(msg)
             self.page_terminal.log_error(msg)
             self.toast.show_message(f"[DENIED] {cmd_name} by PX4", "#da3633", 5000)
+        elif result_code == 3:  # UNSUPPORTED
+            msg = f"[UNSUPPORTED] PX4 ACK: {cmd_name} UNSUPPORTED (Pixhawk does not recognise this command)"
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message(f"[UNSUPPORTED] {cmd_name} by PX4", "#da3633", 5000)
+        elif result_code == 4:  # FAILED
+            msg = f"[FAILED] PX4 ACK: {cmd_name} FAILED (Command was accepted but execution failed)"
+            self.console.log_error(msg)
+            self.page_terminal.log_error(msg)
+            self.toast.show_message(f"[FAILED] {cmd_name} by PX4", "#da3633", 5000)
+        elif result_code == 5:  # IN_PROGRESS
+            # Not a rejection: PX4 is still executing this dispatch and a
+            # real final ACK (ACCEPTED/FAILED/...) for the same command is
+            # still expected - see the (token, result_code) dedup fix in
+            # mavlink_worker.py that lets that follow-up ACK actually arrive.
+            msg = f"[IN PROGRESS] PX4 ACK: {cmd_name} IN PROGRESS (still executing, final result to follow)"
+            self.console.log_info(msg)
+            self.page_terminal.log_info(msg)
+            self.toast.show_message(f"[IN PROGRESS] {cmd_name}", "#58a6ff", 3000)
+        elif result_code == 6:  # CANCELLED
+            msg = f"[CANCELLED] PX4 ACK: {cmd_name} CANCELLED (Superseded by a newer command before it finished)"
+            self.console.log_warning(msg)
+            self.page_terminal.log_warning(msg)
+            self.toast.show_message(f"[CANCELLED] {cmd_name}", "#d29922", 4000)
         else:
             msg = f"[REJECTED] PX4 ACK: {cmd_name} {result_str} (Code {result_code})"
             self.console.log_error(msg)
@@ -1077,8 +1154,30 @@ class DroneGCSMainWindow(QMainWindow):
             self.toast.show_message(msg, "#da3633", 4000)
 
     def _on_ros2_status_updated(self, msg: str):
-        self.console.log_info(f"ROS 2: {msg}")
-        self.page_terminal.log_info(f"ROS 2: {msg}")
+        """Route every ROS2MapListener status line to the console at a
+        severity that matches what actually happened - this used to go
+        through log_info() unconditionally, so a real connection loss (or a
+        frame decode error) read in the exact same neutral grey as "map
+        listener started" and a healthy reconnect, with no visual signal
+        that anything had gone wrong."""
+        text = f"ROS 2: {msg}"
+        if msg.startswith("Connected to"):
+            self.console.log_success(text)
+            self.page_terminal.log_success(text)
+        elif msg.startswith("Disconnected from"):
+            self.console.log_error(text)
+            self.page_terminal.log_error(text)
+        elif "Invalid" in msg or "decode error" in msg or "reconnecting" in msg:
+            # Recoverable, per-frame issues (one bad frame skipped, one
+            # reconnect) - amber, not the same red as a real disconnect.
+            self.console.log_warning(text)
+            self.page_terminal.log_warning(text)
+        elif "error" in msg.lower():
+            self.console.log_error(text)
+            self.page_terminal.log_error(text)
+        else:
+            self.console.log_info(text)
+            self.page_terminal.log_info(text)
 
     def _on_map_received_dispatch(self, grid: np.ndarray, res: float, ox: float,
                                   oy: float, source: str, image=None):
@@ -1089,6 +1188,12 @@ class DroneGCSMainWindow(QMainWindow):
         self.last_telemetry = t
         self.hud.update_telemetry(t)
         self.top_strip.update_telemetry(t)
+        # Sidebar footer must be driven from the same event as the header
+        # badge above, not only from the 30Hz _on_ui_tick - otherwise the two
+        # can show contradictory arm/mode state for up to one tick (e.g. right
+        # after connect, before the first tick fires).
+        self.sidebar.set_flight_state(t.flight_mode, t.armed)
+        self.sidebar.set_instruments(t.ground_speed, t.altitude)
         self.page_slam.update_pose(t.x, t.y, t.heading)
         self.page_slam.set_armed_state(t.armed)
         self.page_motors.update_pwms(t.motor_pwms)
@@ -1333,7 +1438,7 @@ class DroneGCSMainWindow(QMainWindow):
         self.confirm_bar.request(
             "arm", "ARM MOTORS", danger=True,
             detail="Propellers will be live. Confirm the area is clear.",
-            confirm_text="Slide to arm")
+            confirm_text="Slide to arm", anchor=self.btn_arm)
 
     def _request_disarm(self):
         """Disarm. Airborne, this is redirected to AUTO.LAND by _cmd_disarm -
@@ -1347,12 +1452,12 @@ class DroneGCSMainWindow(QMainWindow):
                 detail="Vehicle is airborne: this commands AUTO.LAND and "
                        "disarms on touchdown. Use EMERGENCY KILL for an "
                        "immediate cutoff.",
-                confirm_text="Slide to land and disarm")
+                confirm_text="Slide to land and disarm", anchor=self.btn_disarm)
         else:
             self.confirm_bar.request(
                 "disarm", "DISARM", danger=True,
                 detail="Vehicle is on the ground.",
-                confirm_text="Slide to disarm")
+                confirm_text="Slide to disarm", anchor=self.btn_disarm)
 
     def _request_takeoff(self):
         """Takeoff, with the altitude on a slider bounded by settings.limits."""
@@ -1368,7 +1473,7 @@ class DroneGCSMainWindow(QMainWindow):
             vmin=self.TAKEOFF_ALT_MIN_M, vmax=self.TAKEOFF_ALT_MAX_M,
             vinit=seed, unit="m", step=0.1,
             detail="Vehicle must already be armed.",
-            confirm_text="Slide to take off")
+            confirm_text="Slide to take off", anchor=self.btn_takeoff)
 
     def _request_yaw(self):
         if not self._require_link("rotate yaw"):
@@ -1383,7 +1488,7 @@ class DroneGCSMainWindow(QMainWindow):
             unit="\u00b0", step=5.0,
             detail="Relative rotation from the current heading. Requires "
                    "OFFBOARD and an airborne vehicle.",
-            confirm_text="Slide to rotate")
+            confirm_text="Slide to rotate", anchor=self.btn_yaw)
 
     def _request_change_alt(self):
         """Climb or descend in place to a new altitude."""
@@ -1398,7 +1503,7 @@ class DroneGCSMainWindow(QMainWindow):
             vinit=seed, unit="m", step=0.1,
             detail=f"Currently {current:.2f} m AGL. Holds the present position "
                    f"and changes height only. Requires OFFBOARD.",
-            confirm_text="Slide to change altitude")
+            confirm_text="Slide to change altitude", anchor=self.btn_change_alt)
 
     def _request_kill(self):
         """Emergency kill. The confirmation is a drag, not a modal with a
@@ -1407,7 +1512,7 @@ class DroneGCSMainWindow(QMainWindow):
             "kill", "EMERGENCY MOTOR KILL", danger=True,
             detail="Cuts all motor outputs immediately. If the vehicle is "
                    "airborne it will fall. There is no recovery from this.",
-            confirm_text="Slide to cut motors")
+            confirm_text="Slide to cut motors", anchor=self.btn_kill)
 
     def _request_abort_path(self):
         if not self.path_in_progress and not self.path_paused:
@@ -1416,7 +1521,8 @@ class DroneGCSMainWindow(QMainWindow):
         self.confirm_bar.request(
             "abort_path", "ABORT PATH", danger=True,
             detail="Stops the path and commands AUTO.LAND.",
-            confirm_text="Slide to abort and land")
+            confirm_text="Slide to abort and land",
+            anchor=self.page_slam.btn_abort_path)
 
     def _require_link(self, what: str) -> bool:
         """Refuse to even offer a confirmation with no link. Showing a confirm
@@ -2355,7 +2461,7 @@ class DroneGCSMainWindow(QMainWindow):
             "cancel": self._shortcut_cancel,
             "show_help": self._show_shortcut_help,
         }
-        for index in range(8):
+        for index in range(9):
             callbacks[f"workspace_{index}"] = (
                 lambda i=index: self._switch_workspace(i))
         return callbacks

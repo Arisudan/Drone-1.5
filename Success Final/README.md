@@ -1,6 +1,4 @@
-# Drone 1.5 - Radxa Drone
-
-## 2026-09-15 Update
+# RTAB-Map Drone Pkg — 2026-09-15 Update
 
 **Video Streaming in GCS (with all /topics integrated) over WiFi Access Point (DroneBridge5)**
 

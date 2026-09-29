@@ -31,10 +31,10 @@ from PyQt5.QtCore import Qt, QDate
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QDateEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFileDialog, QAbstractItemView,
+    QHeaderView, QFileDialog, QAbstractItemView, QInputDialog, QMessageBox,
 )
 
-from ui.scaling import px
+from ui.scaling import px, fit_min_width
 from core.flight_log import FlightLogger, FlightRecord, summarise
 
 COLUMNS = ["DATE", "DURATION", "DISTANCE", "MAX ALT", "MAX SPEED",
@@ -108,6 +108,10 @@ class LogsTabWidget(QWidget):
         # Short placeholder: the long form clipped at the minimum window width
         # with 135% scaling. What it matches is in the tooltip instead.
         self.search.setPlaceholderText("Search flights...")
+        # The stretch factor below (2) only wins a fair share of what's left
+        # after every other filter has taken its own minimum - at a narrow
+        # window that share can still be less than the placeholder needs.
+        fit_min_width(self.search, ["Search flights..."], h_pad_px=16)
         self.search.setToolTip("Filters by flight mode, status or date text")
         self.search.textChanged.connect(self._apply_filters)
         fl.addWidget(self.search, 2)
@@ -133,9 +137,11 @@ class LogsTabWidget(QWidget):
             _fit_date_edit(edit)
 
         self.mode_filter = QComboBox(self)
-        self.mode_filter.addItems(["All Modes", "OFFBOARD", "POSCTL", "ALTCTL",
-                                   "STABILIZED", "MANUAL", "AUTO.LOITER",
-                                   "AUTO.LAND", "AUTO.RTL"])
+        _mode_items = ["All Modes", "OFFBOARD", "POSCTL", "ALTCTL",
+                       "STABILIZED", "MANUAL", "AUTO.LOITER",
+                       "AUTO.LAND", "AUTO.RTL"]
+        self.mode_filter.addItems(_mode_items)
+        fit_min_width(self.mode_filter, _mode_items, h_pad_px=46)
         self.mode_filter.currentIndexChanged.connect(self._apply_filters)
         fl.addWidget(self.mode_filter)
 
@@ -166,6 +172,11 @@ class LogsTabWidget(QWidget):
         btn_csv = QPushButton("Export CSV", self)
         btn_csv.clicked.connect(self._export_csv)
         foot.addWidget(btn_csv)
+        btn_reset = QPushButton("Reset Logs", self)
+        btn_reset.setObjectName("mapDanger")
+        btn_reset.setToolTip("Permanently erase all recorded flight history")
+        btn_reset.clicked.connect(self._reset_logs)
+        foot.addWidget(btn_reset)
         root.addLayout(foot)
 
         self.reload()
@@ -248,3 +259,31 @@ class LogsTabWidget(QWidget):
                             f"{r.max_altitude_m:.2f}", f"{r.max_speed_ms:.2f}",
                             r.battery_used_pct, r.mode_summary, r.status, r.forced_arm])
         self.lbl_count.setText(f"Exported {len(rows)} flight(s) to {path}")
+
+    # Deliberately simple: this is friction against an accidental click on an
+    # irreversible action, the same purpose Reset Map's confirmation dialog
+    # serves elsewhere in this app, not a real access-control boundary. The
+    # password itself is the confirmation gate - correct password clears the
+    # log immediately, no second Yes/No on top of it.
+    RESET_PASSWORD = "admin"
+
+    def _reset_logs(self) -> None:
+        if not self._records:
+            QMessageBox.information(self, "Reset Flight Logs",
+                                    "There are no recorded flights to clear.")
+            return
+        password, ok = QInputDialog.getText(
+            self, "Reset Flight Logs",
+            "This permanently deletes all recorded flight history.\n"
+            "Enter the admin password to continue:",
+            QLineEdit.Password)
+        if not ok:
+            return
+        if password != self.RESET_PASSWORD:
+            QMessageBox.warning(self, "Reset Flight Logs", "Incorrect password.")
+            return
+        self.logger.clear_all()
+        self._records = []
+        self._apply_filters()
+        QMessageBox.information(self, "Reset Flight Logs",
+                                "Flight log history has been cleared.")

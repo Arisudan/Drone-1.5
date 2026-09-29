@@ -94,6 +94,7 @@ BINDINGS: List[Binding] = [
     Binding("Ctrl+6", "workspace_5", "Flight terminal", "Workspaces"),
     Binding("Ctrl+7", "workspace_6", "Flight logs", "Workspaces"),
     Binding("Ctrl+8", "workspace_7", "Configuration", "Workspaces"),
+    Binding("Ctrl+9", "workspace_8", "Parameters", "Workspaces"),
 
     # ── Link ────────────────────────────────────────────────────────
     Binding("Ctrl+K", "toggle_link", "Connect / disconnect", "Link"),

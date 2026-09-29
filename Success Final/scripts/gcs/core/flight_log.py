@@ -189,6 +189,19 @@ class FlightLogger:
         out.sort(key=lambda r: r.started_epoch, reverse=True)
         return out
 
+    def clear_all(self) -> None:
+        """Erase every persisted flight record.
+
+        Deliberately leaves `self.active`/`_was_armed` alone - a session
+        being recorded right now is live state, not history, and clearing
+        the log must not also forget that the vehicle is mid-flight.
+        """
+        try:
+            if self.path.exists():
+                self.path.unlink()
+        except OSError:
+            log.exception("could not clear flight log")
+
 
 def summarise(records: List[FlightRecord]) -> Dict[str, str]:
     """Headline figures for the stat cards."""

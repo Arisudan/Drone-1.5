@@ -42,6 +42,8 @@ import math
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 
+from core.map_quality import OCC_THRESH
+
 def _inflate_obstacles_numpy(obstacle_mask: np.ndarray, radius_cells: int) -> np.ndarray:
     """Dilate obstacle mask by circular disk in pure NumPy (zero external dependencies)."""
     if radius_cells <= 0:
@@ -90,7 +92,7 @@ class AStarPathPlanner:
         Plan shortest collision-free path from start_world to goal_world.
 
         Args:
-            grid: 2D numpy array (H, W) where >=50 is obstacle, -1 unknown, <50 free.
+            grid: 2D numpy array (H, W) where >=OCC_THRESH is obstacle, -1 unknown, else free.
             resolution: meters per cell.
             origin_x: world X (North) of grid[0, 0].
             origin_y: world Y (East) of grid[0, 0].
@@ -122,7 +124,7 @@ class AStarPathPlanner:
 
         # 1. Build Inflated Obstacle Mask using pure NumPy (compatible with all NumPy 1.x and 2.x versions)
         inflation_cells = max(1, int(math.ceil(self.robot_radius_m / resolution)))
-        obstacle_mask = (grid >= 50) | ((grid < 0) if block_unknown else False)
+        obstacle_mask = (grid >= OCC_THRESH) | ((grid < 0) if block_unknown else False)
         inflated_obstacles = _inflate_obstacles_numpy(obstacle_mask, inflation_cells)
 
         # 2. Convert World Coordinates to Grid Indices using math.floor for negative coordinates
@@ -331,7 +333,7 @@ class AStarPathPlanner:
         h, w = grid.shape
         block_unknown = self.treat_unknown_as_obstacle if treat_unknown_as_obstacle is None else treat_unknown_as_obstacle
         inflation_cells = max(1, int(math.ceil(self.robot_radius_m / resolution)))
-        obstacle_mask = (grid >= 50) | ((grid < 0) if block_unknown else False)
+        obstacle_mask = (grid >= OCC_THRESH) | ((grid < 0) if block_unknown else False)
         inflated_obstacles = _inflate_obstacles_numpy(obstacle_mask, inflation_cells)
 
         def world_to_grid(x: float, y: float) -> Tuple[int, int]:

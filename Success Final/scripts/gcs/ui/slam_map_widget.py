@@ -56,7 +56,8 @@ from PyQt5.QtWidgets import (
 )
 
 from core.path_planner import AStarPathPlanner
-from ui.scaling import px
+from core.map_quality import OCC_THRESH
+from ui.scaling import px, fit_min_width, grow_min_width
 from ui.mission_progress import MissionProgressBar
 from ui.styles import PALETTE
 
@@ -179,7 +180,12 @@ class SLAMMapCanvas(QWidget):
         self.map_source: str = "Awaiting Map"
 
         # Path Planner & Goal Pose
-        self.planner = AStarPathPlanner(robot_radius_m=0.22)
+        # 0.25m matches the real flight planner in drone_gcs.py and the
+        # wingspan safety corridor drawn below - this instance is only the
+        # fallback used when no PlannerWorker is attached (see
+        # attach_planner_worker()), and must not silently plan tighter than
+        # production.
+        self.planner = AStarPathPlanner(robot_radius_m=0.25)
         self.goal_pose: Optional[Tuple[float, float]] = None
         self.planned_waypoints: List[Tuple[float, float]] = []
         self.planned_distance: float = 0.0
@@ -830,9 +836,13 @@ class SLAMMapCanvas(QWidget):
         drone_pt = self._world_to_screen(self.drone_x, self.drone_y, cx, cy)
         screen_pts = [drone_pt] + [self._world_to_screen(wx, wy, cx, cy) for wx, wy in self.planned_waypoints]
 
-        # Check path clearance against occupancy grid (wingspan radius = 0.25m / 50cm diameter)
+        # Check path clearance against occupancy grid. Wingspan radius comes
+        # from the same planner instance that actually inflated the obstacles
+        # for this path, so the drawn corridor and the "tight" warning below
+        # can never disagree with the planning margin that produced the path.
+        robot_radius_cm = self.planner.robot_radius_m * 100.0
         tight_clearance = False
-        min_clearance_cm = 50.0
+        min_clearance_cm = robot_radius_cm * 2.0
         if self.occupancy_grid is not None and self.map_res > 0.001:
             gh, gw = self.occupancy_grid.shape
             for wx, wy in self.planned_waypoints:
@@ -842,15 +852,16 @@ class SLAMMapCanvas(QWidget):
                     for dc in range(-5, 6):
                         nr, nc = r + dr, c + dc
                         if 0 <= nr < gh and 0 <= nc < gw:
-                            if self.occupancy_grid[nr, nc] >= 50:
+                            if self.occupancy_grid[nr, nc] >= OCC_THRESH:
                                 d_cm = math.sqrt(dr*dr + dc*dc) * self.map_res * 100.0
                                 if d_cm < min_clearance_cm:
                                     min_clearance_cm = d_cm
-                                if d_cm < 20.0:
+                                if d_cm < robot_radius_cm:
                                     tight_clearance = True
 
-        # 1. Drone Wingspan Safety Corridor Tube (0.50m diameter)
-        corridor_width_px = 0.50 * self.scale
+        # 1. Drone Wingspan Safety Corridor Tube (drawn at the planner's own
+        # diameter, not a separate hardcoded figure)
+        corridor_width_px = (robot_radius_cm / 100.0 * 2.0) * self.scale
         if tight_clearance:
             # Low clearance warning: Amber/Coral
             p.setPen(QPen(QColor(234, 88, 12, 60), corridor_width_px, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -926,7 +937,14 @@ class SLAMMapCanvas(QWidget):
         p.restore()
 
     def _draw_drone(self, p: QPainter, cx: float, cy: float):
-        """Draw tactical drone symbol with heading indicator and RealSense FOV cone."""
+        """Draw the tactical drone symbol: heading, frame, FOV cone.
+
+        One arrow-shaped fuselage carries the heading now, rather than a
+        plain circle plus a second, separate floating chevron above it -
+        the two used to say "forward" twice in two different visual
+        languages; this says it once, unambiguously, in the accent colour
+        used for aircraft-moving state everywhere else in this app.
+        """
         p.save()
         d_pt = self._world_to_screen(self.drone_x, self.drone_y, cx, cy)
         p.translate(d_pt)
@@ -947,33 +965,49 @@ class SLAMMapCanvas(QWidget):
         p.drawPolygon(fov_cone)
 
         arm_len = 16.0
-        p.setPen(QPen(QColor(203, 213, 225), 2.5))
+
+        # Soft halo behind the whole frame so the icon reads clearly against
+        # a busy occupancy grid instead of blending into it.
+        p.setPen(Qt.NoPen)
+        halo = QColor(PALETTE["accent"])
+        halo.setAlpha(30)
+        p.setBrush(QBrush(halo))
+        p.drawEllipse(QPointF(0, 0), arm_len + 12, arm_len + 12)
+
+        p.setPen(QPen(QColor(148, 163, 184), 2.5, Qt.SolidLine, Qt.RoundCap))
         p.drawLine(QPointF(-arm_len, -arm_len), QPointF(arm_len, arm_len))
         p.drawLine(QPointF(-arm_len, arm_len), QPointF(arm_len, -arm_len))
 
-        # Propeller discs
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(QColor(16, 185, 129, 220)))  # Front motors green
-        p.drawEllipse(QPointF(-arm_len, -arm_len), 6.5, 6.5)
-        p.drawEllipse(QPointF(arm_len, -arm_len), 6.5, 6.5)
+        # Propeller discs: front/rear colour-coded (not by live PWM - that
+        # lives on the Motors tab; here it is purely "which end is forward")
+        # with a dark ring so the fill reads clearly on any map colour.
+        ring = QPen(QColor(15, 23, 42, 200), 1.5)
+        for colour_key, y_sign in ((("ok"), -1), (("danger"), 1)):
+            p.setPen(ring)
+            p.setBrush(QBrush(QColor(PALETTE[colour_key])))
+            p.drawEllipse(QPointF(-arm_len, arm_len * y_sign), 6.5, 6.5)
+            p.drawEllipse(QPointF(arm_len, arm_len * y_sign), 6.5, 6.5)
 
-        p.setBrush(QBrush(QColor(220, 38, 38, 220)))  # Rear motors red
-        p.drawEllipse(QPointF(-arm_len, arm_len), 6.5, 6.5)
-        p.drawEllipse(QPointF(arm_len, arm_len), 6.5, 6.5)
-
-        # Front Heading Chevron (pointing North relative to heading)
-        p.setBrush(QBrush(QColor(245, 158, 11)))
-        chevron = QPolygonF([
-            QPointF(0, -arm_len - 10),
-            QPointF(6, -arm_len),
-            QPointF(-6, -arm_len)
+        # Fuselage: a forward-pointing arrowhead body (nose forward, two
+        # trailing edges back to the hub), so the heading is legible at a
+        # glance without a second marker. Outlined in white for contrast
+        # against both light map cells and the dark background alike.
+        nose = QPointF(0, -arm_len * 0.95)
+        body = QPolygonF([
+            nose,
+            QPointF(6.5, -2.0),
+            QPointF(4.0, 9.0),
+            QPointF(-4.0, 9.0),
+            QPointF(-6.5, -2.0),
         ])
-        p.drawPolygon(chevron)
+        p.setPen(QPen(QColor(226, 232, 240), 1.75))
+        p.setBrush(QBrush(QColor(PALETTE["accent_dim"])))
+        p.drawPolygon(body)
 
-        # Fuselage (high contrast Dark Navy on white)
-        p.setBrush(QBrush(QColor(71, 85, 105)))
-        p.setPen(QPen(QColor(226, 232, 240), 2))
-        p.drawEllipse(QPointF(0, 0), 8, 8)
+        # Canopy dot - a small highlight so the shape doesn't read as flat.
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(PALETTE["accent_bright"])))
+        p.drawEllipse(QPointF(0, -1.5), 2.6, 2.6)
 
         p.restore()
 
@@ -1235,6 +1269,14 @@ class SLAMMapWidget(QWidget):
         self.pill_status.setMinimumHeight(px(24))
         self.pill_status.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.pill_status.setAlignment(Qt.AlignCenter)
+        # Floored on today's text only, then grown further in
+        # _refresh_map_pill() as wider states are actually seen - not
+        # pre-provisioned for every state up front. "LIVE /map_thin" alone is
+        # nearly double "NO DATA"'s width; reserving that unconditionally
+        # pushed Reset Map into overlapping it at 1220-1280px @1.35x, sizes
+        # this station is meant to support, for a state that is not even the
+        # common case.
+        self._fit_button_to_text(self.pill_status)
         self.badge_source = self.pill_status  # Backward-compatible alias
         r1.addWidget(self.pill_status)
 
@@ -1245,6 +1287,7 @@ class SLAMMapWidget(QWidget):
         self.btn_reset_map.setObjectName("mapDanger")
         self.btn_reset_map.setToolTip(
             "Wipe the live SLAM map and restart mapping from empty. Disabled while armed.")
+        self._fit_button_to_text(self.btn_reset_map)
         self.btn_reset_map.clicked.connect(self._handle_reset_map_clicked)
         r1.addWidget(self.btn_reset_map)
 
@@ -1263,6 +1306,8 @@ class SLAMMapWidget(QWidget):
         self.combo_alt = QComboBox(self)
         self.combo_alt.addItems(["0.8m", "1.0m", "1.2m", "1.5m", "2.0m"])
         self.combo_alt.setCurrentText("1.0m")
+        # padding (20) + border (2) + drop-down arrow well (18) + slack
+        fit_min_width(self.combo_alt, ["0.8m", "1.0m", "1.2m", "1.5m", "2.0m"], h_pad_px=46)
         self.combo_alt.setToolTip("Cruise altitude AGL for autonomous path traversal")
         self.combo_alt.currentTextChanged.connect(self._on_altitude_selected)
         r1.addWidget(self.combo_alt)
@@ -1277,6 +1322,7 @@ class SLAMMapWidget(QWidget):
         self.btn_execute_path = QPushButton("EXECUTE", self)
         self.btn_execute_path.setObjectName("btnGo")
         self.btn_execute_path.setToolTip("Fly the planned path (Ctrl+E)")
+        self._fit_button_to_text(self.btn_execute_path)
         self.btn_execute_path.setEnabled(False)
         self.btn_execute_path.clicked.connect(self._handle_execute_path)
         r1.addWidget(self.btn_execute_path)
@@ -1284,6 +1330,7 @@ class SLAMMapWidget(QWidget):
         self.btn_pause_path = QPushButton("PAUSE", self)
         self.btn_pause_path.setObjectName("btnHold")
         self.btn_pause_path.setToolTip("Pause the path and hold position (AUTO.LOITER)")
+        self._fit_button_to_text(self.btn_pause_path, extra_labels=("RESUME",))
         self.btn_pause_path.setEnabled(False)
         self.btn_pause_path.clicked.connect(self._handle_pause_path)
         r1.addWidget(self.btn_pause_path)
@@ -1291,6 +1338,7 @@ class SLAMMapWidget(QWidget):
         self.btn_abort_path = QPushButton("ABORT", self)
         self.btn_abort_path.setObjectName("btnAbort")
         self.btn_abort_path.setToolTip("Abort the path and land immediately")
+        self._fit_button_to_text(self.btn_abort_path)
         self.btn_abort_path.setEnabled(False)
         self.btn_abort_path.clicked.connect(self._handle_abort_path)
         r1.addWidget(self.btn_abort_path)
@@ -1298,6 +1346,7 @@ class SLAMMapWidget(QWidget):
         self.btn_clear_goal = QPushButton("Clear", self)
         self.btn_clear_goal.setObjectName("mapTool")
         self.btn_clear_goal.setToolTip("Clear the staged goal and its planned path")
+        self._fit_button_to_text(self.btn_clear_goal)
         self.btn_clear_goal.clicked.connect(self._handle_clear_goal)
         r1.addWidget(self.btn_clear_goal)
 
@@ -1352,7 +1401,8 @@ class SLAMMapWidget(QWidget):
         r2.addWidget(self.btn_reset_rot)
 
         self.btn_auto_follow = self._map_tool(
-            "Follow", "Keep the vehicle centred as it flies", checkable=True)
+            "Follow", "Keep the vehicle centred as it flies", checkable=True,
+            extra_labels=("Follow: ON",))
         self.btn_auto_follow.clicked.connect(self._toggle_auto_follow)
         r2.addWidget(self.btn_auto_follow)
 
@@ -1410,6 +1460,7 @@ class SLAMMapWidget(QWidget):
 
         self.btn_rviz_launch = QPushButton("Launch RViz2", self)
         self.btn_rviz_launch.setObjectName("btnGo")
+        self._fit_button_to_text(self.btn_rviz_launch)
         r3.addWidget(self.btn_rviz_launch)
 
         self.btn_rviz_reload = self._map_tool("Reload", "Restart the embedded RViz2 process")
@@ -1418,6 +1469,7 @@ class SLAMMapWidget(QWidget):
 
         self.btn_rviz_close = QPushButton("Close", self)
         self.btn_rviz_close.setObjectName("mapDanger")
+        self._fit_button_to_text(self.btn_rviz_close)
         self.btn_rviz_close.setEnabled(False)
         r3.addWidget(self.btn_rviz_close)
 
@@ -1604,6 +1656,7 @@ class SLAMMapWidget(QWidget):
         if hasattr(self, "lbl_map_caption"):
             self.lbl_map_caption.setText("MAP" if self.current_view_mode == 0 else "RVIZ")
         self.pill_status.setText(text)
+        grow_min_width(self.pill_status, h_pad_px=22)
         self.pill_status.setToolTip(tip)
         self._set_state(self.pill_status, state)
         self._refresh_layer_availability()
@@ -1738,14 +1791,47 @@ class SLAMMapWidget(QWidget):
     # scale factor because inline sheets never pass through scale_qss.
     # -------------------------------------------------------------------------
 
+    # Horizontal (padding + border) budget per stylesheet role, read off the
+    # matching rule in ui/styles.py. Used only as a floor for setMinimumWidth
+    # below - a few px of slack here just makes the control a touch wider
+    # than strictly needed, never wrong.
+    _CONTROL_H_PADDING = {
+        "mapTool": 20, "segItem": 22, "mapDanger": 20, "mapPill": 22,
+        "btnGo": 24, "btnHold": 24, "btnAbort": 24,
+    }
+
+    def _fit_button_to_text(self, widget, extra_labels: tuple = ()) -> None:
+        """Floor a button/label's width at what its text(s) actually need.
+
+        QHBoxLayout treats sizeHint() as a preference, not a floor: under
+        space pressure (a narrow window, a large UI scale) it compresses a
+        control below the width its text needs, and Qt then clips the label
+        from both sides with no ellipsis - see
+        tests/test_gui_layout.py's CLIPPED check, and the real EXECUTE/PAUSE/
+        ABORT/Follow/Center/Measure clipping this fixes. setMinimumWidth is
+        the actual floor, so measure the real text in the real (post-
+        stylesheet) font rather than trusting sizeHint().
+
+        `extra_labels` covers controls whose text changes at runtime (Follow
+        -> "Follow: ON", PAUSE -> RESUME, the map pill's LIVE/BENCH/NO DATA/...
+        states): the floor is set from the widest of every label it will ever
+        show, not just its label today.
+        """
+        widget.ensurePolished()
+        h_pad = px(self._CONTROL_H_PADDING.get(widget.objectName(), 28))
+        fm = widget.fontMetrics()
+        widest = max((fm.horizontalAdvance(t) for t in (widget.text(),) + tuple(extra_labels)), default=0)
+        widget.setMinimumWidth(widest + h_pad)
+
     def _map_tool(self, text: str, tooltip: str = "",
-                  checkable: bool = False) -> QPushButton:
+                  checkable: bool = False, extra_labels: tuple = ()) -> QPushButton:
         """A neutral map tool: view, zoom, rotate. Never commands the aircraft."""
         btn = QPushButton(text, self)
         btn.setObjectName("mapTool")
         if tooltip:
             btn.setToolTip(tooltip)
         btn.setCheckable(checkable)
+        self._fit_button_to_text(btn, extra_labels)
         return btn
 
     def _seg_button(self, text: str, tooltip: str = "") -> QPushButton:
@@ -1755,6 +1841,7 @@ class SLAMMapWidget(QWidget):
         btn.setCheckable(True)
         if tooltip:
             btn.setToolTip(tooltip)
+        self._fit_button_to_text(btn)
         return btn
 
     def _cluster_caption(self, text: str) -> QLabel:

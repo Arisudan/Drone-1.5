@@ -253,16 +253,9 @@ class FrameGeometryWidget(QWidget):
         g = self._layout()
         cx, cy, arm, rotor_r = g["cx"], g["cy"], g["arm"], g["rotor_r"]
 
-        # Nose marker. Without an explicit "forward" the diagram is ambiguous by
-        # 180 degrees, which is exactly the error it exists to prevent.
+        # "NOSE" label above the frame - the heading arrow itself now lives
+        # inside the body hub (below), so this is text only.
         nose_tip = cy - arm - g["nose_reserve"] + px(2)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(QColor(88, 166, 255)))
-        p.drawPolygon(QPolygonF([
-            QPointF(cx, nose_tip + px(10)),
-            QPointF(cx - px(6), nose_tip),
-            QPointF(cx + px(6), nose_tip),
-        ]))
         p.setFont(scaled_font("Segoe UI", 7, bold=True))
         p.setPen(QColor(88, 166, 255))
         p.drawText(QRectF(cx - px(34), nose_tip + px(10), px(68), px(13)),
@@ -279,6 +272,20 @@ class FrameGeometryWidget(QWidget):
         hub = arm * 0.20
         p.drawRoundedRect(QRectF(cx - hub, cy - hub, hub * 2, hub * 2),
                           px(4), px(4))
+
+        # Heading arrow, inside the hub square rather than floating above the
+        # frame: a solid triangle pointing straight up toward the front
+        # (matching the "NOSE" label above it), apex-forward rather than the
+        # previous apex-toward-centre orientation - without an explicit
+        # forward marker the diagram is ambiguous by 180 degrees, which is
+        # exactly the error this exists to prevent.
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(88, 166, 255)))
+        p.drawPolygon(QPolygonF([
+            QPointF(cx, cy - hub * 0.75),
+            QPointF(cx - hub * 0.5, cy + hub * 0.45),
+            QPointF(cx + hub * 0.5, cy + hub * 0.45),
+        ]))
 
         centres = self.rotor_centres()
         for num, label, sense, (_rx, fy) in QUAD_X_LAYOUT:
@@ -751,6 +758,7 @@ class MotorWidget(QWidget):
         t.setStyleSheet(
             f"font-weight: bold; color: #58a6ff; font-size: {px(12)}px;"
             " letter-spacing: 0.8px;")
+        t.setWordWrap(True)
         title_box.addWidget(t)
         title_box.addStretch()
 
@@ -778,6 +786,7 @@ class MotorWidget(QWidget):
         geo_hint = QLabel("Click a rotor to select it for testing", self)
         geo_hint.setObjectName("fieldSubLabel")
         geo_hint.setAlignment(Qt.AlignCenter)
+        geo_hint.setWordWrap(True)
         gl.addWidget(geo_hint)
         body.addWidget(geo_card, 3)
 
@@ -805,7 +814,9 @@ class MotorWidget(QWidget):
         # Right: the only controls in this workspace that command anything.
         self.test_panel = MotorTestPanel(self)
         self.test_panel.test_requested.connect(self.motor_test_requested)
+        self.test_panel.test_requested.connect(self._reflect_test_locally)
         self.test_panel.stop_requested.connect(self.motor_test_stop_requested)
+        self.test_panel.stop_requested.connect(self._reflect_stop_locally)
         self.test_panel.selection_changed.connect(self.geometry.set_selected)
         body.addWidget(self.test_panel, 4)
 
@@ -826,6 +837,35 @@ class MotorWidget(QWidget):
 
     def stop_motor_tests(self) -> None:
         self.test_panel.stop_all()
+
+    def _reflect_test_locally(self, motor_num: int, throttle_pct: float) -> None:
+        """Show the commanded throttle on the bars/diagram immediately.
+
+        update_pwms() otherwise only runs off live SERVO_OUTPUT_RAW telemetry
+        (drone_gcs.py forwards each snapshot to it) - on the bench that can
+        lag a beat behind dispatch or, if the link's requested stream rate
+        for that message is stale, arrive late enough that a motor was
+        audibly spinning while every bar still read idle. This mirrors what
+        was just sent, the same immediate-feedback convention QGroundControl's
+        own actuator test sliders use, and a real telemetry update arriving
+        after it just confirms (or corrects) the same value.
+        """
+        if motor_num not in self.bars:
+            return
+        pct = max(0.0, min(100.0, float(throttle_pct)))
+        pwm = int(round(1000 + pct / 100.0 * 1000))
+        # Only one motor is ever the live target here (selection is
+        # exclusive), so every other bar is idle right now, not whatever it
+        # last happened to show - matters for SEQ 1->4, where advancing to
+        # the next motor otherwise left the previous one's bar stuck high.
+        pwms = [1000, 1000, 1000, 1000]
+        pwms[motor_num - 1] = pwm
+        self.update_pwms(pwms)
+
+    def _reflect_stop_locally(self) -> None:
+        """Mirror STOP ALL / hold-release / safety-expiry back to idle
+        immediately, for the same reason as _reflect_test_locally."""
+        self.update_pwms([1000, 1000, 1000, 1000])
 
     def update_pwms(self, pwms: List[int]):
         """Update the bars and the geometry diagram with new PWM values."""

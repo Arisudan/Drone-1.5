@@ -113,6 +113,47 @@ def pt(value: float) -> int:
     return max(5, int(round(float(value) * _scale)))
 
 
+def fit_min_width(widget, texts, h_pad_px: float = 24) -> None:
+    """Floor `widget`'s width at what the widest of `texts` needs to render.
+
+    A QHBoxLayout treats sizeHint() as a preference, not a floor: under space
+    pressure (a narrow window, a large UI scale) it compresses a control
+    below the width its text needs, and Qt then clips the text with no
+    ellipsis - see tests/test_gui_layout.py's CLIPPED check. setMinimumWidth
+    is an actual floor, so measure the real (post-stylesheet) font rather
+    than trusting sizeHint().
+
+    Pass every string the control can ever show (all combo-box items, every
+    state a status pill switches between, a toggle button's both labels) -
+    the floor has to hold for whichever one is currently longest, not just
+    whatever happens to be showing when this is called.
+
+    `h_pad_px` is the control's own horizontal (padding + border [+ drop-down
+    arrow for a QComboBox]) budget, in *unscaled* px - it goes through the
+    same scale factor as the measured text, via px().
+    """
+    widget.ensurePolished()
+    fm = widget.fontMetrics()
+    widest = max((fm.horizontalAdvance(t) for t in texts if t), default=0)
+    widget.setMinimumWidth(widest + px(h_pad_px))
+
+
+def grow_min_width(widget, h_pad_px: float = 24) -> None:
+    """Like fit_min_width, but self-updating and single-string.
+
+    For a badge/button whose text is one of several runtime-only strings the
+    call site can't enumerate up front (a PX4 flight mode name, an RSSI
+    reading, a staleness age suffix) - call this right after every setText()
+    on it. The floor only ever grows, never shrinks, so it converges to the
+    widest value actually seen rather than requiring every possible string to
+    be guessed in advance.
+    """
+    widget.ensurePolished()
+    needed = widget.fontMetrics().horizontalAdvance(widget.text()) + px(h_pad_px)
+    if needed > widget.minimumWidth():
+        widget.setMinimumWidth(needed)
+
+
 def scaled_font(family: str, point_size: float, bold: bool = False,
                 italic: bool = False):
     """A QFont at the scaled point size. Imported lazily so this module stays

@@ -186,7 +186,10 @@ class ConfigTabWidget(QWidget):
         edit = QLineEdit(self)
         # Scaled: a fixed 220px cap clipped the stream URL as soon as the
         # UI scale raised the font above the size it was measured at.
-        edit.setMaximumWidth(px(220))
+        # Genuinely fixed (min == max), not just capped: a maximum alone left
+        # the floor at Qt's default, so a narrow grid column under space
+        # pressure could still squeeze this well below the intended 220px.
+        edit.setFixedWidth(px(220))
         return edit
 
     # ── value transfer ──────────────────────────────────────────────
@@ -206,6 +209,12 @@ class ConfigTabWidget(QWidget):
                     w.setCurrentIndex(idx if idx >= 0 else 0)
                 else:
                     w.setText(str(v))
+                    # A value wider than the field's own (scaled) max width
+                    # otherwise shows its tail, not its head - setText() alone
+                    # leaves the cursor (and the visible scroll position) at
+                    # the end. Real case: the FPV stream URL field showed
+                    # "6.101.84:8080/video", hiding the "http://..." prefix.
+                    w.setCursorPosition(0)
 
     def _read_from_editors(self) -> GCSSettings:
         """Build a fresh settings object; leaves self.settings untouched until

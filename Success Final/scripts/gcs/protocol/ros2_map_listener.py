@@ -119,6 +119,11 @@ class ROS2MapListener(QThread):
         self._tcp_host = tcp_host
         self._tcp_port = tcp_port
         self._tcp_thread: Optional[threading.Thread] = None
+        # Tracks the *emitted* connection state so a disconnect is announced
+        # exactly once per real transition - the retry loop below sleeps and
+        # tries again every 3s, and without this flag every failed attempt
+        # would re-emit "Disconnected", not just the first one.
+        self._tcp_connected = False
 
         # Liveness bookkeeping. Without this a dead map feed is invisible:
         # the canvas keeps painting the last good grid and looks identical
@@ -206,6 +211,7 @@ class ROS2MapListener(QThread):
                 sock.settimeout(3.0)
                 sock.connect((self._tcp_host, self._tcp_port))
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._tcp_connected = True
                 self.status_updated.emit(f"Connected to TCP Map Bridge at {self._tcp_host}:{self._tcp_port}")
 
                 sock.settimeout(5.0)
@@ -312,9 +318,27 @@ class ROS2MapListener(QThread):
                         continue
 
                 sock.close()
+                self._announce_tcp_disconnect()
             except Exception:
+                self._announce_tcp_disconnect()
                 # Brief backoff before reconnect attempt
                 time.sleep(3.0)
+
+    def _announce_tcp_disconnect(self) -> None:
+        """Emit the disconnect counterpart to the "Connected" message above,
+        exactly once per real transition.
+
+        Without the `_tcp_connected` guard, this fires on every failed
+        reconnect attempt in the retry loop (every 3s while the bridge stays
+        down) instead of once when it actually drops - which is what a
+        previous version of this method did, silently, since it had no emit
+        here at all: a dropped or never-started bridge left the operator
+        with no signal beyond the map simply going stale.
+        """
+        if self._tcp_connected:
+            self._tcp_connected = False
+            self.status_updated.emit(
+                f"Disconnected from TCP Map Bridge at {self._tcp_host}:{self._tcp_port}")
 
     def _recv_exact(self, sock: socket.socket, num_bytes: int) -> Optional[bytes]:
         data = bytearray()
