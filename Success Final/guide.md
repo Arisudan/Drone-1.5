@@ -91,6 +91,8 @@ The primary situational-awareness view, with two switchable layers:
 - **2D Blueprint & A\* Planner** — a top-down occupancy-grid canvas (`/map` raw and/or `/map_thin` skeleton, togglable), with an arrow-shaped drone icon whose heading smoothly interpolates toward the true VIO/EKF2 yaw (shortest-angle blending, no snap or wrap-around glitch at 359°→0°), a breadcrumb flight trail, and pan/zoom/rotate controls.
 - **3D RViz2 Viewport** — a real embedded RViz2 window (X11 window swallowing) for the full point-cloud/SLAM 3D view, with **Launch / Reload / Close** controls.
 
+![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](docs/images/slam_drone_icon_redesign.png)
+
 **Click-to-navigate**: clicking anywhere on the 2D map stages a goal pose and runs the obstacle-aware A* planner over the live grid, drawing the route with distance/ETA. Toolbar controls:
 - **EXECUTE PATH** — dispatches the drone through the computed waypoints in OFFBOARD mode, gated behind the slide-to-confirm bar (see [§5](#5-guided-confirm-the-safety-gate)).
 - **PAUSE / RESUME** — halts in place (`AUTO.LOITER`) or resumes the remaining route.
@@ -103,6 +105,8 @@ The primary situational-awareness view, with two switchable layers:
 A top-down Quad X frame diagram with each rotor drawn where it physically sits and tinted live by its commanded PWM, plus a per-motor PWM gauge bar (1000–2000 µs) and a heading arrow drawn inside the body hub (one heading indicator, not a separate floating chevron).
 
 The **bench motor-test panel** (`MAV_CMD_ACTUATOR_TEST`) is gated on: a live link, a disarmed and grounded vehicle, an expiring props-removed acknowledgement, and a throttle ceiling. Running a test reflects the *commanded* throttle on the bars and diagram immediately (rather than waiting for `SERVO_OUTPUT_RAW` telemetry, which a test-driven output may not reliably produce) — a real telemetry value simply overwrites this once it arrives. Every stop path (hold-release, STOP ALL, the 60s safety-ack expiry, sequence advance) resets all channels to idle.
+
+![Redesigned frame heading arrow, rendered offscreen inside the body hub](docs/images/motor_frame_heading_arrow.png)
 
 ### FPV Camera Tab
 Connects to the onboard MJPEG stream (`http://<radxa_ip>:8080/video`) and displays the live D435i color feed, auto-reconnecting every 2s on a dropped or never-opened stream. Also supports a USB webcam, a synthetic test pattern, or a custom RTSP/HTTP URL (with per-source URL memory and RTSP transport/timeout options).
@@ -122,6 +126,8 @@ A grid of telemetry tiles the operator chooses, orders, and sizes, drawn from a 
 *(Ctrl+9)* — a live PX4 parameter table: search box, sortable columns (Name / Value / Type / Index), populated via the standard MAVLink parameter protocol (`PARAM_REQUEST_LIST` / `PARAM_VALUE`). Values are decoded through the same IEEE-754 bit-cast logic used elsewhere in this project for reading typed PX4 parameters correctly (an int32 param read as a naive float produces nonsense like `1.4e-45`).
 
 **Read-only for now** — writing a parameter from this tab (with the same guarded-confirm treatment ARM/DISARM get, plus a mandatory readback) is a planned later phase, not yet built.
+
+![The Parameters tab, rendered offscreen with 30 synthetic parameters](docs/images/params_tab_phase1.png)
 
 ---
 
