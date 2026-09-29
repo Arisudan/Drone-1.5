@@ -576,7 +576,7 @@ Found while repositioning the guided-confirm slider to float above whichever but
 | **Also in this file** | Rotated the frame diagram's heading-direction arrow 180° and moved it from a floating marker above the frame into the body hub itself - one heading indicator instead of a separate arrow-plus-label reading as two different things. |
 | **Verification** | Unit-tested the optimistic-update/reset paths against `MotorTestPanel`'s real signals; confirmed offscreen the redrawn arrow renders inside the hub at every tested size/scale without overlapping the rotor discs. ⚠️ **Whether PX4 genuinely never reports `SERVO_OUTPUT_RAW` for an ACTUATOR_TEST-driven output was not confirmed on real hardware** - the fix removes the dependency on that answer either way. |
 
-![Redesigned SLAM/frame heading arrow, rendered offscreen inside the body hub](images/motor_frame_heading_arrow.png)
+![Redesigned SLAM/frame heading arrow, rendered offscreen inside the body hub](docs/images/motor_frame_heading_arrow.png)
 
 ### 32. GCS internal consistency audit: three numbers had quietly drifted apart across files
 Found auditing the SLAM tab's own code, not from a reported symptom.
@@ -614,9 +614,9 @@ Two smaller additions from the same session, neither a bug fix.
 | **Scope** | Read-only for now - writing a parameter (with the same guarded-confirm treatment ARM/DISARM get, plus a mandatory readback) is a deliberate later phase, not yet built. | Visual only - no behaviour change to how heading is computed. |
 | **Verification** | Exercised end-to-end with a synthetic 250-parameter burst standing in for a real vehicle's `PARAM_VALUE` stream. ⚠️ Not seen against a real MAVLink parameter stream. | Rendered offscreen at multiple headings/scales. ⚠️ Not seen against real VIO pose data. |
 
-![The new Parameters tab, rendered offscreen with 30 synthetic parameters](images/params_tab_phase1.png)
+![The new Parameters tab, rendered offscreen with 30 synthetic parameters](docs/images/params_tab_phase1.png)
 
-![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](images/slam_drone_icon_redesign.png)
+![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](docs/images/slam_drone_icon_redesign.png)
 
 ---
 
@@ -682,6 +682,11 @@ This package (`rtabmap_drone_pkg`) provides a high-definition visual-inertial SL
 ---
 
 ##### Quick Start Guide (For a Fresh Machine / PC)
+
+> This walkthrough intentionally repeats the install/build/launch commands already given
+> in [§3–5](#3-prerequisites--system-dependencies) above — it's kept here verbatim as part
+> of the original README snapshot for anyone reading this appendix on its own. The two
+> are not in conflict; §3–5 is the current canonical copy-paste reference.
 
 ###### Step 1: Install Dependencies & Prerequisites
 
@@ -824,6 +829,11 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py --sigterm-timeout=10 -
 A complete, step-by-step runbook for operating this project without any assistant —
 just you, a terminal, and these commands, in order.
 
+> Like the Quick Start Guide above, steps 1–7 here retrace the same ground as
+> [§5 Execution Runbook](#5-complete-execution-runbook-step-by-step-commands) — kept
+> verbatim as part of the original README snapshot. Steps 8–9 and the cheat-sheet below
+> add material not covered anywhere else in this document.
+
 ###### 1. Check the Pixhawk link is alive
 Before anything else, confirm the flight-controller connection is working:
 ```bash
@@ -897,12 +907,15 @@ attached, treat every one of these commands as if it will really fly, because it
 ###### 8. Useful diagnostic tools
 If tracking seems bad and you want to know why, in real time:
 ```bash
-python3 ~/Music/Netrein_sample/scripts/diagnostics/slam_health_monitor.py
+python3 ~/Flop/scripts/diagnostics/slam_health_monitor.py
 ```
 To check the flight controller's vision-fusion settings (read-only, safe anytime):
 ```bash
-python3 ~/Music/Netrein_sample/scripts/diagnostics/verify_ekf2_params.py --port tcp:127.0.0.1:5760
+python3 ~/Flop/scripts/diagnostics/verify_ekf2_params.py --port tcp:127.0.0.1:5760
 ```
+> Corrected from the original snapshot's `~/Music/Netrein_sample/...` path, an older
+> project directory name — see [dev log #1](#1-deployed-package-had-silently-diverged-from-the-working-source-tree).
+> The scripts themselves are unchanged; only the checkout location moved to `~/Flop`.
 
 ###### 9. Shutting down
 Go to the terminal running the launch and press **Ctrl+C once**, then wait a few
