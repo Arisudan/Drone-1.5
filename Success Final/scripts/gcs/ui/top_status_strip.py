@@ -212,6 +212,7 @@ class TopStatusStrip(QFrame):
 
         self.badge_arm = QLabel("DISARMED", self)
         self.badge_arm.setObjectName("badgeDisarmed")
+        self.badge_arm.setAlignment(Qt.AlignCenter)
         fit_min_width(self.badge_arm, ["ARMED", "DISARMED"], h_pad_px=28)
         mode_arm_box.addWidget(self.badge_arm)
 
@@ -219,6 +220,7 @@ class TopStatusStrip(QFrame):
         # font-size matches QLabel#badgeArmed/#badgeDisarmed in styles.py so the
         # pair reads as one control rather than two sizes of label.
         self.badge_mode.setStyleSheet("background-color: rgba(31, 111, 235, 0.13); color: #58a6ff; border: 1px solid #1f6feb; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px; letter-spacing: 1px;")
+        self.badge_mode.setAlignment(Qt.AlignCenter)
         # flight_mode is open-ended (any PX4 custom-mode string) - grown at
         # every setText() below rather than enumerated here.
         grow_min_width(self.badge_mode, h_pad_px=26)
@@ -250,7 +252,8 @@ class TopStatusStrip(QFrame):
 
         # D435i VIO Badge (LOCKED / LOST, matching the HUD's own wording)
         self.badge_vio = QLabel("VIO: LOST", self)
-        self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
+        self.badge_vio.setAlignment(Qt.AlignCenter)
         # These three badges' text is open-ended (age suffixes, RSSI values) -
         # floored here on the initial text, then grown further in
         # update_telemetry() as wider values are actually seen.
@@ -259,7 +262,8 @@ class TopStatusStrip(QFrame):
 
         # Vision Confidence / Fusion Badge (Replaces dead GPS badge on GPS-denied airframe)
         self.badge_vision_conf = QLabel("EKF2: NO VISION", self)
-        self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
+        self.badge_vision_conf.setAlignment(Qt.AlignCenter)
         fit_min_width(self.badge_vision_conf,
                       ["EKF2: DEGRADED (3.0s)", "EKF2: LOST (999s)"], h_pad_px=20)
         telemetry_strip.addWidget(self.badge_vision_conf)
@@ -271,7 +275,8 @@ class TopStatusStrip(QFrame):
         # best-effort number only when the receiver actually populates one
         # (this ELRS receiver reports rssi=255/"unknown" even on a healthy link).
         self.badge_rc = QLabel("RC: NO DATA", self)
-        self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-weight: bold; font-size: 11px;")
+        self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
+        self.badge_rc.setAlignment(Qt.AlignCenter)
         fit_min_width(self.badge_rc, ["RC: OK RSSI 254", "RC: NO DATA"], h_pad_px=20)
         telemetry_strip.addWidget(self.badge_rc)
 
@@ -536,7 +541,7 @@ class TopStatusStrip(QFrame):
         self.btn_mute.setStyleSheet(
             f"QPushButton {{ background-color: {bg}; color: {fg};"
             f" border: 1px solid {border}; border-radius: 4px;"
-            " padding: 4px 8px; font-weight: bold; font-size: 11px; }")
+            " padding: 3px 8px; font-weight: bold; font-size: 10px; }")
 
     def _on_mute_clicked(self) -> None:
         self.mute_toggled.emit(self.btn_mute.isChecked())
@@ -607,37 +612,37 @@ class TopStatusStrip(QFrame):
         # matching the HUD widget's own "D435i VIO: LOCKED / NO DATA" wording.
         if t.d435i_vio_health and t.d435i_vio_age <= 3.0:
             self.badge_vio.setText(f"VIO: LOCKED ({t.d435i_vio_age:.1f}s)")
-            self.badge_vio.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vio.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
         else:
             self.badge_vio.setText("VIO: LOST" if t.last_vision_time > 0 else "VIO: NO DATA")
-            self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vio.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
 
         # EKF2 Vision Confidence / Fusion Stat (GPS-denied indicator)
         if t.ekf2_vision_fused and t.d435i_vio_age < 1.0:
             self.badge_vision_conf.setText("EKF2: POS LOCK")
-            self.badge_vision_conf.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
         elif t.ekf2_vision_fused and t.d435i_vio_age <= 3.0:
             self.badge_vision_conf.setText(f"EKF2: DEGRADED ({t.d435i_vio_age:.1f}s)")
-            self.badge_vision_conf.setStyleSheet("background-color: rgba(158, 106, 3, 0.13); color: #d29922; border: 1px solid #d29922; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: rgba(158, 106, 3, 0.13); color: #d29922; border: 1px solid #d29922; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
         elif t.last_vision_time > 0:
             self.badge_vision_conf.setText(f"EKF2: LOST ({t.d435i_vio_age:.0f}s)")
-            self.badge_vision_conf.setStyleSheet("background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
         else:
             self.badge_vision_conf.setText("EKF2: NO VISION")
-            self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_vision_conf.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
 
         # RC Link (ExpressLRS receiver) - see badge_rc creation comment for why
         # rc_receiver_healthy (SYS_STATUS bit), not rssi, is the trusted signal.
         if not t.rc_receiver_present:
             self.badge_rc.setText("RC: NO DATA")
-            self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_rc.setStyleSheet("background-color: #161b22; color: #8b949e; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
         elif not t.rc_receiver_healthy:
             self.badge_rc.setText("RC: LOST")
-            self.badge_rc.setStyleSheet("background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_rc.setStyleSheet("background-color: rgba(218, 54, 51, 0.13); color: #f85149; border: 1px solid #da3633; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
         else:
             rssi_str = f" RSSI {t.rc_rssi}" if 0 <= t.rc_rssi < 255 else ""
             self.badge_rc.setText(f"RC: OK{rssi_str}")
-            self.badge_rc.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 4px 7px; font-weight: bold; font-size: 11px;")
+            self.badge_rc.setStyleSheet("background-color: rgba(35, 134, 54, 0.13); color: #3fb950; border: 1px solid #238636; border-radius: 4px; padding: 3px 8px; font-weight: bold; font-size: 10px;")
 
         # Mode
         self.badge_mode.setText(f"MODE: {t.flight_mode}")
