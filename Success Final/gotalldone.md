@@ -863,6 +863,115 @@ With a real battery connected and props confirmed off (bench-safe), a systematic
 - **Verified live**: ran it for real - full pipeline came up cleanly, and confirmed via `ps` that no `rviz2` process was ever spawned.
 - **Discussed but not yet built**: fully hands-off operation (drone powers on, pipeline is already running with zero manual steps) would need `camera.sh` wrapped in a systemd unit that auto-starts on boot, the same pattern `mavlink-router` already uses. Flagged as the natural next step, not yet implemented.
 
+### 28. COMMAND_ACK dedup (dev log #24) missed a case: IN_PROGRESS could silently swallow the real final ACK
+Found by auditing dev log #24's dedup mechanism against every `MAV_RESULT` code PX4 can send, not just the ACCEPTED/REJECTED path it was originally built and tested against.
+
+| Aspect | Details |
+|---|---|
+| **Problem** | The per-dispatch dedup key was `token` alone. If PX4 acks with `MAV_RESULT_IN_PROGRESS` (5) first, then follows up with the *real* final result (`ACCEPTED`/`FAILED`/...) for the **same** dispatch, that second ACK carries the same token as the first and was silently dropped as a "duplicate" - operator sees "still executing" and never learns the real outcome. |
+| **Also found** | Results `3 UNSUPPORTED`, `4 FAILED`, `5 IN_PROGRESS`, `6 CANCELLED` all fell through into one generic `[REJECTED] (Code N)` message + red colour. `IN_PROGRESS` isn't a rejection at all; `CANCELLED` means superseded by a newer command, not a failure of this one. |
+| **Fix** | Dedup key changed to `(token, result_code)`. A true wire-level retransmit (same token **and** same result) is still suppressed; a genuinely different ACK for the same dispatch now gets through. Added explicit message/colour branches for all 7 codes PX4 sends (0-6), and named codes 7/8 (`COMMAND_LONG_ONLY` / `COMMAND_INT_ONLY`) so either would show a real name instead of a raw `RES_7`/`RES_8`. |
+| **Verification** | ⚠️ **Not yet re-tested against a real ACK burst on hardware.** Unit-tested (`tests/test_command_ack.py`): synthetic IN_PROGRESS→ACCEPTED pair, both reported; a genuine same-token/same-result retransmit still suppressed. Whether PX4 on this airframe ever actually emits `IN_PROGRESS` is unobserved - dev log #24's original spam was ACCEPTED-only repeats. |
+
+```mermaid
+sequenceDiagram
+    participant GCS as Drone-GCS
+    participant PX4 as Pixhawk (PX4)
+    GCS->>PX4: COMMAND_LONG (token = 7)
+    PX4-->>GCS: COMMAND_ACK: IN_PROGRESS (token 7)
+    Note over GCS: reported - first ACK for token 7
+    PX4-->>GCS: COMMAND_ACK: ACCEPTED (token 7)
+    rect rgb(80, 20, 20)
+    Note over GCS: BEFORE THE FIX: dropped as a<br/>"duplicate" of token 7 - operator<br/>never learns the real outcome
+    end
+    rect rgb(20, 60, 30)
+    Note over GCS: AFTER THE FIX: (token, result_code)<br/>differs from what was already<br/>reported - this one gets through
+    end
+```
+
+### 29. ROS2 TCP Map Bridge disconnect was never announced, and every status line shared one flat colour
+Found auditing the console/log path for `ros2_map_listener.py`'s TCP fallback client, prompted by a direct question about whether "Connected"/"Disconnected" actually show correctly.
+
+| Aspect | Details |
+|---|---|
+| **Problem** | The retry loop (`_run_tcp_client`) wraps its connection attempt in `try/except Exception: time.sleep(3.0)` - the `except` block had no `status_updated.emit(...)` at all, so a dropped or never-started bridge produced total silence, forever, with nothing but the map going stale to tell the operator. |
+| **Also found** | The one message that did exist ("Connected...") plus every other ROS2 status line (JSON decode errors, invalid frame lengths, the rclpy-unavailable notice) all routed through `console.log_info()` - a real failure and a routine startup notice were visually identical (neutral grey). |
+| **Fix** | Added a `"Disconnected from TCP Map Bridge at {host}:{port}"` emission on every path that drops the connection, gated by a `_tcp_connected` flag so it fires exactly once per real transition, not once per 3-second retry. `_on_ros2_status_updated` now routes by content: Connected → green, Disconnected → red, invalid-length/decode-error (per-frame, recoverable) → amber, anything else containing "error" → red, everything else → neutral grey. |
+| **Verification** | Unit-tested the transition state machine directly (connect → 5× repeated disconnect-announce calls → exactly one message emitted; reconnect → disconnect again → a second message) and the colour-routing table against every message template this file emits. ⚠️ **Not verified against a real bridge drop on the Radxa** - proven correct in isolation only. |
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disconnected
+    Disconnected --> Connected: socket connects\n"Connected to TCP Map Bridge..." (green)
+    Connected --> Disconnected: EOF or socket exception\n"Disconnected from TCP Map Bridge..." (red)
+    Disconnected --> Disconnected: retry every 3s\n(no message - was previously silent here too)
+    note right of Disconnected
+      Before the fix: this state emitted
+      nothing at all, on the very first
+      failed attempt or a real mid-session drop.
+    end note
+```
+
+### 30. SLAM tab's ABORT PATH button bypassed the slide-to-confirm gate entirely
+Found while repositioning the guided-confirm slider to float above whichever button triggers it (QGroundControl-style) instead of a fixed spot in the command column.
+
+| Aspect | Details |
+|---|---|
+| **Problem** | `slam_map_widget.py`'s `abort_path_requested` signal was connected straight to `_on_abort_path_requested` (the real executor: stop, land, clear waypoints) - not to `_request_abort_path`, the method that shows the slide-to-confirm bar first. Every *other* guarded action in this app (arm, disarm, takeoff, kill, ...) goes through the confirm bar; this one button, alone, executed on a single click with zero confirmation. |
+| **Fix** | Reconnected the signal to `_request_abort_path`, which shows the same guided-confirm slider (now anchored directly above the ABORT button itself) and only calls the real executor once the operator actually drags it through. |
+| **Verification** | Exercised through the offscreen test suite (window construction, workspace switching, signal wiring, the confirm bar's own position-above-anchor logic). ⚠️ **Not flown** - aborting a path has no bench-safe way to verify short of an actual flight in progress. |
+
+### 31. Bench motor-test bars/diagram never reflected the commanded throttle
+
+| Aspect | Details |
+|---|---|
+| **Problem** | The Motors tab's PWM bars and frame diagram are updated by exactly one code path - `update_pwms()`, off real `SERVO_OUTPUT_RAW` telemetry. A bench actuator test (`MAV_CMD_ACTUATOR_TEST`) dispatches the command but never touches that path, so unless PX4 reports the resulting output back through `SERVO_OUTPUT_RAW` fast enough (unconfirmed either way), the bars sat at idle while a motor was, per the operator, audibly spinning. |
+| **Fix** | `MotorWidget` now also reflects the *commanded* throttle immediately on dispatch (test panel's 0-25% → an approximate 1000-1250µs PWM range) and resets every channel to idle on any stop path (hold-release, STOP ALL, the 60s safety-ack expiry, SEQ 1→4 advancing). A real value arriving later from telemetry simply overwrites this - the same way a car's dashboard shows the commanded gear before the transmission confirms it. |
+| **Also in this file** | Rotated the frame diagram's heading-direction arrow 180° and moved it from a floating marker above the frame into the body hub itself - one heading indicator instead of a separate arrow-plus-label reading as two different things. |
+| **Verification** | Unit-tested the optimistic-update/reset paths against `MotorTestPanel`'s real signals; confirmed offscreen the redrawn arrow renders inside the hub at every tested size/scale without overlapping the rotor discs. ⚠️ **Whether PX4 genuinely never reports `SERVO_OUTPUT_RAW` for an ACTUATOR_TEST-driven output was not confirmed on real hardware** - the fix removes the dependency on that answer either way. |
+
+![Redesigned SLAM/frame heading arrow, rendered offscreen inside the body hub](images/motor_frame_heading_arrow.png)
+
+### 32. GCS internal consistency audit: three numbers had quietly drifted apart across files
+Found auditing the SLAM tab's own code, not from a reported symptom.
+
+| Value | Found in | Before | After |
+|---|---|---|---|
+| Robot clearance radius | `drone_gcs.py` (real flight planner) | 0.25 m | 0.25 m *(unchanged - confirmed as the real one)* |
+| Robot clearance radius | `slam_map_widget.py` (standalone fallback planner, used whenever no PlannerWorker is attached) | 0.22 m | 0.25 m |
+| Drawn "safety corridor" width | `slam_map_widget.py` (visual only) | assumed 0.25 m *(disagreeing with its own planner's 0.22 m)* | derived from the same `robot_radius_m` the active planner actually used |
+| Tight-clearance warning distance | `slam_map_widget.py` | flat 20 cm, unrelated to either radius above | derived from the same `robot_radius_m` |
+| Occupancy-obstacle threshold | `path_planner.py` / `slam_map_widget.py` *(3 hardcoded copies)* | `grid >= 50` | `grid >= OCC_THRESH` (65) - the constant `docs/slam_evaluation.md` and `map_quality.py` already document as standard; 26-64 is meant to be "undecided," not folded into either class |
+| Sidebar footer arm/mode state | `sidebar_nav.py` (only updated by the 30Hz UI-tick timer) | could briefly disagree with the header badge (updated per telemetry packet) despite a comment claiming they "never disagree" | both now driven from the same telemetry-update event |
+
+| Aspect | Details |
+|---|---|
+| **Verification** | All four are logic/consistency fixes checked with the existing hermetic test suite (telemetry decode, planner tests) plus new assertions. The clearance-radius question was resolved by asking the operator directly for the real footprint value (0.25 m) rather than guessing between the two numbers already in the code. |
+
+### 33. Widespread text clipping and layout overflow at small window widths / high UI-scale, found by an offscreen rendering audit
+
+| Aspect | Details |
+|---|---|
+| **Problem** | Rendered the whole GCS offscreen (the same `QT_QPA_PLATFORM=offscreen` mechanism `tests/test_gui_layout.py` uses) at every window size × `GCS_UI_SCALE` combination this station claims to support, and compared every visible label/button's rendered width against what its own text needs. Found real clipping in the header (VIO/EKF2/RC/AUDIO badges, CONNECT button, network dropdown), the SLAM toolbar (EXECUTE/PAUSE/ABORT/Follow/Center/Measure), the Cockpit page's control column, and the Config tab's stream-URL field. |
+| **Root cause** | Several controls had no `setMinimumWidth()` floor at all, so Qt's layout engine compressed them below what their own text needed under real space pressure, clipping letters from both sides with no ellipsis - not a rendering bug, a missing floor. |
+| **Fix** | Added `ui/scaling.py` helpers (`fit_min_width`/`grow_min_width`) that measure a control's real font metrics - for every state its text can ever show, not just the current one - and floor its width there, replacing guessed fixed sizes. Applied across the header, SLAM toolbar, Cockpit page, and Config tab. |
+| **Second-order bug found mid-fix** | Giving the header's telemetry badges a correct width floor removed slack the badge-overlap and toast-notification-band logic had been quietly relying on - properly floored badges could then overlap *each other*, or the toast could render on top of the wrong control. Both fixed (`telemetry_strip` promoted from a bare layout to a real `QWidget`; the reserved notification-band spacer now shrinks before letting a badge overlap, never the reverse). |
+| **Verification** | `tests/test_gui_layout.py` extended with these exact checks built permanently into the suite, so a future regression fails CI automatically instead of needing another manual audit. ⚠️ **All checked offscreen only - no operator has looked at the real station on a real small screen since.** |
+
+### 34. New: read-only Parameters tab (Ctrl+9), and the drone icon redesign
+Two smaller additions from the same session, neither a bug fix.
+
+| Aspect | Parameters tab | SLAM drone icon |
+|---|---|---|
+| **What** | Live PX4 parameter table (search, sortable), populated from `PARAM_REQUEST_LIST`/`PARAM_VALUE` - standard MAVLink parameter protocol. | Replaced a plain circle + a separate floating chevron above the frame with one arrow-shaped fuselage that carries the heading itself. |
+| **Backed by** | `core/param_codec.py` - the same IEEE-754 bit-cast decode dev log #7/#25 already found and fixed, factored out of `apply_ekf2_params.py`/`verify_ekf2_params.py` into one shared implementation instead of a third copy. | `slam_map_widget.py`'s `_draw_drone` - the old design said "forward" twice, in two different visual languages, for no reason. |
+| **Scope** | Read-only for now - writing a parameter (with the same guarded-confirm treatment ARM/DISARM get, plus a mandatory readback) is a deliberate later phase, not yet built. | Visual only - no behaviour change to how heading is computed. |
+| **Verification** | Exercised end-to-end with a synthetic 250-parameter burst standing in for a real vehicle's `PARAM_VALUE` stream. ⚠️ Not seen against a real MAVLink parameter stream. | Rendered offscreen at multiple headings/scales. ⚠️ Not seen against real VIO pose data. |
+
+![The new Parameters tab, rendered offscreen with 30 synthetic parameters](images/params_tab_phase1.png)
+
+![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](images/slam_drone_icon_redesign.png)
+
 ### Known, unaddressed loose ends (for future reference)
 - `drone_rtabmap_all.launch.py` declares `min_obstacle_height` / `max_obstacle_height` /
   `cell_size` as launch arguments, but they are **not actually wired** to the
@@ -921,3 +1030,17 @@ With a real battery connected and props confirmed off (bench-safe), a systematic
   `camera.sh` still needs to be run manually over SSH after each Radxa boot. For a
   drone with no display/keyboard, wrapping it in a boot-time service (mirroring how
   `mavlink-router` already auto-starts) is the natural next step, not yet built.
+- Whether PX4 on this airframe ever actually emits `MAV_RESULT_IN_PROGRESS` in
+  practice is unconfirmed (dev log #28) - the dedup fix is correct either way, but
+  nobody has observed one live to see the new message/colour for real.
+- The ROS2 TCP Map Bridge disconnect announcement (dev log #29) hasn't been watched
+  happen on a real bridge drop - the state machine is unit-tested in isolation only.
+- Whether PX4 reports `SERVO_OUTPUT_RAW` at all for an `ACTUATOR_TEST`-driven output,
+  or just too slowly to notice, is still unconfirmed (dev log #31) - the bars no
+  longer depend on the answer, but the underlying firmware behaviour is unknown.
+- The Parameters tab (dev log #34) is read-only - no `PARAM_SET`, no write-then-
+  verify, no guided-confirm gate for a reboot-required parameter. All deliberate,
+  not yet built. It also hasn't been run against a real vehicle's full parameter
+  set (PX4's own can be 1000-1800+ entries) - only a synthetic 250-parameter burst
+  so far, so real-world population speed/UI responsiveness at full scale is
+  unconfirmed.
