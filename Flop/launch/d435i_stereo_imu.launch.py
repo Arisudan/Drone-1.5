@@ -26,13 +26,14 @@ def generate_launch_description():
                 'enable_sync': True,
                 'enable_infra1': True,
                 'enable_infra2': True,
-                'enable_color': False,
+                'enable_color': True,   # RGB FPV stream for Wi-Fi GCS video (depth stays OFF - not needed)
                 'enable_depth': False,
                 'enable_gyro': True,
                 'enable_accel': True,
                 'unite_imu_method': 2,  # 2 = linear_interpolation
                 'depth_module.emitter_enabled': 0,  # 0 = OFF (no dot projector)
                 'depth_module.infra_profile': '640x480x30',
+                'rgb_camera.color_profile': '640x480x30',
                 'gyro_fps': 200,
                 'accel_fps': 200,
                 'publish_tf': True,

@@ -1,4 +1,36 @@
 #!/usr/bin/env python3
+"""
+================================================================================
+MODULE: wall_boundary_node.py
+PURPOSE: Extracts Geometric Wall Contours & Inflated Flight Boundaries for RViz
+================================================================================
+
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer (Onboard System)
+  * Upstream:      RTAB-Map SLAM Node (/map)
+  * Downstream:    RViz2, MRS Lite Trajectory Planner (/wall_boundaries)
+
+DATA FLOW & INTERFACES:
+  * Subscribes To: /map [nav_msgs/OccupancyGrid] (Raw 2.5cm/5cm occupancy grid)
+  * Publishes To:  /wall_boundaries [visualization_msgs/MarkerArray]
+  * QoS Profile:   Transient Local, Reliable
+
+KEY ALGORITHMIC PIPELINE:
+  1. Thresholding: Extracts occupied obstacle cells (prob >= 65).
+  2. Obstacle Inflation: Dilates obstacles by inflation_radius_m (default 0.6m)
+     to establish a safe drone clearance buffer.
+  3. Contour Extraction: Runs OpenCV cv2.findContours on the dilated boundary.
+  4. Douglas-Peucker Polygon Approximation: Simplifies raw contours into vector
+     line strips using cv2.approxPolyDP with epsilon = 2.0 pixels.
+  5. 3D Line Strip Markers: Emits LINE_STRIP RViz markers showing physical walls
+     (Crimson Red) and clearance corridors (Cyan).
+
+RUN:
+  source /opt/ros/jazzy/setup.bash
+  python3 wall_boundary_node.py --ros-args -p inflation_radius_m:=0.6
+================================================================================
+"""
+import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
@@ -36,6 +68,12 @@ class WallBoundaryNode(Node):
         resolution = msg.info.resolution
         origin_x = msg.info.origin.position.x
         origin_y = msg.info.origin.position.y
+        
+        # Extract 2D yaw rotation from origin quaternion
+        o = msg.info.origin.orientation
+        yaw = math.atan2(2.0 * (o.w * o.z + o.x * o.y), 1.0 - 2.0 * (o.y * o.y + o.z * o.z))
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
         
         if width == 0 or height == 0 or resolution <= 0.0:
             return
@@ -100,8 +138,10 @@ class WallBoundaryNode(Node):
             for pt in smoothed_cnt:
                 col = pt[0][0]
                 row = pt[0][1]
-                map_x = origin_x + col * resolution
-                map_y = origin_y + row * resolution
+                dx = col * resolution
+                dy = row * resolution
+                map_x = origin_x + (dx * cos_yaw - dy * sin_yaw)
+                map_y = origin_y + (dx * sin_yaw + dy * cos_yaw)
 
                 p = Point()
                 p.x = float(map_x)
@@ -113,9 +153,11 @@ class WallBoundaryNode(Node):
             if len(smoothed_cnt) > 0:
                 first_col = smoothed_cnt[0][0][0]
                 first_row = smoothed_cnt[0][0][1]
+                dx0 = first_col * resolution
+                dy0 = first_row * resolution
                 p_first = Point()
-                p_first.x = float(origin_x + first_col * resolution)
-                p_first.y = float(origin_y + first_row * resolution)
+                p_first.x = float(origin_x + (dx0 * cos_yaw - dy0 * sin_yaw))
+                p_first.y = float(origin_y + (dx0 * sin_yaw + dy0 * cos_yaw))
                 p_first.z = 0.02
                 marker.points.append(p_first)
 

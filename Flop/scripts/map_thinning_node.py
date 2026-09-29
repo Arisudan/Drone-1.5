@@ -1,20 +1,51 @@
 #!/usr/bin/env python3
+"""
+================================================================================
+MODULE: map_thinning_node.py
+PURPOSE: Converts 2D SLAM Occupancy Grids into Single-Pixel Skeleton Wall Maps
+================================================================================
+
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer (Onboard System)
+  * Upstream:      RTAB-Map SLAM Node (/map)
+  * Downstream:    wall_boundary_node.py, tcp_map_streamer_node.py, GCS UI (/map_thin)
+
+DATA FLOW & INTERFACES:
+  * Subscribes To: /map [nav_msgs/OccupancyGrid] (Raw 2.5cm/5cm occupancy grid)
+  * Publishes To:  /map_thin [nav_msgs/OccupancyGrid] (1-pixel topological skeleton)
+  * QoS Profile:   Transient Local, Reliable (matches RTAB-Map latched topic)
+
+KEY ALGORITHMIC PIPELINE:
+  1. Thresholding: Binarizes /map (occupied cells >= 65 become binary 1).
+  2. Denoising: Filters out small isolated noise specks (< 20 connected pixels).
+  3. Morphological Thinning: Applies OpenCV Zhang-Suen / Guo-Hall thinning
+     (cv2.ximgproc.thinning) to reduce thick walls to exact 1-pixel centerlines.
+  4. Wall Locking Memory: Lacks historical walls across transient sensor occlusions
+     using an unlock_miss_count counter so walls don't flicker.
+
+RUN:
+  source /opt/ros/jazzy/setup.bash
+  python3 map_thinning_node.py
+================================================================================
+"""
+import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from nav_msgs.msg import OccupancyGrid
+from std_srvs.srv import Trigger
 import numpy as np
 import cv2
 
 class MapThinningNode(Node):
     def __init__(self):
         super().__init__('map_thinning_node')
-        
+
         self.declare_parameter('lock_threshold', 80)
         self.declare_parameter('occupancy_threshold', 65)
         self.declare_parameter('min_wall_area_pixels', 20)
         self.declare_parameter('unlock_miss_count', 15)
-        
+
         map_qos = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -31,13 +62,31 @@ class MapThinningNode(Node):
             '/map_thin',
             map_qos
         )
-        
+
         # Stateful Hysteresis Wall Lock Buffer
         self.locked_walls_mask = None
         self.miss_counters = None
         self.map_shape = None
+        self.map_origin = None
+
+        # Reset service: /rtabmap/reset wipes RTAB-Map's own database, but this node's
+        # wall-lock buffer lives independently in this process's memory - without a
+        # matching reset here, a GCS-triggered map reset would still show ghost walls
+        # (locked from the OLD map) on /map_thin until they naturally aged out after
+        # unlock_miss_count consecutive clear observations on the new, empty map.
+        self.reset_srv = self.create_service(Trigger, 'map_thinning_node/reset', self._on_reset)
 
         self.get_logger().info('Hysteresis Wall Lock & Phantom Noise Purger Node initialized.')
+
+    def _on_reset(self, request, response):
+        self.locked_walls_mask = None
+        self.miss_counters = None
+        self.map_shape = None
+        self.map_origin = None
+        self.get_logger().warn('Wall-lock state cleared via /map_thinning_node/reset')
+        response.success = True
+        response.message = 'Wall-lock state cleared'
+        return response
 
     def map_callback(self, msg: OccupancyGrid):
         width = msg.info.width
@@ -50,14 +99,27 @@ class MapThinningNode(Node):
         min_area = self.get_parameter('min_wall_area_pixels').value
         unlock_limit = self.get_parameter('unlock_miss_count').value
 
+        ox = msg.info.origin.position.x
+        oy = msg.info.origin.position.y
+
+        # Re-initialize state buffers if map shape or origin changes significantly (> 0.05m)
+        origin_shifted = False
+        if self.map_origin is not None:
+            d_origin = math.hypot(ox - self.map_origin[0], oy - self.map_origin[1])
+            if d_origin > 0.05:
+                origin_shifted = True
+
         # 1. Convert 1D msg data to 2D numpy array
         raw_data = np.array(msg.data, dtype=np.int8).reshape((height, width))
 
-        # Re-initialize state buffers if map shape changes
-        if self.map_shape != (height, width):
+        # Re-initialize state buffers if map shape or origin changes
+        if self.map_shape != (height, width) or origin_shifted:
             self.map_shape = (height, width)
+            self.map_origin = (ox, oy)
             self.locked_walls_mask = np.zeros((height, width), dtype=np.uint8)
             self.miss_counters = np.zeros((height, width), dtype=np.int32)
+        elif self.map_origin is None:
+            self.map_origin = (ox, oy)
 
         # 2. Stateful Hysteresis Wall Locking (P >= 80 -> Lock)
         high_confidence_hits = (raw_data >= lock_thresh)

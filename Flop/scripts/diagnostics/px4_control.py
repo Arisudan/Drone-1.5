@@ -1,16 +1,45 @@
 #!/usr/bin/env python3
-"""PX4 sibling of drone_control.py.
+"""
+================================================================================
+MODULE: px4_control.py
+PURPOSE: Interactive Flight REPL, Command Dispatcher, and Automated Trajectory Runner for PX4
+================================================================================
 
-Same REPL/Fleet feel, but PX4 semantics instead of ArduPilot:
-  * modes set via MAV_CMD_DO_SET_MODE with PX4 (main_mode, sub_mode) encoding
-    (PX4 has no GUIDED; there is OFFBOARD/POSCTL/ALTCTL/AUTO.* instead)
-  * position / velocity control runs through OFFBOARD mode, which requires a
-    CONTINUOUS >=2 Hz setpoint stream. A background thread streams the current
-    setpoint at 20 Hz; move/vel/goto/yaw just update it. OFFBOARD is only
-    entered AFTER the stream is already running (PX4 rejects it otherwise).
-  * indoor / GPS-denied: uses LOCAL_POSITION_NED (not global) as the frame.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer or Ground Station Laptop
+  * Communicates:  Pixhawk 6X Autopilot via mavlink-router (tcp:127.0.0.1:5760, UDP 14540/14550)
+  * Upstream:      Operator interactive shell / script commands & OBSTACLE_DISTANCE stream
+  * Downstream:    Pixhawk Flight Termination, Commander, and Position Controller
 
-Default link is PX4 SITL's offboard UDP port 14540 (same one MAVSDK uses).
+DATA FLOW & INTERFACES:
+  * MAVLink Out:   SET_POSITION_TARGET_LOCAL_NED (20 Hz setpoint stream in NED frame),
+                   MAV_CMD_DO_SET_MODE (OFFBOARD/POSCTL/MANUAL/LAND),
+                   MAV_CMD_COMPONENT_ARM_DISARM (normal & bench force-arm),
+                   MAV_CMD_NAV_TAKEOFF_LOCAL.
+  * MAVLink In:    HEARTBEAT (state/mode), LOCAL_POSITION_NED (live XYZ & velocities),
+                   ATTITUDE, OBSTACLE_DISTANCE (360-deg virtual lidar ring),
+                   COMMAND_ACK (action status confirmation).
+
+KEY LOGIC & FAILSAFES:
+  * 20 Hz Setpoint Pre-Streaming: PX4 strictly rejects switching to OFFBOARD mode
+    unless a valid setpoint stream is already flowing at >=2 Hz. This runner runs
+    a dedicated background daemon thread streaming setpoints BEFORE requesting OFFBOARD.
+  * Closed-Loop Execution Verification: Watches local coordinate delta (dx, dy, dz)
+    and velocity feedback to confirm physical drone movement after commands.
+  * Reactive Obstacle Braking: Ingests OBSTACLE_DISTANCE (msg ID 330) and halts
+    trajectory execution if obstacles breach minimum safety clearance.
+  * Coordinate Frame: Local NED (North-East-Down) aligned with visual odometry.
+
+RUN:
+  # Interactive Flight REPL over mavlink-router:
+  python3 px4_control.py --port tcp:127.0.0.1:5760
+
+  # Automated 1.0m indoor hover test:
+  python3 px4_control.py --port tcp:127.0.0.1:5760 --takeoff-alt 1.0
+
+  # Connect to SITL offboard stream:
+  python3 px4_control.py --port udpin:0.0.0.0:14540
+================================================================================
 """
 
 import argparse

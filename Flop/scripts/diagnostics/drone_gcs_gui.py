@@ -1,24 +1,40 @@
 #!/usr/bin/env python3
-"""Drone-1.5 Python Ground Control Station (GCS) GUI.
+"""
+================================================================================
+MODULE: drone_gcs_gui.py
+PURPOSE: Standalone Tkinter Ground Control Station with Dual Send/Receive Modes & CLI
+================================================================================
 
-A standalone, modern, dark-themed Python GUI for monitoring and commanding a
-PX4-powered drone over Wi-Fi / Ethernet via MAVLink.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Laptop Ground Station or Radxa SBC with X11 / Wayland display
+  * Communicates:  Pixhawk 6X Autopilot via mavlink-router (tcp:172.16.101.84:5760 or UDP)
+  * Upstream:      Operator GUI button clicks / CLI keyboard inputs & MAVLink telemetry
+  * Downstream:    Pixhawk Autopilot Command Receiver & Actuator Controllers
 
-Key Features:
-  * Dynamic IP & Port entry for easy network reconfiguration (hostname -I support).
+DATA FLOW & INTERFACES:
+  * MAVLink Out:   MAV_CMD_DO_SET_MODE, MAV_CMD_COMPONENT_ARM_DISARM,
+                   SET_POSITION_TARGET_LOCAL_NED (20 Hz in SEND mode), MAV_CMD_NAV_TAKEOFF.
+  * MAVLink In:    HEARTBEAT (modes/arming), SYS_STATUS (battery/errors),
+                   ATTITUDE (pitch/roll/yaw), LOCAL_POSITION_NED (xyz position & velocity),
+                   SERVO_OUTPUT_RAW (motor PWMs), COMMAND_ACK (diagnostic feedback).
+  * UI Engine:     Python Tkinter / ttk with dark tactical theme.
+
+KEY LOGIC & FAILSAFES:
   * Mutually Exclusive Modes:
-      - RECEIVE MODE: Passive read-only telemetry dashboard (live_status.py style).
-      - SEND MODE: Active command dispatcher (px4_control.py style) with setpoint streaming.
-  * Direct CLI Command Input in Sender Mode:
-      - Enter commands directly: 'move 1 0 0', 'takeoff 1.5', 'arm force', 'yaw 90', etc.
-      - Full command history with Up / Down arrow keys.
-      - Retains all flight action buttons for one-click operations.
-  * Closed-Loop Execution Verification in Receiver Mode:
-      - Verifies that the vehicle ACTUALLY moved in physical space (via live LOCAL_POSITION_NED).
-      - Displays real-time displacement (dx, dy, dz), progress %, and confirms execution (✔ EXECUTED vs ✖ STALLED).
-  * Live Telemetry: Position (NED), Velocities, Attitude/Yaw, Battery, Altitude, Flight Mode.
-  * Flight Commands: Arm/Disarm (with Bench Force Override), Takeoff, Land, Hold, Offboard, Move, Yaw.
-  * Command Acknowledgment Inspector: Real-time MAVLink ACK feedback with plain-English diagnostics.
+      - RECEIVE MODE: 100% passive telemetry watcher (zero outbound commands).
+      - SEND MODE: Active command dispatcher with 20 Hz background setpoint stream.
+  * Closed-Loop Execution Verification: Calculates real-time 3D coordinate delta
+    (dx, dy, dz) and speed to display confirmed physical execution vs stalled state.
+  * Command History & Interactive CLI: Embedded terminal console with history buffer.
+  * Force Arm Safety Guard: Bench-force arm override strictly labeled and gated.
+
+RUN:
+  # Launch Standalone GCS GUI:
+  python3 drone_gcs_gui.py
+
+  # With pre-configured network target:
+  python3 drone_gcs_gui.py --host 172.16.101.84 --port 5760
+================================================================================
 """
 
 import os
@@ -137,11 +153,22 @@ class PX4Backend:
             self.passive_base_z = self.telemetry["z"]
             self.passive_moving = False
 
-    def connect(self, ip, port):
+    def connect(self, ip, port, protocol="udp"):
         if self.connected:
             self.disconnect()
 
-        endpoint = f"tcp:{ip}:{port}"
+        str_ip = str(ip).strip()
+        str_port = str(port).strip()
+        str_proto = str(protocol).lower().strip()
+
+        if str_ip.startswith(("tcp:", "udp:", "udpout:", "udpin:")):
+            endpoint = str_ip
+        elif str_proto in ("udp", "udpout") or str_port in ("14550", "14555", "14556"):
+            clean_port = str_port.replace("udp", "").strip(":")
+            endpoint = f"udpout:{str_ip}:{clean_port}"
+        else:
+            endpoint = f"tcp:{str_ip}:{str_port}"
+
         # Distinct MAVLink system ID: 255 for Sender (active GCS), 254 for Receiver (passive monitor)
         src_sys = 255 if self.mode == "SEND" else 254
         self.on_log(f"Connecting to MAVLink endpoint: {endpoint} (System ID {src_sys}) ...", "info")
@@ -721,13 +748,20 @@ class DroneGCSApp:
         top_bar.pack(fill="x", side="top", padx=12, pady=(10, 6))
 
         tk.Label(top_bar, text="Target SBC IP:", bg=self.BG_CARD, fg=self.TEXT_MUTED, font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 6))
-        self.ip_entry = tk.Entry(top_bar, bg=self.BG_CARD_LIGHT, fg=self.TEXT_MAIN, insertbackground=self.TEXT_MAIN, font=("Monospace", 10, "bold"), width=16, relief="flat")
+        self.ip_entry = tk.Entry(top_bar, bg=self.BG_CARD_LIGHT, fg=self.TEXT_MAIN, insertbackground=self.TEXT_MAIN, font=("Monospace", 10, "bold"), width=15, relief="flat")
         self.ip_entry.insert(0, "172.16.101.84")
-        self.ip_entry.pack(side="left", padx=(0, 14))
+        self.ip_entry.pack(side="left", padx=(0, 10))
+
+        tk.Label(top_bar, text="Proto:", bg=self.BG_CARD, fg=self.TEXT_MUTED, font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 6))
+        self.proto_var = tk.StringVar(value="UDP")
+        self.proto_menu = tk.OptionMenu(top_bar, self.proto_var, "UDP", "TCP", command=self._on_proto_change)
+        self.proto_menu.config(bg=self.BG_CARD_LIGHT, fg=self.TEXT_MAIN, activebackground=self.BG_CARD, activeforeground=self.TEXT_MAIN, relief="flat", highlightthickness=0, font=("Helvetica", 9, "bold"))
+        self.proto_menu["menu"].config(bg=self.BG_CARD, fg=self.TEXT_MAIN)
+        self.proto_menu.pack(side="left", padx=(0, 10))
 
         tk.Label(top_bar, text="Port:", bg=self.BG_CARD, fg=self.TEXT_MUTED, font=("Helvetica", 10, "bold")).pack(side="left", padx=(0, 6))
         self.port_entry = tk.Entry(top_bar, bg=self.BG_CARD_LIGHT, fg=self.TEXT_MAIN, insertbackground=self.TEXT_MAIN, font=("Monospace", 10, "bold"), width=6, relief="flat")
-        self.port_entry.insert(0, "5760")
+        self.port_entry.insert(0, "14550")
         self.port_entry.pack(side="left", padx=(0, 16))
 
         self.btn_connect = tk.Button(
@@ -971,16 +1005,26 @@ class DroneGCSApp:
             except Exception:
                 pass
 
+    def _on_proto_change(self, val):
+        current_port = self.port_entry.get().strip()
+        if val == "UDP" and current_port in ("5760", ""):
+            self.port_entry.delete(0, tk.END)
+            self.port_entry.insert(0, "14550")
+        elif val == "TCP" and current_port in ("14550", ""):
+            self.port_entry.delete(0, tk.END)
+            self.port_entry.insert(0, "5760")
+
     # ---- Connection Handler ----
     def _toggle_connection(self):
         if not self.backend.connected:
             ip = self.ip_entry.get().strip()
             port = self.port_entry.get().strip()
+            proto = self.proto_var.get().lower().strip() if hasattr(self, 'proto_var') else "udp"
             if not ip or not port:
                 messagebox.showerror("Invalid Input", "Please enter a valid IP and Port.")
                 return
             self.btn_connect.config(text="DISCONNECT", bg=self.ACCENT_RED)
-            self.backend.connect(ip, port)
+            self.backend.connect(ip, port, protocol=proto)
         else:
             self.btn_connect.config(text="CONNECT", bg=self.ACCENT_BLUE)
             self.backend.disconnect()

@@ -1,44 +1,44 @@
 #!/usr/bin/env python3
-"""Verify the GCS <-> FC MAVLink path in BOTH directions, separately.
+"""
+================================================================================
+MODULE: duplex_check.py
+PURPOSE: Verifies Bidirectional (Uplink & Downlink) MAVLink Telemetry and Command Paths
+================================================================================
 
-Downlink and uplink are proven by different evidence, so they get separate
-verdicts. Nothing here commands the vehicle -- the uplink probe only asks
-the FC to identify itself.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Laptop Ground Station or Radxa Companion Computer
+  * Communicates:  Pixhawk 6X / ArduPilot / ELRS TX Backpack / mavlink-router
+  * Upstream:      Flight controller serial, UDP socket, or ExpressLRS backpack
+  * Downstream:    Operator terminal output (PASS/FAIL bidirectional verdict)
 
-RadioMaster Nomad / ExpressLRS TX Backpack
-------------------------------------------
-The backpack relays MAVLink over WiFi on ASYMMETRIC UDP ports:
+DATA FLOW & INTERFACES:
+  * Downlink Rx:   Listens for HEARTBEAT, LOCAL_POSITION_NED, ATTITUDE,
+                   EKF_STATUS_REPORT, SYS_STATUS, and VFR_HUD.
+  * Uplink Tx:     Broadcasts GCS HEARTBEAT (SysID 255) to awaken Wi-Fi bridges;
+                   dispatches non-invasive MAV_CMD_REQUEST_MESSAGE for
+                   AUTOPILOT_VERSION (Msg ID 148).
+  * Verdicts:      Separate DOWNLINK PROVEN and UPLINK PROVEN verification.
 
-    GCS sends    -> 10.0.0.1:14555   (backpack "listen")
-    GCS receives <- 0.0.0.0:14550    (backpack "send")
+KEY LOGIC & FAILSAFES:
+  * Zero Control Hazard: Does NOT arm, move, or modify flight parameters. Uplink
+    probe is strictly an informational query (AUTOPILOT_VERSION).
+  * Asymmetric UDP Handling: Supports RadioMaster Nomad / ExpressLRS TX Backpack
+    routing where GCS receives on 0.0.0.0:14550 and transmits to 10.0.0.1:14555.
+  * Autopilot Disambiguation:
+      - ArduPilot: Returns COMMAND_ACK (proves uplink and downlink).
+      - PX4: Returns COMMAND_ACK or AUTOPILOT_VERSION message.
+      - INAV: Downlink only (telemetry-only, does not answer uplink queries).
 
-Sending to 14550 silently goes nowhere. Query the live config with:
+RUN:
+  # 1. Direct connection via Radxa mavlink-router TCP endpoint:
+  python3 duplex_check.py --port tcp:172.16.101.84:5760
 
-    curl -s --compressed http://10.0.0.1/mavlink
+  # 2. Nomad / ExpressLRS TX Backpack over Wi-Fi (Asymmetric UDP):
+  python3 duplex_check.py --port 'udpin:0.0.0.0:14550' --send 10.0.0.1:14555
 
-which also exposes packets_down / packets_up counters -- useful to prove
-the uplink relay even when the FC itself will not answer.
-
-The backpack will not stream until the GCS announces itself, so the
-heartbeats this tool sends are what start telemetry flowing.
-
-Usage
------
-    # Nomad backpack over WiFi (asymmetric ports)
-    python3 duplex_check.py --port 'udpin:0.0.0.0:14550' --send 10.0.0.1:14555
-
-    # companion SBC / SITL pushing to us (symmetric)
-    python3 duplex_check.py --port 'udpin:0.0.0.0:14550' --announce 10.0.0.1
-
-    # wired handset USB-VCP (needs EdgeTX 2.10+ with a MAVLink VCP option)
-    python3 duplex_check.py --port /dev/ttyACM0 --baud 460800
-
-Expected verdicts
------------------
-    INAV       DOWNLINK PROVEN / UPLINK UNPROVEN
-               (INAV's MAVLink is telemetry-only and never replies)
-    ArduPilot  DOWNLINK PROVEN / UPLINK PROVEN
-               (a COMMAND_ACK comes back -- this is the acceptance test)
+  # 3. Direct Flight Controller USB-UART / VCP:
+  python3 duplex_check.py --port /dev/ttyACM0 --baud 921600
+================================================================================
 """
 from __future__ import annotations
 

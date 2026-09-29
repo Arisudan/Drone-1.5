@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
-"""Push specific PX4 parameters over MAVLink, then read them back to verify the
-change actually took effect - the SET acknowledgment alone is not proof, only a
-re-read is. This is the counterpart to verify_ekf2_params.py, which is read-only;
-this script is the explicit, opt-in "apply" half, gated on a confirmed mismatch.
+"""
+================================================================================
+MODULE: apply_ekf2_params.py
+PURPOSE: Safely Sets and Verifies Pixhawk Autopilot Parameters via MAVLink
+================================================================================
 
-Only ever touches the exact NAME=VALUE pairs given on the command line - no
-defaults, no "set everything" mode, so a mistyped invocation can't silently
-change something unintended. Integer-only (PX4's EKF2/UAVCAN config params here
-are all INT32).
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer or Ground Station Laptop
+  * Communicates:  Pixhawk 6X Autopilot via mavlink-router (tcp:127.0.0.1:5760 or /dev/pixhawk)
+  * Upstream:      Operator CLI arguments (NAME=VALUE key-value pairs)
+  * Downstream:    Pixhawk Parameter Storage & Non-Volatile Flash (FRAM)
 
-Run (through mavlink-router, not the raw serial device - it's already in use):
-    python3 apply_ekf2_params.py UAVCAN_SUB_FLOW=1 UAVCAN_SUB_RNG=1
-    python3 apply_ekf2_params.py --port tcp:127.0.0.1:5760 UAVCAN_SUB_FLOW=1
+DATA FLOW & INTERFACES:
+  * MAVLink Out:   PARAM_SET (msg ID 23) with IEEE-754 bitcast encoded value
+  * MAVLink In:    PARAM_VALUE (msg ID 22) confirmation & verification readback
+  * Target:        Autopilot SysID 1, Component ID 1
 
-Cross-check the result in QGroundControl's own parameter viewer too before
-trusting it for flight.
+KEY LOGIC & FAILSAFES:
+  * Mandatory Readback Verification: Does not assume PARAM_SET ACK equals success;
+    actively dispatches PARAM_REQUEST_READ to confirm parameter is committed to memory.
+  * IEEE-754 Bitcast Encoding: Re-encodes integer bit patterns into 32-bit floats
+    (e.g., int32 1 encoded as raw float32 bits, NOT float(1.0) which produces 1065353216).
+  * Strict Isolation: Only updates parameters explicitly provided on the command line;
+    no wildcard bulk-updating to eliminate accidental configuration corruption.
+
+RUN:
+  # Enable UAVCAN optical flow and rangefinder:
+  python3 apply_ekf2_params.py --port tcp:127.0.0.1:5760 UAVCAN_SUB_FLOW=1 UAVCAN_SUB_RNG=1
+
+  # Bypass bench power checks on test stand:
+  python3 apply_ekf2_params.py --port tcp:127.0.0.1:5760 CBRK_SUPPLY_CHK=894281
+================================================================================
 """
 import argparse
 import struct
@@ -107,11 +123,29 @@ def main():
     kwargs = {'baud': args.baud} if is_serial else {}
     print(f"connecting to {args.port} ...")
     m = mavutil.mavlink_connection(args.port, **kwargs)
-    hb = m.wait_heartbeat(timeout=10)
+
+    # Plain wait_heartbeat() + m.target_system races against every OTHER system
+    # mirrored onto this link by mavlink-router (e.g. sysid=0/uninitialized, or a GCS's
+    # own mirrored heartbeat) and can silently latch onto the wrong one instead of the
+    # real FMU (sysid=1). Same bug already found and fixed in px4_control.py and
+    # verify_ekf2_params.py - filter for an actual autopilot heartbeat and read
+    # sysid/compid off the message itself.
+    deadline = time.time() + 10.0
+    hb = None
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        msg = m.recv_match(type="HEARTBEAT", blocking=True, timeout=max(0.0, remaining))
+        if msg is None:
+            break
+        if msg.autopilot == mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+            continue  # a GCS (or other non-vehicle) heartbeat mirrored onto the link
+        hb = msg
+        break
     if hb is None:
-        print("NO HEARTBEAT")
+        print("NO HEARTBEAT FROM AN AUTOPILOT. Check the cable/port, and that no other "
+              "app (QGroundControl, px4_vision_bridge.py) holds this port exclusively.")
         return 1
-    tsys, tcomp = m.target_system, (m.target_component or 1)
+    tsys, tcomp = hb.get_srcSystem(), hb.get_srcComponent()
     print(f"heartbeat OK: sys={tsys} comp={tcomp}\n")
 
     ok = True

@@ -10,6 +10,8 @@ find_package(ament_cmake REQUIRED)
 install(PROGRAMS
   scripts/map_thinning_node.py
   scripts/wall_boundary_node.py
+  scripts/tcp_map_streamer_node.py
+  scripts/d435i_video_streamer.py
   scripts/px4_vision_bridge.py
   scripts/obstacle_distance_bridge.py
   scripts/diagnostics/duplex_check.py
@@ -21,6 +23,9 @@ install(PROGRAMS
   scripts/diagnostics/apply_ekf2_params.py
   scripts/diagnostics/px4_control.py
   scripts/diagnostics/drone_gcs_gui.py
+  scripts/diagnostics/map_recorder.py
+  scripts/diagnostics/map_eval.py
+  scripts/diagnostics/fix_accel2_bias.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

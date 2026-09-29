@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
-"""Live, read-only FC status watcher with Closed-Loop Execution Verification.
+"""
+================================================================================
+MODULE: live_status.py
+PURPOSE: Real-Time Console Telemetry Watcher & Closed-Loop Physical Execution Tracker
+================================================================================
 
-Run this in a terminal on the Radxa SBC or the GCS Laptop to monitor vehicle
-status, telemetry, commanded flight modes, and verify physical execution of
-commands in real time.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer or Ground Station Laptop
+  * Communicates:  Pixhawk 6X Autopilot via mavlink-router (tcp:127.0.0.1:5760 or Wi-Fi)
+  * Upstream:      Pixhawk telemetry stream (SysID 1, CompID 1)
+  * Downstream:    Operator terminal output (live dynamic dashboard)
 
-Never sends an arm, disarm, mode-change, or flight command of any kind.
-The only messages it transmits are read-only MAV_CMD_SET_MESSAGE_INTERVAL requests
-at startup asking PX4 to stream:
-  1. SERVO_OUTPUT_RAW (commanded actuator PWM per channel)
-  2. LOCAL_POSITION_NED (live position and velocity estimates)
+DATA FLOW & INTERFACES:
+  * MAVLink Out:   MAV_CMD_SET_MESSAGE_INTERVAL for SERVO_OUTPUT_RAW (10 Hz) and
+                   LOCAL_POSITION_NED (10 Hz) requests on link connect.
+  * MAVLink In:    HEARTBEAT (modes/arming), SYS_STATUS (battery/errors),
+                   ATTITUDE (Euler angles), LOCAL_POSITION_NED (xyz position & velocity),
+                   SERVO_OUTPUT_RAW (individual actuator PWMs).
+  * Rate:          Configurable display refresh (default 1.0 Hz).
 
-Closed-Loop Execution Verification:
-  Unlike raw MAVLink ACKs (which only confirm that the autopilot received a packet),
-  this watcher tracks live Local NED displacement (dx, dy, dz) and speed to confirm
-  whether the drone ACTUALLY moved in physical space as commanded.
+KEY LOGIC & FAILSAFES:
+  * Zero Flight Control Hazard: Strictly passive listener; never arms or commands.
+  * Closed-Loop Execution Verification: Compares commanded states against actual
+    physical coordinate displacement (dx, dy, dz) and speed to confirm execution.
+  * PX4 Custom Mode Bitfield Decoding: Deconstructs 32-bit custom_mode into main_mode
+    and sub_mode to identify OFFBOARD, POSCTL, ALTCTL, MANUAL, and AUTO sub-modes.
+  * Multi-Motor Actuator Monitoring: Displays real-time individual PWM microsecond
+    levels (1000-2000 us) across all ESC channels to diagnose motor desync or stalls.
 
-Usage:
-    python3 live_status.py                           # Radxa local (tcp:127.0.0.1:5760)
-    python3 live_status.py --port tcp:172.16.101.84:5760  # Remote Laptop over Wi-Fi
-    python3 live_status.py --period 1.0              # 1 Hz print interval
+RUN:
+  # Local monitoring on Radxa SBC:
+  python3 live_status.py
 
-Ctrl+C to stop.
+  # Remote monitoring over Wi-Fi from Laptop GCS:
+  python3 live_status.py --port tcp:172.16.101.84:5760 --period 0.5
+================================================================================
 """
 import argparse
 import math

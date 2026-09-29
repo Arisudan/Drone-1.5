@@ -1,42 +1,39 @@
 #!/usr/bin/env python3
-"""Live SLAM-health monitor for real hardware - tells you WHY /odom is bad, in real time.
+"""
+================================================================================
+MODULE: slam_health_monitor.py
+PURPOSE: Live SLAM & VIO Health Diagnostics (Inliers, Match Ratio, IMU Jitter)
+================================================================================
 
-Adapted from a reference implementation built for a lidar+Gazebo stack. That version
-leaned on two things this rig doesn't have: a 360-degree lidar (/scan_360) and a
-simulator ground-truth topic (/gz_ground_truth) to compute a DRIFT% column and an
-automatic ICP-FAILURE/CONTENTION verdict. Neither exists here, so both are removed
-rather than left in as dead weight:
-  - No lidar -> no /scan_360 subscription. Leaving it in place would read 0 Hz forever,
-    which the original code treats as "sensor jitter" (scan_bad=True) permanently -
-    that's not a diagnosis, it's a false alarm baked into every single line.
-  - No ground truth -> no DRIFT%/GT_ext, and no gt_moving gate on the verdict. On the
-    reference stack, the verdict silently never fires without a live truth publisher
-    (gt_moving is always False), even though the underlying ICP/IMU checks are computed
-    correctly from real data. Here the verdict falls back to those checks directly.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer or Laptop ROS 2 Workspace
+  * Communicates:  RealSense D435i ROS 2 Driver & RTAB-Map Visual Odometry Node
+  * Upstream:      /camera/imu (D435i IMU), /odom (VIO pose), /odom_info (RTAB-Map)
+  * Downstream:    Operator console stdout (real-time tabular health metrics)
 
-What's left is exactly what matters for the "Not enough inliers 0/10" / quality=0
-bench failure: RTAB-Map's own /odom_info and IMU timing jitter on the D435i's real
-IMU stream.
+DATA FLOW & INTERFACES:
+  * Subscribes To:
+      - /odom [nav_msgs/Odometry]: Odometry position, linear/angular speed, covariance.
+      - /odom_info [rtabmap_msgs/OdomInfo]: Visual feature matches, inliers, keypoints.
+      - /camera/imu [sensor_msgs/Imu]: Raw inertial sample stream for rate & jitter.
+  * Outputs:       Live 1 Hz diagnostic table with real-time health verdict.
 
-CORRECTED 2026-09-05 after a real bench run: this originally read OdomInfo's
-icp_inliers_ratio/icp_correspondences fields, copied from the reference's ICP
-(lidar) pipeline. Checked `ros2 interface show rtabmap_msgs/msg/OdomInfo` directly:
-those two fields are ICP-specific and are always 0 for our stereo_odometry, which
-is VISUAL (feature-based), not ICP - they were never going to show anything.
-The fields that actually matter here are `inliers` and `matches` (the exact
-numbers from "Not enough inliers 0/10 (matches=0)"), which the OdomInfo message
-already carries but this script was discarding. Also fixed: the verdict logic
-let "IMU TIMING DEGRADED" permanently mask a real tracking failure whenever both
-were true at once - on a real run, EVERY row was IMU-flagged (a 15ms jitter
-threshold turned out to be too strict for normal USB scheduling bursts at a
-rock-solid ~200Hz average), which hid the tracking column completely. Both
-conditions are now reported together instead of one hiding the other.
+KEY LOGIC & FAILSAFES:
+  * Inlier Collapse Detection: Directly reads `inliers` and `matches` from OdomInfo
+    to identify the exact cause of "Not enough inliers 0/10" tracking failures.
+  * Covariance Tracking: Detects loss of visual lock when cov[0] >= 9999.0 or 100.0.
+  * Hardware IMU Jitter Profiling: Computes standard deviation of message arrival
+    intervals over rolling windows to catch USB bandwidth starvation or thread stalls.
+  * Dual-Verdict Synthesis: Separately reports tracking loss and IMU degradation so
+    USB scheduling bursts never mask an underlying feature tracking failure.
 
-RUN (after the SLAM pipeline is up):
+RUN:
   source /opt/ros/jazzy/setup.bash
   python3 slam_health_monitor.py
-  # then reproduce the bad scenario. Watch `inliers` collapse and 'lost' flip.
-Options:  -p period_s:=1.0   -p odom_topic:=/odom   -p imu_topic:=/camera/imu
+
+  # Custom topics or inspection interval:
+  python3 slam_health_monitor.py --ros-args -p period_s:=1.0 -p odom_topic:=/odom -p imu_topic:=/camera/imu
+================================================================================
 """
 import sys
 import time

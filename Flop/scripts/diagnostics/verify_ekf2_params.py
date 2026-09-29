@@ -1,23 +1,38 @@
 #!/usr/bin/env python3
-"""Read-only pre-flight check: what does PX4's EKF2 actually think its position/height
-source is, right now, on the real Pixhawk 6X?
+"""
+================================================================================
+MODULE: verify_ekf2_params.py
+PURPOSE: Read-Only Audit of Pixhawk EKF2 Sensor Fusion and Height Reference Parameters
+================================================================================
 
-This is deliberately READ-ONLY - it never calls param_set_send. Adapted from the
-push-only pattern in a reference implementation's fc_inject.py (--set-params), which
-pushes EKF2_EV_CTRL/EKF2_GPS_CTRL/EKF2_HGT_REF blind. Pushing the wrong value on real
-flight hardware is a real safety issue, so that half is a separate, explicitly-gated
-script (apply_ekf2_params.py) - this one only reads and reports.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer or Ground Station Laptop
+  * Communicates:  Pixhawk 6X Autopilot via mavlink-router (tcp:127.0.0.1:5760 or /dev/pixhawk)
+  * Upstream:      Pixhawk Parameter Table in non-volatile flash (FRAM)
+  * Downstream:    Operator console stdout (decoded parameter states and fusion verdicts)
 
-Why this matters for THIS airframe specifically: a PX4Flow module (optical flow +
-integrated sonar) is connected, so PX4 most likely already has a non-vision height
-reference (baro or the PX4Flow sonar), not vision. That's the opposite of a camera-only
-airframe with no rangefinder, where EV would be expected to own height. This script
-prints the raw values and a plain-English read of what they imply so that assumption
-gets checked against the real FC instead of assumed.
+DATA FLOW & INTERFACES:
+  * MAVLink Out:   PARAM_REQUEST_READ (queries specific EKF2/UAVCAN/SYS params)
+  * MAVLink In:    PARAM_VALUE (msg ID 22) from Pixhawk Autopilot (SysID 1, CompID 1)
+  * Inspected:     EKF2_EV_CTRL (Vision Fusion Mask), EKF2_HGT_REF (Primary Alt Source),
+                   EKF2_GPS_CTRL (GPS Fusion Mask), EKF2_OF_CTRL (Optical Flow),
+                   UAVCAN_SUB_FLOW, UAVCAN_SUB_RNG, CBRK_SUPPLY_CHK.
 
-Run (bench only, no props needed):
-    python3 verify_ekf2_params.py
-    python3 verify_ekf2_params.py --port /dev/pixhawk --baud 921600   # defaults shown
+KEY LOGIC & FAILSAFES:
+  * Strictly Read-Only: Never invokes PARAM_SET; completely safe for pre-flight checks.
+  * IEEE-754 Bitcast Decoding: Reinterprets raw 32-bit floats as signed/unsigned
+    integers according to param_type (avoids PX4 float32 bit-aliasing bugs where
+    integer 15 was read as 2.10195e-44).
+  * Height Source Disambiguation: Detects whether EKF2 expects Baro (0), GPS (1),
+    Rangefinder (2), or External Vision (3) to prevent catastrophic takeoff plunges.
+
+RUN:
+  # Via local mavlink-router TCP endpoint:
+  python3 verify_ekf2_params.py --port tcp:127.0.0.1:5760
+
+  # Via direct USB/UART device:
+  python3 verify_ekf2_params.py --port /dev/pixhawk --baud 921600
+================================================================================
 """
 import argparse
 import struct

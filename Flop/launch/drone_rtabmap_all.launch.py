@@ -29,8 +29,18 @@ def generate_launch_description():
     )
     launch_rviz_arg = DeclareLaunchArgument(
         'launch_rviz',
+        default_value='false',
+        description='Whether to launch RViz2 (default false for headless flying Radxa; laptop renders locally)'
+    )
+    enable_tcp_map_streamer_arg = DeclareLaunchArgument(
+        'enable_tcp_map_streamer',
         default_value='true',
-        description='Whether to launch RViz2'
+        description='Whether to run TCP map streaming fallback bridge on port 5765 for Wi-Fi GCS'
+    )
+    enable_video_streamer_arg = DeclareLaunchArgument(
+        'enable_video_streamer',
+        default_value='true',
+        description='Whether to run the D435i JPEG/MJPEG FPV video streamer on port 8080 for Wi-Fi GCS'
     )
     enable_px4_bridge_arg = DeclareLaunchArgument(
         'enable_px4_bridge',
@@ -53,6 +63,28 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(pkg_share, 'launch', 'd435i_stereo_imu.launch.py')
         )
+    )
+
+    # Step 1b: Launch D435i RGB Video Streamer (delay 2 seconds for camera color stream init)
+    # Independent of the odom/SLAM timing chain below - FPV video has no dependency on VIO.
+    video_streamer_node = TimerAction(
+        period=2.0,
+        actions=[
+            Node(
+                package='rtabmap_drone_pkg',
+                executable='d435i_video_streamer.py',
+                name='d435i_video_streamer',
+                output='screen',
+                respawn=True,
+                respawn_delay=2.0,
+                parameters=[{
+                    'port': 8080,
+                    'jpeg_quality': 80,
+                    'topic': '/camera/color/image_raw',
+                }],
+                condition=IfCondition(LaunchConfiguration('enable_video_streamer'))
+            )
+        ]
     )
 
     # Step 2: Launch Stereo Odometry Node (delay 5 seconds for camera stream & TF init)
@@ -139,7 +171,23 @@ def generate_launch_description():
         ]
     )
 
-    # Step 7: Launch RViz2 (delay 10 seconds)
+    # Step 7: Launch TCP Map Streamer Node for Wi-Fi GCS Fallback (delay 9.8 seconds)
+    tcp_map_streamer_node = TimerAction(
+        period=9.8,
+        actions=[
+            Node(
+                package='rtabmap_drone_pkg',
+                executable='tcp_map_streamer_node.py',
+                name='tcp_map_streamer_node',
+                output='screen',
+                respawn=True,
+                respawn_delay=2.0,
+                condition=IfCondition(LaunchConfiguration('enable_tcp_map_streamer'))
+            )
+        ]
+    )
+
+    # Step 8: Launch RViz2 (delay 10 seconds, disabled by default on drone)
     rviz_node = TimerAction(
         period=10.0,
         actions=[
@@ -159,14 +207,19 @@ def generate_launch_description():
         max_obstacle_height_arg,
         cell_size_arg,
         launch_rviz_arg,
+        enable_tcp_map_streamer_arg,
+        enable_video_streamer_arg,
         enable_px4_bridge_arg,
         pixhawk_device_arg,
         baud_arg,
         camera_launch,
+        video_streamer_node,
         odom_launch,
         px4_bridge_node,
         slam_launch,
         map_thinning_node,
         wall_boundary_node,
+        tcp_map_streamer_node,
         rviz_node,
     ])
+

@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""RTAB-Map 2D occupancy grid -> PX4 OBSTACLE_DISTANCE (full-ring obstacle avoidance).
+"""
+================================================================================
+MODULE: obstacle_distance_bridge.py
+PURPOSE: Raycasts 2D SLAM Grid into 360° MAVLink OBSTACLE_DISTANCE for Collision Avoidance
+================================================================================
 
-Feeds px4_control.py's obstacle/EV safety layer (its --obstacle-port, default
-udpin:0.0.0.0:14541) with the OBSTACLE_DISTANCE half of what _obst_loop() reads;
-the VISION_POSITION_ESTIMATE half comes from px4_vision_bridge.py's own extra_urls
-fan-out to the same port.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer (Onboard System)
+  * Upstream:      rtabmap_slam (/map) and rtabmap_odom (/odom)
+  * Downstream:    px4_control.py obstacle safety loop & Pixhawk (UDP 127.0.0.1:14541)
 
-Unlike the reference toolset's laserscan_to_obstacle.py (a real 360-degree lidar),
-this airframe has no lidar - it raycasts the same 72-sector body-FRD ring directly
-against RTAB-Map's own /map (nav_msgs/OccupancyGrid) using the drone's current /odom
-pose as the raycast origin and heading reference. A sector that runs off the mapped
-area without hitting an occupied cell is left CLEAR, not "unknown" - px4_control.py's
-own _cone_min() already treats unknown as passable, so there's no behavioral
-difference, and it keeps this node's ring format identical to laserscan_to_obstacle.py's.
+DATA FLOW & INTERFACES:
+  * Subscribes To: /map [nav_msgs/OccupancyGrid] (2D SLAM barrier map)
+                   /odom [nav_msgs/Odometry] (Current drone pose and yaw)
+  * MAVLink Out:   OBSTACLE_DISTANCE (msg ID 330) in MAV_FRAME_BODY_FRD
+  * Sector Count:  72 sectors (5.0° angular increment per sector across 360°)
 
-Known simplification: raycasts against /odom position directly, not a map->odom TF
-lookup, so a loop-closure correction that hasn't yet reached /odom could offset the
-ray origin from the map's own frame - the same approximation px4_vision_bridge.py
-already makes forwarding /odom straight to PX4 as ground truth. Fine for bench/indoor
-runs over short distances; a real TF lookup would be needed for large drift.
+KEY ALGORITHMIC PIPELINE:
+  1. Virtual Lidar Synthesis: Simulates a 360-degree laser rangefinder without physical
+     hardware by Bresenham raycasting from the drone's current pose through the /map grid.
+  2. Coordinate Conversion: ROS yaw (CCW from +X) is mapped to MAVLink Body-FRD
+     (Index 0 = Nose forward, positive clockwise).
+  3. Distance Clamping: Distances mapped to centimeters [min_dist_cm, max_dist_cm]
+     with UINT16_MAX representing clear / out-of-range space.
 
-FRAME: OBSTACLE_DISTANCE is MAV_FRAME_BODY_FRD (index 0 = forward, +clockwise). ROS
-yaw is CCW-positive from the map frame's +x axis (REP 103), so the body-FRD bearing
-for sector i is achieved by casting at world angle (yaw - radians(i * inc_deg)).
+RUN:
+  source /opt/ros/jazzy/setup.bash
+  python3 obstacle_distance_bridge.py --dest udpout:127.0.0.1:14541 --rate 10
+================================================================================
 """
 import math
 import os
@@ -79,6 +84,8 @@ class ObstacleDistanceBridge(Node):
                 self.get_logger().warn(f"sink {url} not opened: {e}")
 
         self._pose = None       # (x, y, yaw) from the latest /odom
+        self._last_odom_time = 0.0
+        self._odom_stale_warned = False
         self._last_send = 0.0
         self._logged = False
 
@@ -90,6 +97,8 @@ class ObstacleDistanceBridge(Node):
             f"range {self.min_m:.1f}-{self.max_m:.1f} m)")
 
     def _on_odom(self, msg: Odometry):
+        self._last_odom_time = self.get_clock().now().nanoseconds / 1e9
+        self._odom_stale_warned = False
         p = msg.pose.pose.position
         o = msg.pose.pose.orientation
         yaw = math.atan2(2.0 * (o.w * o.z + o.x * o.y),
@@ -97,9 +106,17 @@ class ObstacleDistanceBridge(Node):
         self._pose = (p.x, p.y, yaw)
 
     def _on_map(self, msg: OccupancyGrid):
+        now = self.get_clock().now().nanoseconds / 1e9
         if self._pose is None or not self.sinks:
             return
-        now = self.get_clock().now().nanoseconds / 1e9
+        # Item 11 Watchdog: halt raycasting if odometry is stale (> 0.5s)
+        if (now - self._last_odom_time) > 0.5:
+            if not self._odom_stale_warned:
+                self.get_logger().warn(
+                    f"Odometry stale ({now - self._last_odom_time:.2f}s > 0.5s); halting OBSTACLE_DISTANCE broadcast to prevent ghost collision fields."
+                )
+                self._odom_stale_warned = True
+            return
         if now - self._last_send < self.min_dt:
             return
         self._last_send = now

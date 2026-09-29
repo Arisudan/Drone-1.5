@@ -1,23 +1,45 @@
 #!/usr/bin/env python3
-"""Ground-validate GCS -> FC command & control.  PROPS OFF.
+"""
+================================================================================
+MODULE: c2_validate.py
+PURPOSE: Pre-Flight Ground Validation of GCS -> FC Command & Control (C2) Uplink and ACKs
+================================================================================
 
-Sends each C2 command the GCS will use and checks that a *matching*
-COMMAND_ACK comes back. The pass criterion is "the FC heard us and
-answered", not "the FC obeyed" -- a DENIED is a pass, because the FC
-received the command and told us why it refused. Silence is the failure.
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Laptop Ground Station or Radxa Companion Computer
+  * Communicates:  Pixhawk 6X / ArduPilot via mavlink-router, ELRS Backpack, or Serial
+  * Upstream:      Operator CLI test harness
+  * Downstream:    Autopilot Command Receiver & State Estimator
 
-By default nothing that can spin a motor is sent. Arming is opt-in with
---arm.
+DATA FLOW & INTERFACES:
+  * MAVLink Out:   MAV_CMD_DO_SET_MODE (mode shifts), MAV_CMD_NAV_TAKEOFF (probe),
+                   MAV_CMD_COMPONENT_ARM_DISARM (optional with --arm flag).
+  * MAVLink In:    COMMAND_ACK (msg ID 77) with matching command ID and MAV_RESULT.
+  * Validation:    Pass criterion is responsive acknowledgement (ACCEPTED, DENIED,
+                   or TEMPORARILY_REJECTED). Network silence or packet drop is failure.
 
-    # safe: mode changes + a deliberately-refused takeoff
-    ./c2_validate.py --send 10.0.0.1:14555
+KEY LOGIC & FAILSAFES:
+  * Motor Safety: Arming is strictly opt-in via `--arm` flag; default mode runs
+    100% bench-safe commands (mode changes and takeoff probe that triggers safe rejection).
+  * Transaction Matching: Matches incoming COMMAND_ACK packets to the specific
+    in-flight command ID and increments sequence confirmation counters on retries.
+  * MAV_RESULT Diagnostics: Decodes exact enum responses:
+      - 0: MAV_RESULT_ACCEPTED
+      - 1: MAV_RESULT_TEMPORARILY_REJECTED (Preflight check blocked)
+      - 2: MAV_RESULT_DENIED (Safety state or mode blocked)
+      - 3: MAV_RESULT_UNSUPPORTED
+      - 4: MAV_RESULT_FAILED
 
-    # also arm/disarm  (PROPS OFF -- motors will spin)
-    ./c2_validate.py --send 10.0.0.1:14555 --arm
+RUN:
+  # Safe non-arming C2 validation over mavlink-router TCP endpoint:
+  python3 c2_validate.py --rx tcp:172.16.101.84:5760
 
-The command_ack() helper below is the pattern walle_gcs needs: match the
-ack to the command that is outstanding, increment `confirmation` on each
-retry, and surface the MAV_RESULT rather than firing and forgetting.
+  # Asymmetric ELRS TX Backpack Wi-Fi link:
+  python3 c2_validate.py --rx udpin:0.0.0.0:14550 --send 10.0.0.1:14555
+
+  # Complete arm/disarm validation (BENCH ONLY - PROPS REMOVED):
+  python3 c2_validate.py --rx tcp:172.16.101.84:5760 --arm
+================================================================================
 """
 from __future__ import annotations
 

@@ -29,7 +29,7 @@ def generate_launch_description():
             'Grid/MinObstacleHeight': '0.30',    # Filters out low floor furniture/baseboards (<30cm)
             'Grid/MaxObstacleHeight': '2.0',
             'Grid/NormalsSegmentation': 'true', # Filter out ground noise (vertical walls only)
-            'Grid/DepthDecimation': '2',        # Depth decimation factor 2 (retains sharp wall corners)
+            'Grid/DepthDecimation': '4',        # Depth decimation factor 4 (lowers CPU computation by 75% while keeping 2.5cm grid)
             'Grid/FlatObstacleHandledAsGround': 'true',
             'GridGlobal/OccupancyThr': '0.65',  # High confidence threshold (>65%)
 
@@ -57,9 +57,13 @@ def generate_launch_description():
             'Grid/ProbClampingMax': '0.99',
             'Grid/Scan2dUnknownSpaceFilled': 'true',
 
-            # Global Loop Closure Map Correction
+            # Global Loop Closure Map Correction (Keeps walls aligned after loop closures)
             'Grid/GlobalFullUpdate': 'true',
             'Optimizer/Strategy': '1',
+
+            # Movement Update Thresholds (Avoid redundant map recalculations while hovering)
+            'RGBD/LinearUpdate': '0.10',         # Update map only after 10cm movement
+            'RGBD/AngularUpdate': '0.08',        # Update map only after ~5 deg rotation
 
             # SLAM Registration Tuning
             'Reg/Force3DoF': 'false',

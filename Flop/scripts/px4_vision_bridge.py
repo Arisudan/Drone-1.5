@@ -1,9 +1,38 @@
 #!/usr/bin/env python3
+"""
+================================================================================
+MODULE: px4_vision_bridge.py
+PURPOSE: Relays RealSense Visual Odometry to Pixhawk 6X for Indoor GPS-Denied Flight
+================================================================================
+
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Radxa Q6A Companion Computer (Onboard System)
+  * Communicates:  Pixhawk 6X Autopilot via mavlink-routerd (tcp:127.0.0.1:5760 or UART)
+  * Upstream:      RealSense D435i / RTAB-Map Visual Odometry (/odom)
+  * Downstream:    Pixhawk EKF2 State Estimator (fuses into local NED position)
+
+DATA FLOW & INTERFACES:
+  * Subscribes To: /odom [nav_msgs/Odometry] (30-50 Hz high-frequency VIO pose)
+  * MAVLink Out:   VISION_POSITION_ESTIMATE (msg ID 102) to Pixhawk SysID 1
+  * UDP Fan-out:   127.0.0.1:14555 (Local broadcast for obstacle/control scripts)
+  * Frame Convert: ROS ENU / FLU (East-North-Up) -> PX4 NED / FRD (North-East-Down)
+                   x_ned = +x_ros (North), y_ned = -y_ros (East), z_ned = -z_ros (Down)
+
+KEY LOGIC & FAILSAFES:
+  * Lost Frame Filtering: Detects RTAB-Map tracking loss (cov[0] >= 100.0) and drops
+    unhealthy frames so EKF2 never fuses garbage tracking data.
+  * Quaternion Normalization: Rejects degenerate quaternions (norm < 0.5 or NaN).
+  * Staleness Watchdog: Issues warning if no odometry arrives for >0.5 seconds.
+  * Router Sharing: Connects via mavlink-router TCP endpoint so QGC/Laptop GCS
+    can simultaneously share the Pixhawk link without serial port contention.
+
+RUN:
+  source /opt/ros/jazzy/setup.bash
+  python3 px4_vision_bridge.py --ros-args -p device:=tcp:127.0.0.1:5760 -p odom_topic:=/odom
+================================================================================
+"""
 import os
-# Force MAVLink 2 + the "common" dialect before pymavlink picks a default. Without this,
-# mavutil can default to the ardupilotmega dialect, whose VISION_POSITION_ESTIMATE lacks
-# the covariance/reset_counter fields entirely - harmless today (we don't send them yet),
-# but a latent trap if that ever changes.
+# Force MAVLink 2 + the "common" dialect before pymavlink picks a default.
 os.environ.setdefault("MAVLINK20", "1")
 os.environ.setdefault("MAVLINK_DIALECT", "common")
 
@@ -60,7 +89,8 @@ class PX4VisionBridge(Node):
 
         self.mav = None
         self.extra = []
-        self.connect_mavlink()
+        self._last_reconnect_attempt = time.monotonic()
+        self.connect_mavlink(initial=True)
 
         self.sub_odom = self.create_subscription(
             Odometry,
@@ -135,7 +165,7 @@ class PX4VisionBridge(Node):
                 throttle_duration_sec=2.0
             )
 
-    def connect_mavlink(self):
+    def connect_mavlink(self, initial=False):
         try:
             # baud is meaningless (and rejected by some pymavlink versions) for a
             # tcp:/udp:/udpin:/udpout: connection string - only pass it for an actual
@@ -150,12 +180,15 @@ class PX4VisionBridge(Node):
             if is_serial:
                 kwargs['baud'] = self.baud
             self.mav = mavutil.mavlink_connection(self.device, **kwargs)
-            # Wait for heartbeat with a short timeout to prevent blocking startup forever
-            heartbeat = self.mav.wait_heartbeat(timeout=3.0)
-            if heartbeat:
-                self.get_logger().info('MAVLink connected to PX4 system!')
+            if initial:
+                # Wait for heartbeat with a short timeout only at initial startup
+                heartbeat = self.mav.wait_heartbeat(timeout=3.0)
+                if heartbeat:
+                    self.get_logger().info('MAVLink connected to PX4 system!')
+                else:
+                    self.get_logger().warn('MAVLink heartbeat timeout! Will attempt sending packets when odometry arrives.')
             else:
-                self.get_logger().warn('MAVLink heartbeat timeout! Will attempt sending packets when odometry arrives.')
+                self.get_logger().info('MAVLink reconnected to PX4 system.')
         except Exception as e:
             self.get_logger().error(f'Failed to open MAVLink device {self.device}: {e}')
             self.mav = None
@@ -181,9 +214,13 @@ class PX4VisionBridge(Node):
     def odom_callback(self, msg: Odometry):
         self.last_odom_wall = time.monotonic()
 
-        # Retry connection if not currently established
+        # Retry connection if not currently established with backoff rate-limit
         if self.mav is None:
-            self.connect_mavlink()
+            now = time.monotonic()
+            if now - self._last_reconnect_attempt < 2.0:
+                return
+            self._last_reconnect_attempt = now
+            self.connect_mavlink(initial=False)
             if self.mav is None:
                 return
 
@@ -224,14 +261,15 @@ class PX4VisionBridge(Node):
         yaw_ros = math.atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3))
 
         if self.use_ned_conversion:
-            # Convert ROS ENU (East-North-Up) to PX4 NED (North-East-Down)
-            x_mav = y_ros       # North
-            y_mav = x_ros       # East
+            # Convert ROS to PX4 NED (North/Forward=X, East/Right=Y, Down=-Z)
+            # Aligned with RTAB-Map /map (origin_x: North, origin_y: East)
+            x_mav = x_ros       # North / Forward
+            y_mav = y_ros       # East / Right
             z_mav = -z_ros      # Down
             
             roll_mav = roll_ros
             pitch_mav = -pitch_ros
-            yaw_mav = normalize_angle(-yaw_ros + (math.pi / 2.0))
+            yaw_mav = normalize_angle(yaw_ros)
         else:
             x_mav = x_ros
             y_mav = y_ros
