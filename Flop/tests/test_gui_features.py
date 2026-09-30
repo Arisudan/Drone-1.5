@@ -86,9 +86,12 @@ class ValueGridTest(unittest.TestCase):
         t = TelemetrySnapshot()
         t.battery_voltage, t.battery_percent, t.armed = 15.42, 77, True
         g.update_values(t)
-        self.assertEqual(g._tiles["volt"].lbl_value.text(), "15.42 V")
-        self.assertEqual(g._tiles["pct"].lbl_value.text(), "77 %")
-        self.assertEqual(g._tiles["arm_state"].lbl_value.text(), "ARMED")
+        # Checked against _raw_text, not lbl_value.text(): the tile renders
+        # this as rich-text HTML (a bold number + a smaller muted unit span),
+        # so the rendered widget text is markup, not the plain value.
+        self.assertEqual(g._tiles["volt"]._raw_text, "15.42 V")
+        self.assertEqual(g._tiles["pct"]._raw_text, "77 %")
+        self.assertEqual(g._tiles["arm_state"]._raw_text, "ARMED")
 
     def test_armed_is_coloured_as_a_hazard_not_as_healthy(self):
         from core.telemetry import TelemetrySnapshot
@@ -114,13 +117,13 @@ class ValueGridTest(unittest.TestCase):
         from core.telemetry import TelemetrySnapshot
         g = self.ValueGridWidget(["rx", "tx"])
         g.update_values(TelemetrySnapshot(), {"rx": "9.0 msg/s", "tx": "1.0 msg/s"})
-        self.assertEqual(g._tiles["rx"].lbl_value.text(), "9.0 msg/s")
+        self.assertEqual(g._tiles["rx"]._raw_text, "9.0 msg/s")
 
     def test_a_missing_extra_shows_a_blank_not_a_crash(self):
         from core.telemetry import TelemetrySnapshot
         g = self.ValueGridWidget(["rx"])
         g.update_values(TelemetrySnapshot(), {})
-        self.assertEqual(g._tiles["rx"].lbl_value.text(), "--")
+        self.assertEqual(g._tiles["rx"]._raw_text, "--")
 
     def test_a_raising_formatter_is_contained_to_its_own_tile(self):
         from core.telemetry import TelemetrySnapshot
@@ -133,8 +136,8 @@ class ValueGridTest(unittest.TestCase):
                 "volt", "Battery", "Power",
                 lambda t: 1 / 0, None)
             g.update_values(TelemetrySnapshot())
-            self.assertEqual(g._tiles["volt"].lbl_value.text(), "ERR")
-            self.assertNotEqual(g._tiles["alt"].lbl_value.text(), "ERR")
+            self.assertEqual(g._tiles["volt"]._raw_text, "ERR")
+            self.assertNotEqual(g._tiles["alt"]._raw_text, "ERR")
         finally:
             vg.FIELDS["volt"] = original
 

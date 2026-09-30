@@ -42,6 +42,8 @@ USAGE:
 
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence
 
@@ -310,6 +312,20 @@ def known_keys() -> List[str]:
     return list(FIELDS.keys()) + list(EXTRA_FIELDS.keys())
 
 
+def category_order() -> List[str]:
+    """Every category, in the order it first appears in the field registry -
+    the grid groups its tiles in this same order, so the layout reads the
+    same regardless of which order the operator happened to add fields in.
+    "Station" (extras with no FieldSpec) always sorts last: it is a catch-all,
+    not a deliberate section."""
+    order: List[str] = []
+    for spec in FIELDS.values():
+        if spec.category not in order:
+            order.append(spec.category)
+    order.append("Station")
+    return order
+
+
 # ─── Tiles ──────────────────────────────────────────────────────────
 
 class ValueTile(QFrame):
@@ -324,15 +340,21 @@ class ValueTile(QFrame):
         self.setProperty("class", "cardFrame")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(px(10), px(6), px(10), px(7))
-        lay.setSpacing(px(2))
-
+        # One row, not two: "Battery : 16.40 V" rather than a small caption
+        # stacked over a big value. Caption and the number now share the same
+        # size - the mismatch between a tiny label and a much bigger reading
+        # underneath it was the actual complaint - and only the unit suffix
+        # stays a size down, the one deliberate bit of hierarchy left.
         top = QHBoxLayout()
+        top.setContentsMargins(px(10), px(7), px(10), px(7))
         top.setSpacing(px(4))
-        self.lbl_caption = QLabel(caption_for(key), self)
-        self.lbl_caption.setObjectName("fieldSubLabel")
-        top.addWidget(self.lbl_caption, 1)
+
+        self._caption = caption_for(key)
+        self.lbl_value = QLabel(self)
+        self.lbl_value.setObjectName("diagValue")
+        self.lbl_value.setTextFormat(Qt.RichText)
+        self.lbl_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        top.addWidget(self.lbl_value, 1)
 
         self.btn_left = self._chip("◀", "Move this value left")
         self.btn_left.clicked.connect(lambda: self.move_requested.emit(self.key, -1))
@@ -345,13 +367,9 @@ class ValueTile(QFrame):
         self.btn_remove = self._chip("✕", "Remove this value from the grid")
         self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.key))
         top.addWidget(self.btn_remove)
-        lay.addLayout(top)
+        self.setLayout(top)
 
-        self.lbl_value = QLabel("--", self)
-        self.lbl_value.setObjectName("diagValue")
-        self.lbl_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        lay.addWidget(self.lbl_value)
-
+        self._raw_text = "--"
         self._base_colour = ""
         self.set_font_scale(font_scale)
         self.set_edit_mode(False)
@@ -369,9 +387,12 @@ class ValueTile(QFrame):
             f" border-color: {PALETTE['border_hover']}; }}")
         return b
 
+    # A leading numeric token (sign, digits, optional decimal) - "+1.200",
+    # "16.40", "-0.4", "1000". Whatever follows is the candidate unit suffix.
+    _NUM_RE = re.compile(r"^([+-]?\d[\d,]*\.?\d*)(.*)$")
+
     def set_font_scale(self, font_scale: float) -> None:
-        size = max(9, int(round(13 * font_scale * get_scale())))
-        self._value_css = f"font-size: {size}px; font-weight: bold;"
+        self._value_size = max(9, int(round(13 * font_scale * get_scale())))
         self._apply_value_style()
 
     def set_edit_mode(self, editing: bool) -> None:
@@ -379,15 +400,46 @@ class ValueTile(QFrame):
             b.setVisible(editing)
 
     def set_value(self, text: str, colour: Optional[str]) -> None:
-        if self.lbl_value.text() != text:
-            self.lbl_value.setText(text)
-        if colour != self._base_colour:
+        if text != self._raw_text or colour != self._base_colour:
+            self._raw_text = text
             self._base_colour = colour or ""
             self._apply_value_style()
 
     def _apply_value_style(self) -> None:
-        colour = f"color: {self._base_colour};" if self._base_colour else ""
-        self.lbl_value.setStyleSheet(self._value_css + colour)
+        """Render "Caption : 1.200 m" as one line - caption and the number at
+        the same size (that was the actual complaint: a tiny caption over a
+        much bigger value read as mismatched), with only the unit suffix a
+        size down and quietly coloured, the one deliberate bit of hierarchy
+        left. Status text ("ARMED", "NO LINK", ...) has no unit to peel off -
+        "rest" would contain a digit, or the whole string has none - and
+        renders as "Caption : ARMED" with no size step at all.
+        """
+        big = self._value_size
+        small = max(8, int(round(big * 0.72)))
+        number_colour = self._base_colour or PALETTE["text_bright"]
+        dim = PALETTE["text_dim"]
+
+        caption_html = (
+            f'<span style="font-size:{big}px; font-weight:600; color:{dim};">'
+            f'{html.escape(self._caption)} : </span>'
+        )
+
+        m = self._NUM_RE.match(self._raw_text)
+        rest = m.group(2) if m else ""
+        if m and not any(ch.isdigit() for ch in rest):
+            number, unit = m.group(1), rest
+            value_html = (
+                f'<span style="font-size:{big}px; font-weight:bold; '
+                f'color:{number_colour};">{html.escape(number)}</span>'
+                f'<span style="font-size:{small}px; color:{dim};">'
+                f'{html.escape(unit)}</span>'
+            )
+        else:
+            value_html = (
+                f'<span style="font-size:{big}px; font-weight:bold; '
+                f'color:{number_colour};">{html.escape(self._raw_text)}</span>'
+            )
+        self.lbl_value.setText(caption_html + value_html)
 
 
 # ─── Picker ─────────────────────────────────────────────────────────
@@ -596,13 +648,38 @@ class ValueGridWidget(QWidget):
                 w.setParent(None)
         self._tiles.clear()
 
-        for i, key in enumerate(self._keys):
-            tile = ValueTile(key, self._font_scale, self._holder)
-            tile.remove_requested.connect(self._remove_key)
-            tile.move_requested.connect(self._move_key)
-            tile.set_edit_mode(self._editing)
-            self._grid.addWidget(tile, i // self._columns, i % self._columns)
-            self._tiles[key] = tile
+        # Grouped by category (Power, Position, Motors, ...) rather than one
+        # undifferentiated wall of identical cards in whatever order they
+        # were added - each category gets its own header row and always
+        # starts on a fresh grid row, so two categories never share a row.
+        by_category: Dict[str, List[str]] = {}
+        for key in self._keys:
+            by_category.setdefault(category_for(key), []).append(key)
+
+        row = 0
+        for category in category_order():
+            cat_keys = by_category.get(category)
+            if not cat_keys:
+                continue
+            header = QLabel(category.upper(), self._holder)
+            header.setObjectName("diagSectionHeader")
+            self._grid.addWidget(header, row, 0, 1, self._columns)
+            row += 1
+
+            col = 0
+            for key in cat_keys:
+                tile = ValueTile(key, self._font_scale, self._holder)
+                tile.remove_requested.connect(self._remove_key)
+                tile.move_requested.connect(self._move_key)
+                tile.set_edit_mode(self._editing)
+                self._grid.addWidget(tile, row, col)
+                self._tiles[key] = tile
+                col += 1
+                if col >= self._columns:
+                    col = 0
+                    row += 1
+            if col != 0:
+                row += 1
 
         for c in range(self._columns):
             self._grid.setColumnStretch(c, 1)

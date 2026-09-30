@@ -487,7 +487,12 @@ class DroneGCSMainWindow(QMainWindow):
         self.btn_disarm = QPushButton("DISARM", self)
         self.btn_disarm.setObjectName("btnDisarm")
         self.btn_disarm.setMinimumHeight(px(34))
-        self.btn_disarm.clicked.connect(self._request_disarm)
+        # Deliberately not gated behind the slide-to-confirm bar, unlike ARM/
+        # TAKEOFF/KILL - a single click here dispatches immediately. This does
+        # not weaken flight safety: _cmd_disarm() still redirects to AUTO.LAND
+        # rather than an instant motor cutoff whenever the vehicle is actually
+        # airborne, exactly as it already does for the typed console command.
+        self.btn_disarm.clicked.connect(self._cmd_disarm)
         actions_box.addWidget(self.btn_disarm, 1)
 
         # HOLD and LAND move the aircraft, so they carry the navigation colour

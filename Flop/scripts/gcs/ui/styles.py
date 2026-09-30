@@ -367,6 +367,18 @@ QLabel#diagValue {
     font-family: $font_mono;
 }
 
+/* Diagnostics tab: groups its tiles by category (Power, Position, Motors,
+   ...) under one of these instead of one undifferentiated wall of cards. */
+QLabel#diagSectionHeader {
+    color: $text_muted;
+    font-size: 10px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    border-bottom: 1px solid $border_soft;
+    padding-bottom: 4px;
+}
+
 /* ── Execution verifier ──────────────────────────────────────────── */
 /* State badge. The objectName is swapped at runtime and the widget
    re-polished, so the colour tracks the tracker's own state machine. */
