@@ -213,6 +213,20 @@ class AudioConfig:
 
 
 @dataclass
+class ActuatorConfig:
+    """ESP32-C3 WiFi servo. 192.168.4.1 is the firmware's fallback hotspot;
+    on the "actuator" network it takes a DHCP address - set that here."""
+    host: str = "192.168.4.1"
+    port: int = 80
+
+    def validate(self) -> None:
+        if not self.host:
+            raise ValueError("actuator.host must not be empty")
+        if not 1 <= self.port <= 65535:
+            raise ValueError(f"actuator.port={self.port} outside 1..65535")
+
+
+@dataclass
 class GCSSettings:
     profile: ProfileConfig = field(default_factory=ProfileConfig)
     connection: ConnectionConfig = field(default_factory=ConnectionConfig)
@@ -222,6 +236,7 @@ class GCSSettings:
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    actuator: ActuatorConfig = field(default_factory=ActuatorConfig)
 
     def validate(self) -> None:
         for f in fields(self):
@@ -273,6 +288,7 @@ OVERRIDES = (
     ("video_url",   "video",      "stream_url",  "GCS_VIDEO_URL"),
     ("rviz_config", "slam",       "rviz_config", "GCS_RVIZ_CONFIG"),
     ("ui_scale",    "ui",         "scale",       "GCS_UI_SCALE"),
+    ("actuator_host", "actuator", "host",        "GCS_ACTUATOR_HOST"),
 )
 
 

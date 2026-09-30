@@ -71,6 +71,8 @@ CAPTIONS = {
         "tones_enabled": "Warning tones",
         "speech_enabled": "Spoken messages",
         "min_repeat_s": "Repeat same alert after (s)"}),
+    "actuator": ("ESP32 SERVO ACTUATOR", {
+        "host": "ESP32 IP", "port": "HTTP port"}),
 }
 
 # Fields that belong to a settings section but are not typed in by hand here.

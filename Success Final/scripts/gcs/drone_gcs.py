@@ -113,6 +113,7 @@ from ui.top_status_strip import TopStatusStrip
 from ui.sidebar_nav import SidebarNav
 from ui.logs_tab import LogsTabWidget
 from ui.config_tab import ConfigTabWidget
+from ui.actuator_widget import ActuatorPanel
 from ui.params_tab import ParamsTabWidget
 from ui.value_grid import ValueGridWidget
 from ui.guided_confirm import GuidedConfirmBar
@@ -617,6 +618,16 @@ class DroneGCSMainWindow(QMainWindow):
         ff.addWidget(grp_mode, 2)
         cl.addWidget(flight_frame)
 
+        # ---- Actuator ----
+        # ESP32-C3 WiFi servo. Its own card, above the override box, so the
+        # payload toggle never sits next to EMERGENCY KILL. Talks HTTP to the
+        # ESP32, not MAVLink, so it works whether or not the vehicle is linked.
+        self.actuator = ActuatorPanel(
+            self.settings.actuator.host, self.settings.actuator.port, self)
+        self.actuator.log_message.connect(
+            lambda msg, err: (self.console.log_error if err else self.console.log_success)(msg))
+        cl.addWidget(self.actuator)
+
         # ---- Override ----
         # The two controls that bypass or cut flight safety live together, at
         # the far end of the panel from ARM. Untitled: an amber warning
@@ -1044,7 +1055,8 @@ class DroneGCSMainWindow(QMainWindow):
         self.MOVE_MAX_DELTA_M = cfg.limits.move_max_delta_m
         self.page_fpv.txt_url.setText(cfg.video.stream_url)
         self.audio.set_config(cfg.audio)
-        msg = ("Settings saved. Command limits, audio and stream URL applied "
+        self.actuator.set_endpoint(cfg.actuator.host, cfg.actuator.port)
+        msg = ("Settings saved. Command limits, audio, stream URL and actuator IP applied "
                "now; connection and UI scale changes take effect on the next "
                "start.")
         self.console.log_success(msg)
@@ -2676,6 +2688,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "omit or 0 to detect from the display)")
     ap.add_argument("--no-audio", action="store_true",
                     help="start with audio alerts muted")
+    ap.add_argument("--actuator-host", help="ESP32 servo IP (env GCS_ACTUATOR_HOST)")
     return ap
 
 
