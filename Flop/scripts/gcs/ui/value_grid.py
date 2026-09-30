@@ -328,6 +328,26 @@ def category_order() -> List[str]:
 
 # ─── Tiles ──────────────────────────────────────────────────────────
 
+def _badge_qss(colour: str) -> str:
+    """A small filled pill in the exact same colour language as the header's
+    own status badges (top_status_strip.py) - keyed off the same four
+    status colours used everywhere in this station, not a generic hex-to-rgba
+    conversion, so a badge here can never quietly drift from what the header
+    looks like."""
+    if colour == OK:
+        bg, border = "rgba(35, 134, 54, 0.13)", PALETTE["ok_dim"]
+    elif colour == WARN:
+        bg, border = "rgba(158, 106, 3, 0.13)", PALETTE["warn"]
+    elif colour == BAD:
+        bg, border = "rgba(218, 54, 51, 0.13)", PALETTE["danger_dim"]
+    else:
+        bg, border = PALETTE["bg_panel"], PALETTE["border_soft"]
+    fg = colour or PALETTE["text_dim"]
+    return (f"background-color: {bg}; color: {fg}; "
+            f"border: 1px solid {border}; border-radius: {px(4)}px; "
+            f"padding: {px(2)}px {px(8)}px; font-weight: bold;")
+
+
 class ValueTile(QFrame):
     """One caption/value pair, plus its edit-mode controls."""
 
@@ -354,7 +374,18 @@ class ValueTile(QFrame):
         self.lbl_value.setObjectName("diagValue")
         self.lbl_value.setTextFormat(Qt.RichText)
         self.lbl_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        top.addWidget(self.lbl_value, 1)
+        top.addWidget(self.lbl_value)
+
+        # A real widget, not another HTML span: Qt's rich text engine does not
+        # support border/border-radius/padding on an inline <span>, only on a
+        # block element - a genuine rounded, filled pill needs its own QLabel
+        # styled with real QSS. Shown only for status-style values ("ARMED",
+        # "NO LINK"); hidden (and taking no space) for a plain measurement.
+        self.lbl_badge = QLabel(self)
+        self.lbl_badge.setAlignment(Qt.AlignCenter)
+        self.lbl_badge.setVisible(False)
+        top.addWidget(self.lbl_badge)
+        top.addStretch(1)
 
         self.btn_left = self._chip("◀", "Move this value left")
         self.btn_left.clicked.connect(lambda: self.move_requested.emit(self.key, -1))
@@ -406,20 +437,27 @@ class ValueTile(QFrame):
             self._apply_value_style()
 
     def _apply_value_style(self) -> None:
-        """Render "Caption : 1.200 m" as one line - caption and the number at
-        the same size (that was the actual complaint: a tiny caption over a
-        much bigger value read as mismatched), with only the unit suffix a
-        size down and quietly coloured, the one deliberate bit of hierarchy
-        left. Status text ("ARMED", "NO LINK", ...) has no unit to peel off -
-        "rest" would contain a digit, or the whole string has none - and
-        renders as "Caption : ARMED" with no size step at all.
+        """Render "Caption : 1.200 m" as one line for a plain measurement -
+        caption and the number at the same size (a tiny caption over a much
+        bigger value was the actual complaint), with only the unit suffix a
+        size down and quietly coloured.
+
+        Status text ("ARMED", "NO LINK", ...) is different in kind, not just
+        in size, so it gets a different treatment: the caption alone stays in
+        the merged label, and the status word itself becomes a small filled
+        pill (lbl_badge) in the same colour language as the header's own
+        badges - not just bold coloured text, which reads as one more string
+        in a page of strings. A value counts as "status" here whenever it has
+        no leading number to split off, or the remainder after that number
+        still contains a digit (e.g. "1 / 1") - that case is presentational
+        noise to split, not a real unit.
         """
         big = self._value_size
         small = max(8, int(round(big * 0.72)))
         number_colour = self._base_colour or PALETTE["text_bright"]
         dim = PALETTE["text_dim"]
 
-        caption_html = (
+        caption_only_html = (
             f'<span style="font-size:{big}px; font-weight:600; color:{dim};">'
             f'{html.escape(self._caption)} : </span>'
         )
@@ -434,12 +472,14 @@ class ValueTile(QFrame):
                 f'<span style="font-size:{small}px; color:{dim};">'
                 f'{html.escape(unit)}</span>'
             )
+            self.lbl_value.setText(caption_only_html + value_html)
+            self.lbl_badge.setVisible(False)
         else:
-            value_html = (
-                f'<span style="font-size:{big}px; font-weight:bold; '
-                f'color:{number_colour};">{html.escape(self._raw_text)}</span>'
-            )
-        self.lbl_value.setText(caption_html + value_html)
+            self.lbl_value.setText(caption_only_html)
+            self.lbl_badge.setText(self._raw_text)
+            self.lbl_badge.setStyleSheet(
+                _badge_qss(number_colour) + f" font-size:{small}px;")
+            self.lbl_badge.setVisible(True)
 
 
 # ─── Picker ─────────────────────────────────────────────────────────

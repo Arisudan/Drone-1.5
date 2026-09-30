@@ -2577,10 +2577,22 @@ class DroneGCSMainWindow(QMainWindow):
                 "Motor test refused: vehicle is armed or airborne.")
             return
         self.worker.test_actuator(motor_num, throttle_pct)
+        # Mirror the same optimistic reflection motor_widget.py already shows
+        # on its own bars into the shared telemetry snapshot, so every OTHER
+        # consumer of t.motor_pwms (the Diagnostics tab's M1-M4 tiles) shows
+        # the same commanded value too - not just the Motors tab. Without
+        # this, a real bench test could spin a motor and update one tab while
+        # the other kept reading idle, since the Diagnostics grid only ever
+        # reads t.motor_pwms directly and has no reflection of its own.
+        pct = max(0.0, min(100.0, float(throttle_pct)))
+        pwms = [1000, 1000, 1000, 1000]
+        pwms[motor_num - 1] = int(round(1000 + pct / 100.0 * 1000))
+        t.motor_pwms = pwms
 
     def _on_motor_test_stop(self) -> None:
         if self.worker and self.worker.isRunning():
             self.worker.stop_all_motor_tests()
+        self.last_telemetry.motor_pwms = [1000, 1000, 1000, 1000]
 
     # -------------------------------------------------------------------------
     # Map "Fly here now"  (ui/slam_map_widget context menu)
