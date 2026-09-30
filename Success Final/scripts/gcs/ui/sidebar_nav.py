@@ -35,7 +35,7 @@ from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QButtonGroup
 )
-from ui.scaling import px
+from ui.scaling import px, scale_qss
 
 
 class SidebarNav(QFrame):
@@ -53,7 +53,13 @@ class SidebarNav(QFrame):
         # rail painted its own right-hand border, scattering stray vertical
         # lines through the footer readouts.
         self.setObjectName("navRail")
-        self.setStyleSheet("""
+        # Routed through scale_qss() rather than set as a raw literal - an
+        # inline setStyleSheet() call never passes through the app's central
+        # scaling pipeline on its own, so every px value here would otherwise
+        # stay fixed regardless of GCS_UI_SCALE while the rest of the station
+        # scales around it (the same class of bug once found and fixed in the
+        # header's telemetry badges).
+        self.setStyleSheet(scale_qss("""
             QFrame#navRail {
                 background-color: #0d1117;
                 border-right: 1px solid #30363d;
@@ -65,7 +71,7 @@ class SidebarNav(QFrame):
                 border-left: 3px solid transparent;
                 border-radius: 0px;
                 text-align: left;
-                padding: 10px 14px;
+                padding: 6px 14px;
                 font-size: 11px;
                 font-weight: 600;
             }
@@ -135,7 +141,7 @@ class SidebarNav(QFrame):
                 letter-spacing: 0.6px;
                 padding: 4px 6px;
             }
-        """)
+        """))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 2)

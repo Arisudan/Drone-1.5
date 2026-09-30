@@ -1218,6 +1218,12 @@ class DroneGCSMainWindow(QMainWindow):
     def _on_ui_tick(self):
         t = self.last_telemetry
         t.check_vision_staleness(max_age_sec=self.settings.alerts.vision_stale_s)
+        # Re-evaluated every tick, the same way vision staleness is above -
+        # without this, position_stale/position_age only ever reflected the
+        # instant a LOCAL_POSITION_NED packet last arrived, and could never
+        # age past that if the stream stopped (the Diagnostics tab's Position
+        # tile would then show "fresh" forever during a real dropout).
+        t.check_position_staleness()
         self.top_strip.update_telemetry(t)
         self.sidebar.set_flight_state(t.flight_mode, t.armed)
         self.sidebar.set_instruments(t.ground_speed, t.altitude)
