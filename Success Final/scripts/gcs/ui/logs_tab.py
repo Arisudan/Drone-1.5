@@ -25,6 +25,7 @@ WHAT IS NOT HERE:
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 from typing import List, Optional
 
 from PyQt5.QtCore import Qt, QDate
@@ -36,6 +37,7 @@ from PyQt5.QtWidgets import (
 
 from ui.scaling import px, fit_min_width
 from core.flight_log import FlightLogger, FlightRecord, summarise
+from core.log_bundle import create_bundle, default_bundle_name
 
 COLUMNS = ["DATE", "DURATION", "DISTANCE", "MAX ALT", "MAX SPEED",
            "BATTERY USED", "MODES", "STATUS"]
@@ -172,6 +174,10 @@ class LogsTabWidget(QWidget):
         btn_csv = QPushButton("Export CSV", self)
         btn_csv.clicked.connect(self._export_csv)
         foot.addWidget(btn_csv)
+        btn_bundle = QPushButton("Export Bundle", self)
+        btn_bundle.setToolTip("Zip flight history, settings and logs for a bug report")
+        btn_bundle.clicked.connect(self._export_bundle)
+        foot.addWidget(btn_bundle)
         btn_reset = QPushButton("Reset Logs", self)
         btn_reset.setObjectName("mapDanger")
         btn_reset.setToolTip("Permanently erase all recorded flight history")
@@ -259,6 +265,18 @@ class LogsTabWidget(QWidget):
                             f"{r.max_altitude_m:.2f}", f"{r.max_speed_ms:.2f}",
                             r.battery_used_pct, r.mode_summary, r.status, r.forced_arm])
         self.lbl_count.setText(f"Exported {len(rows)} flight(s) to {path}")
+
+    def _export_bundle(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export diagnostics bundle", default_bundle_name(), "Zip files (*.zip)")
+        if not path:
+            return
+        try:
+            names = create_bundle(Path(path))
+        except OSError as exc:
+            QMessageBox.warning(self, "Export diagnostics bundle", f"Could not write bundle: {exc}")
+            return
+        self.lbl_count.setText(f"Exported diagnostics bundle ({len(names)} files) to {path}")
 
     # Deliberately simple: this is friction against an accidental click on an
     # irreversible action, the same purpose Reset Map's confirmation dialog

@@ -118,7 +118,13 @@ from ui.params_tab import ParamsTabWidget
 from ui.value_grid import ValueGridWidget
 from ui.guided_confirm import GuidedConfirmBar
 from ui.shortcuts import install_shortcuts, ShortcutHelpOverlay
+from controllers.flight_commands import FlightCommandsMixin
+from controllers.mission_control import MissionControlMixin
+from controllers.alarm_control import AlarmControlMixin
+from core.alarms import AlarmManager
+from ui.alarm_banner import AlarmBanner
 from core.flight_log import FlightLogger
+from core.ui_stall import UiStallMonitor
 from core.audio import AudioAlerts, Severity
 from core.settings import load_settings, apply_overrides, resolve_rviz_config, save_settings
 
@@ -136,7 +142,7 @@ PX4_MODES_LIST = [
 ]
 
 
-class DroneGCSMainWindow(QMainWindow):
+class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlMixin, QMainWindow):
     """Main application window for industrial-grade Drone-GCS Pilot Station."""
 
     def __init__(self, settings=None):
@@ -162,6 +168,8 @@ class DroneGCSMainWindow(QMainWindow):
         # because the Config and Logs workspaces are views onto them.
         self.settings = settings if settings is not None else apply_overrides(load_settings())
         self.flight_logger = FlightLogger()
+        self.alarms = AlarmManager()
+        self._ever_connected = False
 
         # Audio alerts. Constructed before the UI so the header's mute control
         # can reflect whether a backend was actually found, rather than offering
@@ -276,6 +284,7 @@ class DroneGCSMainWindow(QMainWindow):
         self.toast = NotificationToast(self)
 
         # Periodic UI refresh timer (30 Hz)
+        self.ui_stall = UiStallMonitor()
         self.ui_timer = QTimer(self)
         self.ui_timer.timeout.connect(self._on_ui_tick)
         self.ui_timer.start(33)
@@ -299,6 +308,7 @@ class DroneGCSMainWindow(QMainWindow):
         self.page_fpv.frame_broadcast.connect(self.fpv_float.sink.on_frame)
         self.page_fpv.frame_broadcast.connect(self.fpv_fullscreen.sink.on_frame)
         self.page_fpv.fullscreen_requested.connect(self.fpv_fullscreen.open)
+        self.page_fpv.health_changed.connect(self._on_video_health)
         self.hud.fullscreen_requested.connect(self.fpv_fullscreen.open)
 
         # Auto-connect to default autopilot endpoint on launch (UDP 14550)
@@ -344,6 +354,12 @@ class DroneGCSMainWindow(QMainWindow):
         # offered on a machine where it would do nothing.
         self.top_strip.set_audio_state(self.audio.muted, self.audio.available)
         root_layout.addWidget(self.top_strip)
+
+        # Standing alarm strip: hidden until something is wrong.
+        self.alarm_banner = AlarmBanner(self.alarms, self)
+        self.alarm_banner.ack_all_requested.connect(self._on_alarm_ack_all)
+        self.alarm_banner.ack_requested.connect(self._on_alarm_ack)
+        root_layout.addWidget(self.alarm_banner)
 
         # 2. Main Workspace Splitter: SidebarNav (Left) + Stacked Workspaces (Center/Right)
         workspace_box = QHBoxLayout()
@@ -1233,6 +1249,12 @@ class DroneGCSMainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _on_ui_tick(self):
+        gap = self.ui_stall.tick()
+        if gap is not None:
+            self.console.log_warning(
+                f"UI thread stalled {gap * 1000:.0f} ms (worst "
+                f"{self.ui_stall.stats.worst_gap_s * 1000:.0f} ms) - "
+                "something blocked the cockpit")
         t = self.last_telemetry
         t.check_vision_staleness(max_age_sec=self.settings.alerts.vision_stale_s)
         # Re-evaluated every tick, the same way vision staleness is above -
@@ -1455,6 +1477,7 @@ class DroneGCSMainWindow(QMainWindow):
 
         # 8. Audio alerts for state transitions.
         self._update_audio_alerts(t)
+        self._update_alarms(t)
 
     # -------------------------------------------------------------------------
     # Command Dispatch Helpers
@@ -1464,746 +1487,13 @@ class DroneGCSMainWindow(QMainWindow):
     # Guided Action Confirmation  (ui/guided_confirm.GuidedConfirmBar)
     # -------------------------------------------------------------------------
 
-    def _request_arm(self):
-        """ARM used to dispatch on a single click, with no confirmation at all -
-        despite this module's own docstring claiming a dual-stage modal. It now
-        goes through the same slide-to-confirm gesture as every other guarded
-        action. Bench force-arm remains terminal-only (`arm force`)."""
-        if not self._require_link("arm"):
-            return
-        self.confirm_bar.request(
-            "arm", "ARM MOTORS", danger=True,
-            detail="Propellers will be live. Confirm the area is clear.",
-            confirm_text="Slide to arm", anchor=self.btn_arm)
-
-    def _request_disarm(self):
-        """Disarm. Airborne, this is redirected to AUTO.LAND by _cmd_disarm -
-        the confirmation says so, because 'disarm' and 'land' are different
-        enough that the operator should know which one they are getting."""
-        if not self._require_link("disarm"):
-            return
-        if self.last_telemetry.is_airborne:
-            self.confirm_bar.request(
-                "disarm", "DISARM (AIRBORNE)", danger=True,
-                detail="Vehicle is airborne: this commands AUTO.LAND and "
-                       "disarms on touchdown. Use EMERGENCY KILL for an "
-                       "immediate cutoff.",
-                confirm_text="Slide to land and disarm", anchor=self.btn_disarm)
-        else:
-            self.confirm_bar.request(
-                "disarm", "DISARM", danger=True,
-                detail="Vehicle is on the ground.",
-                confirm_text="Slide to disarm", anchor=self.btn_disarm)
-
-    def _request_takeoff(self):
-        """Takeoff, with the altitude on a slider bounded by settings.limits."""
-        if not self._require_link("takeoff"):
-            return
-        try:
-            seed = float(self.ent_takeoff_alt.text().strip())
-        except ValueError:
-            seed = self.settings.slam.cruise_altitude_m
-        seed = max(self.TAKEOFF_ALT_MIN_M, min(self.TAKEOFF_ALT_MAX_M, seed))
-        self.confirm_bar.request(
-            "takeoff", "TAKEOFF", value_label="Altitude AGL",
-            vmin=self.TAKEOFF_ALT_MIN_M, vmax=self.TAKEOFF_ALT_MAX_M,
-            vinit=seed, unit="m", step=0.1,
-            detail="Vehicle must already be armed.",
-            confirm_text="Slide to take off", anchor=self.btn_takeoff)
-
-    def _request_yaw(self):
-        if not self._require_link("rotate yaw"):
-            return
-        try:
-            seed = float(self.ent_yaw.text().strip())
-        except ValueError:
-            seed = 90.0
-        self.confirm_bar.request(
-            "yaw", "ROTATE YAW", value_label="Rotation",
-            vmin=-180.0, vmax=180.0, vinit=max(-180.0, min(180.0, seed)),
-            unit="\u00b0", step=5.0,
-            detail="Relative rotation from the current heading. Requires "
-                   "OFFBOARD and an airborne vehicle.",
-            confirm_text="Slide to rotate", anchor=self.btn_yaw)
-
-    def _request_change_alt(self):
-        """Climb or descend in place to a new altitude."""
-        if not self._require_link("change altitude"):
-            return
-        current = abs(self.last_telemetry.altitude)
-        seed = max(self.TAKEOFF_ALT_MIN_M, min(self.TAKEOFF_ALT_MAX_M,
-                                               current if current > 0.05 else 1.0))
-        self.confirm_bar.request(
-            "change_alt", "CHANGE ALTITUDE", value_label="Target AGL",
-            vmin=self.TAKEOFF_ALT_MIN_M, vmax=self.TAKEOFF_ALT_MAX_M,
-            vinit=seed, unit="m", step=0.1,
-            detail=f"Currently {current:.2f} m AGL. Holds the present position "
-                   f"and changes height only. Requires OFFBOARD.",
-            confirm_text="Slide to change altitude", anchor=self.btn_change_alt)
-
-    def _request_kill(self):
-        """Emergency kill. The confirmation is a drag, not a modal with a
-        default button one Return keypress away."""
-        self.confirm_bar.request(
-            "kill", "EMERGENCY MOTOR KILL", danger=True,
-            detail="Cuts all motor outputs immediately. If the vehicle is "
-                   "airborne it will fall. There is no recovery from this.",
-            confirm_text="Slide to cut motors", anchor=self.btn_kill)
-
-    def _request_abort_path(self):
-        if not self.path_in_progress and not self.path_paused:
-            self.console.log_info("No path is executing - nothing to abort.")
-            return
-        self.confirm_bar.request(
-            "abort_path", "ABORT PATH", danger=True,
-            detail="Stops the path and commands AUTO.LAND.",
-            confirm_text="Slide to abort and land",
-            anchor=self.page_slam.btn_abort_path)
-
-    def _require_link(self, what: str) -> bool:
-        """Refuse to even offer a confirmation with no link. Showing a confirm
-        bar for a command that cannot be sent trains the operator to confirm
-        things that do nothing."""
-        if self.worker and self.worker.isRunning():
-            return True
-        msg = f"Cannot {what}: not connected to vehicle"
-        self.console.log_error(msg)
-        self.page_terminal.log_error(msg)
-        self.toast.show_message(msg, "#da3633")
-        return False
-
-    def _on_guided_confirmed(self, action: str, value: float):
-        """Single dispatch point for every confirmed guided action.
-
-        Each branch calls the same _cmd_* method the direct control always
-        called, so every interlock in those methods still applies. Confirmation
-        gates the request; it does not replace the checks.
-        """
-        if action == "arm":
-            self._cmd_arm(force=False)
-        elif action == "disarm":
-            self._cmd_disarm()
-        elif action == "takeoff":
-            self.ent_takeoff_alt.setText(f"{value:.2f}")
-            self._cmd_takeoff(value)
-        elif action == "yaw":
-            self.ent_yaw.setText(f"{value:.1f}")
-            self._cmd_yaw(value)
-        elif action == "change_alt":
-            self._cmd_change_altitude(value)
-        elif action == "kill":
-            self._cmd_kill()
-        elif action == "abort_path":
-            self._on_abort_path_requested()
-
-    def _on_guided_cancelled(self, action: str):
-        self.console.log_info(f"{action.replace('_', ' ').upper()} cancelled.")
-
-    def _cmd_change_altitude(self, altitude_m: float):
-        """Hold the current horizontal position and move to a new altitude.
-
-        Uses the same OFFBOARD setpoint path as a waypoint, with the north/east
-        components pinned to where the vehicle already is, so it is a pure climb
-        or descent rather than a move that happens to change height.
-        """
-        if not self._require_link("change altitude"):
-            return
-        t = self.last_telemetry
-        if not t.is_airborne:
-            msg = "Cannot change altitude: not airborne - arm and take off first."
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Cannot change alt: not airborne", "#da3633", 4000)
-            return
-        if t.flight_mode != "OFFBOARD":
-            msg = (f"Cannot change altitude: current mode is "
-                   f"{t.flight_mode or 'UNKNOWN'}, not OFFBOARD. Switch to "
-                   "OFFBOARD manually (Mode dropdown -> SET MODE) first.")
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Not in OFFBOARD - switch manually first",
-                                    "#da3633", 4000)
-            return
-
-        target_z = -abs(altitude_m)
-        self.cruise_z = target_z
-        self.console.log_cmd(
-            f"Changing altitude to {abs(target_z):.2f} m AGL "
-            f"(holding N {t.x:+.2f}, E {t.y:+.2f})...")
-        self.page_terminal.log_cmd(f"Changing altitude to {abs(target_z):.2f} m AGL...")
-        self.worker.move_to_waypoint(t.x, t.y, z=target_z, yaw_deg=t.heading)
-        self.offboard_pump_timer.start()
-        self.toast.show_message(f"Altitude -> {abs(target_z):.2f} m", "#1f6feb")
-        self.exec_tracker.start_tracking(
-            f"altitude {abs(target_z):.2f}m", t.x, t.y, t.z,
-            cur_armed=t.armed, cur_mode=t.flight_mode,
-            target_dist=abs(target_z - t.z))
-
-    def _cmd_arm_from_ui(self):
-        # The ARM button is always a normal arm. Bench force-arm is reachable
-        # only by typing `arm force` in the flight terminal.
-        self._cmd_arm(force=False)
-
-    def _cmd_arm(self, force: bool = False):
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot arm: Not connected to vehicle")
-            self.page_terminal.log_error("Cannot arm: Not connected to vehicle")
-            return
-        self._last_arm_was_forced = force
-        label = "FORCE ARM (BENCH, param2=21196)" if force else "ARM (NORMAL)"
-        self.console.log_cmd(f"Dispatching {label}...")
-        self.page_terminal.log_cmd(f"Dispatching {label}...")
-        self.worker.arm(force=force)
-        self.toast.show_message(f"Dispatching: {label}", "#d29922" if force else "#238636")
-        self.exec_tracker.start_tracking(
-            "arm force" if force else "arm",
-            self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode
-        )
-
-    def _cmd_disarm(self):
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot disarm: Not connected to vehicle")
-            self.page_terminal.log_error("Cannot disarm: Not connected to vehicle")
-            return
-
-        # Completely reset active navigation and waypoint pump
-        self._begin_path_generation()
-        self.offboard_pump_timer.stop()
-        self.path_in_progress = False
-        self.path_paused = False
-        self.path_awaiting_climb = False
-        self.climb_start_time = 0.0
-        self.active_waypoints = []
-        self.current_wpt_idx = 0
-        self.page_slam.set_executing_state(False, paused=False)
-        self.page_slam.canvas.clear_goal()
-
-        t = self.last_telemetry
-        if t.is_airborne:
-            # `disarm` while genuinely airborne must never be an instant
-            # motor cutoff - that free-falls the vehicle. Redirect to PX4's
-            # own AUTO.LAND (a real, tested controlled descent using the
-            # rangefinder/optical-flow height fusion already enabled -
-            # EKF2_RNG_CTRL/EKF2_OF_CTRL), and only send the real disarm once
-            # landed_state confirms touchdown (see _on_telemetry_updated).
-            # `kill` remains the true, unconditional emergency cutoff.
-            msg = "DISARM requested while airborne - redirecting to AUTO.LAND for a safe controlled descent (will disarm automatically on touchdown). Use KILL for an immediate cutoff instead."
-            self.console.log_warning(msg)
-            self.page_terminal.log_warning(msg)
-            self.toast.show_message("Airborne - landing safely, will disarm on touchdown", "#d29922", 5000)
-            self.worker.set_mode("AUTO.LAND")
-            self._pending_autodisarm_after_land = True
-            self.exec_tracker.start_tracking(
-                "land-then-disarm", t.x, t.y, t.z,
-                cur_armed=t.armed, cur_mode=t.flight_mode
-            )
-            return
-
-        self.console.log_cmd("Dispatching DISARM...")
-        self.page_terminal.log_cmd("Dispatching DISARM...")
-        self.worker.disarm(force=True)
-        self.toast.show_message("Dispatching: DISARM", "#da3633")
-        self.exec_tracker.start_tracking(
-            "disarm", t.x, t.y, t.z,
-            cur_armed=t.armed, cur_mode=t.flight_mode
-        )
-
-    def _cmd_takeoff_from_ui(self):
-        try:
-            alt = float(self.ent_takeoff_alt.text().strip())
-        except ValueError:
-            alt = 1.0
-        self._cmd_takeoff(alt)
-
-    def _cmd_takeoff(self, altitude: float = 1.0):
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot takeoff: Not connected")
-            self.page_terminal.log_error("Cannot takeoff: Not connected")
-            return
-
-        t = self.last_telemetry
-        if not t.armed:
-            msg = "Cannot takeoff: drone is disarmed - arm first."
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Cannot takeoff: disarmed", "#da3633", 4000)
-            return
-        if not (self.TAKEOFF_ALT_MIN_M <= altitude <= self.TAKEOFF_ALT_MAX_M):
-            msg = (f"Cannot takeoff: {altitude:.2f}m is outside the allowed range "
-                   f"[{self.TAKEOFF_ALT_MIN_M:.1f}, {self.TAKEOFF_ALT_MAX_M:.1f}]m.")
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Takeoff altitude out of range", "#da3633", 4000)
-            return
-
-        if t.is_airborne:
-            # Already flying - "takeoff <alt>" here means "go to and hold at
-            # this altitude," which may mean ascending OR descending from the
-            # current height. PX4's native NAV_TAKEOFF is a ground-takeoff
-            # maneuver and doesn't handle descending, so use a pure-Z OFFBOARD
-            # position-hold setpoint instead (same mechanism move/yaw use),
-            # which naturally auto-holds once the target altitude is reached.
-            # Mode switching is never done silently on the operator's behalf -
-            # OFFBOARD must already be active (set explicitly via the Mode
-            # dropdown + SET MODE) before this will do anything.
-            if t.flight_mode != "OFFBOARD":
-                msg = (f"Cannot hold altitude: current mode is {t.flight_mode or 'UNKNOWN'}, not OFFBOARD. "
-                       "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
-                self.console.log_error(msg)
-                self.page_terminal.log_error(msg)
-                self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
-                return
-            self.console.log_cmd(f"Already airborne - repositioning to altitude {altitude:.1f}m and holding...")
-            self.page_terminal.log_cmd(f"Already airborne - repositioning to altitude {altitude:.1f}m and holding...")
-            self.worker.move_to_waypoint(t.x, t.y, z=-abs(altitude))
-            self.toast.show_message(f"Altitude hold: {altitude:.1f}m", "#1f6feb")
-        else:
-            self.console.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
-            self.page_terminal.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
-            self.worker.takeoff(altitude)
-            self.toast.show_message(f"Takeoff Initiated ({altitude:.1f}m)", "#1f6feb")
-
-        self.exec_tracker.start_tracking(
-            f"takeoff {altitude}", t.x, t.y, t.z,
-            cur_armed=t.armed, cur_mode=t.flight_mode
-        )
-
     # _cmd_move_from_ui() removed with the Move (m) row: relative translation is
     # now issued from the flight terminal ("move <dx> <dy> <dz>") and by the
     # Tactical SLAM path executor, both of which call _cmd_move() directly.
 
-    def _cmd_move(self, dx: float, dy: float, dz: float):
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot move: Disconnected")
-            self.page_terminal.log_error("Cannot move: Disconnected")
-            return
-        if not self.last_telemetry.is_airborne:
-            msg = "Cannot move: not airborne - arm and takeoff first."
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Cannot move: not airborne", "#da3633", 4000)
-            return
-        if max(abs(dx), abs(dy), abs(dz)) > self.MOVE_MAX_DELTA_M:
-            msg = f"Cannot move: displacement exceeds the {self.MOVE_MAX_DELTA_M:.1f}m safety bound per command."
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Move rejected: too large", "#da3633", 4000)
-            return
-
-        # OFFBOARD is never engaged silently on the operator's behalf - it
-        # must already be active (Mode dropdown -> SET MODE) before a move
-        # will be dispatched.
-        if self.last_telemetry.flight_mode != "OFFBOARD":
-            curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
-            msg = (f"Cannot move: current mode is {curr_mode}, not OFFBOARD. "
-                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
-            return
-
-        self.console.log_cmd(f"Dispatching translation: dx={dx:+.2f}m, dy={dy:+.2f}m, dz={dz:+.2f}m")
-        self.page_terminal.log_cmd(f"Dispatching translation: dx={dx:+.2f}m, dy={dy:+.2f}m, dz={dz:+.2f}m")
-        self.worker.move_delta(dx, dy, dz)
-        self.toast.show_message(f"Move: ({dx:+.1f}, {dy:+.1f}, {dz:+.1f})m", "#1f6feb")
-        self.exec_tracker.start_tracking(
-            f"move {dx:.2f} {dy:.2f} {dz:.2f}",
-            self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode
-        )
-
-    def _cmd_yaw_from_ui(self):
-        try:
-            angle = float(self.ent_yaw.text().strip())
-        except ValueError:
-            angle = 90.0
-        self._cmd_yaw(angle)
-
-    def _cmd_yaw(self, angle_deg: float):
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot rotate yaw: Disconnected")
-            self.page_terminal.log_error("Cannot rotate yaw: Disconnected")
-            return
-        if not self.last_telemetry.is_airborne:
-            msg = "Cannot rotate yaw: not airborne - arm and takeoff first."
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Cannot yaw: not airborne", "#da3633", 4000)
-            return
-
-        # OFFBOARD is never engaged silently on the operator's behalf - it
-        # must already be active (Mode dropdown -> SET MODE) before a yaw
-        # rotation will be dispatched.
-        if self.last_telemetry.flight_mode != "OFFBOARD":
-            curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
-            msg = (f"Cannot rotate yaw: current mode is {curr_mode}, not OFFBOARD. "
-                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
-            return
-
-        self.console.log_cmd(f"Rotating yaw by {angle_deg:+.1f}°...")
-        self.page_terminal.log_cmd(f"Rotating yaw by {angle_deg:+.1f}°...")
-        self.worker.rotate_yaw(angle_deg)
-        self.toast.show_message(f"Yaw Rotate: {angle_deg:+.1f}°", "#1f6feb")
-        self.exec_tracker.start_tracking(
-            f"yaw {angle_deg:.1f}",
-            self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode,
-            cur_heading=self.last_telemetry.heading
-        )
-
-    def _cmd_set_mode_from_ui(self):
-        selected_mode = self.combo_modes.currentText().strip()
-        self._cmd_mode(selected_mode)
-
-    def _cmd_mode(self, mode_name: str):
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error(f"Cannot set mode {mode_name}: Not connected")
-            self.page_terminal.log_error(f"Cannot set mode {mode_name}: Not connected")
-            return
-        self.console.log_cmd(f"Switching mode to {mode_name}...")
-        self.page_terminal.log_cmd(f"Switching mode to {mode_name}...")
-        self.worker.set_mode(mode_name)
-        self.toast.show_message(f"Mode set: {mode_name}", "#1f6feb")
-        if "LAND" in mode_name.upper():
-            self.exec_tracker.start_tracking(
-                "land", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-                cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode
-            )
-        elif "RTL" in mode_name.upper():
-            self.exec_tracker.start_tracking(
-                "rtl", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-                cur_armed=self.last_telemetry.armed, cur_mode=self.last_telemetry.flight_mode
-            )
-
-    def _cmd_kill(self):
-        """Execute the kill. Confirmation is the caller's job.
-
-        The Yes/No QMessageBox that used to live here is gone: its default
-        button was one Return keypress from cutting the motors of a flying
-        aircraft. _request_kill now gates this behind a deliberate drag. The
-        terminal's `kill` command reaches this directly, which is the documented
-        behaviour of a typed emergency command.
-        """
-        # Completely reset active navigation and waypoint pump
-        self.offboard_pump_timer.stop()
-        self.path_in_progress = False
-        self.path_paused = False
-        self.path_awaiting_climb = False
-        self.climb_start_time = 0.0
-        self.active_waypoints = []
-        self.current_wpt_idx = 0
-        self.page_slam.set_executing_state(False, paused=False)
-        self.page_slam.canvas.clear_goal()
-        self.page_slam.progress.set_state("ABORTED")
-        self.page_motors.stop_motor_tests()
-
-        if self.worker and self.worker.isRunning():
-            self.worker.emergency_kill()
-            self.console.log_error("!!! EMERGENCY MOTOR KILL EXECUTED !!!")
-            self.page_terminal.log_error("!!! EMERGENCY MOTOR KILL EXECUTED !!!")
-            self.toast.show_message("EMERGENCY KILL SENT", "#da3633", 5000)
-            self.audio.say("Emergency kill", Severity.ALARM, key="kill")
-
     # -------------------------------------------------------------------------
     # A* Path Planning Execution & Flight Safety Handlers
     # -------------------------------------------------------------------------
-
-    def _on_execute_path_requested(self, waypoints: list):
-        """Called when user clicks '[ EXECUTE PATH ]' in Tactical SLAM tab."""
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot execute path: Not connected to drone")
-            self.toast.show_message("Cannot execute: Disconnected", "#da3633")
-            return
-
-        if not waypoints:
-            self.console.log_error("Cannot execute path: Waypoint list is empty")
-            return
-
-        # 1. Arm Status Interlock
-        if not self.last_telemetry.armed:
-            self.console.log_error(
-                "❌ FLIGHT INTERLOCK REJECTED: Drone is DISARMED! "
-                "Arm drone and confirm clear airspace before executing autonomous path."
-            )
-            self.page_terminal.log_error(
-                "❌ FLIGHT INTERLOCK REJECTED: Drone is DISARMED! Arm drone before executing path."
-            )
-            self.toast.show_message("Cannot Execute: Drone is Disarmed!", "#da3633", 5000)
-            return
-
-        # 1b. OFFBOARD Mode Interlock - never engaged silently on the
-        # operator's behalf; must already be active before a path is flown.
-        if self.last_telemetry.flight_mode != "OFFBOARD":
-            curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
-            msg = (f"Cannot execute path: current mode is {curr_mode}, not OFFBOARD. "
-                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
-            return
-
-        # 2. VIO / Position Lock Interlock
-        if not self.last_telemetry.d435i_vio_health and not self.last_telemetry.ekf2_vision_fused:
-            self.console.log_warning(
-                "⚠️ FLIGHT WARNING: D435i Visual Odometry is not confirmed locked. "
-                "Proceed with extreme caution in GPS-denied environment."
-            )
-            self.toast.show_message("Warning: Vision Odometry Degraded", "#d29922", 4000)
-
-        # Remember the mission's stops so an in-flight detour can re-route
-        # through the ones not yet reached. Taken from the canvas only when its
-        # route ends where this path ends - "Fly here now" and other callers
-        # pass their own single-goal path.
-        stops = list(getattr(self.page_slam.canvas, "mission_stops", []) or [])
-        end = waypoints[-1]
-        if not (stops and math.hypot(stops[-1][0] - end[0], stops[-1][1] - end[1]) < 0.6):
-            stops = [tuple(end)]
-        self._mission_stops_remaining = [tuple(st) for st in stops]
-
-        # 3. Ground Takeoff vs In-Air Transition Check
-        selected_alt = self.page_slam.get_cruise_altitude()
-        self.cruise_z = -abs(selected_alt)
-
-        current_alt = self.last_telemetry.altitude
-        if current_alt < 0.40:
-            self.console.log_cmd(
-                f"[TAKEOFF INTERLOCK] Vehicle is on ground (alt={current_alt:.2f}m). "
-                f"Holding climb to cruise altitude {abs(self.cruise_z):.2f}m..."
-            )
-            self.page_terminal.log_cmd(
-                f"[TAKEOFF INTERLOCK] Vehicle on ground. Initiating climb to {abs(self.cruise_z):.2f}m..."
-            )
-            self.pending_path_waypoints = list(waypoints)
-            self.path_awaiting_climb = True
-            self.climb_start_time = time.time()
-            self.takeoff_hover_x = self.last_telemetry.x
-            self.takeoff_hover_y = self.last_telemetry.y
-            self.path_in_progress = True
-            self.page_slam.set_executing_state(True, paused=False)
-
-            self.worker.move_to_waypoint(
-                self.takeoff_hover_x, self.takeoff_hover_y, z=self.cruise_z, yaw_deg=self.last_telemetry.heading
-            )
-            self.offboard_pump_timer.start()
-            self.toast.show_message("Climbing to Cruise Alt...", "#1f6feb", 4000)
-            return
-
-        # Already airborne: proceed immediately
-        self.console.log_cmd(
-            f"[AIRBORNE] Executing path at cruise altitude {abs(self.cruise_z):.2f}m AGL ({len(waypoints)} waypoints)..."
-        )
-        self.page_terminal.log_cmd(
-            f"[AIRBORNE] Executing path ({len(waypoints)} waypoints)..."
-        )
-        self._dispatch_path_start(waypoints)
-
-    def _dispatch_path_start(self, waypoints: list):
-        """Dispatches the first waypoint with tangent yaw alignment."""
-        self._begin_path_generation()
-        self.active_waypoints = list(waypoints)
-        self.current_wpt_idx = 0
-        self.path_in_progress = True
-        self.path_paused = False
-        self.page_slam.set_executing_state(True, paused=False)
-
-        # Dispatch first waypoint with tangent heading
-        first_wpt = self.active_waypoints[0]
-        dx = first_wpt[0] - self.last_telemetry.x
-        dy = first_wpt[1] - self.last_telemetry.y
-        seg_dist = math.sqrt(dx * dx + dy * dy)
-        yaw_deg = math.degrees(math.atan2(dy, dx)) if seg_dist > 0.05 else self.last_telemetry.heading
-        self.current_target_yaw = yaw_deg
-
-        self.worker.move_to_waypoint(first_wpt[0], first_wpt[1], z=self.cruise_z, yaw_deg=yaw_deg)
-        self.offboard_pump_timer.start()  # Start 10 Hz continuous stream
-
-        self.exec_tracker.start_tracking(
-            "waypoint W1", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            target_dist=seg_dist
-        )
-        self.console.log_cmd(
-            f"Dispatching W1: ({first_wpt[0]:+.2f}m, {first_wpt[1]:+.2f}m) alt={-self.cruise_z:.2f}m yaw={yaw_deg:+.1f}°"
-        )
-
-    def _begin_path_generation(self) -> int:
-        """Start a new path 'generation'.
-
-        Collision verdicts and detour plans are computed on a background thread
-        and can land after the path they were about has gone away. Each carries
-        the generation it was requested under; a mismatch means the answer is
-        about a path that no longer exists, and acting on it could halt a good
-        path over an obstacle that is no longer ahead of the aircraft.
-        """
-        self._path_generation += 1
-        self._collision_token = None
-        self._detour_token = None
-        return self._path_generation
-
-    def _pump_active_waypoint_setpoint(self):
-        """Continuously stream active waypoint setpoint at 10 Hz to satisfy PX4 500ms timeout."""
-        if (
-            self.path_in_progress
-            and not self.path_paused
-            and self.worker
-            and self.worker.isRunning()
-            and self.active_waypoints
-            and self.current_wpt_idx < len(self.active_waypoints)
-        ):
-            wpt = self.active_waypoints[self.current_wpt_idx]
-            _t0 = time.perf_counter()
-            self.worker.move_to_waypoint(wpt[0], wpt[1], z=self.cruise_z, yaw_deg=self.current_target_yaw)
-            # Heartbeat only on a setpoint that actually went out. Timing the
-            # send matters as much as counting it: this runs on the GUI thread,
-            # so a socket that starts blocking here stalls the pump AND the UI
-            # together, and PX4 notices within 500 ms.
-            self.pump_health.record_latency((time.perf_counter() - _t0) * 1000.0)
-            self.pump_health.heartbeat()
-
-    def _on_cruise_altitude_changed(self, alt_m: float):
-        self.cruise_z = -abs(alt_m)
-        self.console.log_info(f"[TACTICAL SLAM] Cruise altitude updated to {abs(alt_m):.1f}m AGL (z={self.cruise_z:.1f}m)")
-
-    def _on_reset_map_requested(self):
-        """User confirmed 'Reset Map' in the Tactical SLAM tab. Runs the reset on a
-        background worker (ROS 2 service calls, TCP fallback) so the GUI stays
-        responsive - this can take a few seconds if it has to fall through to the
-        fallback path."""
-        if self._reset_map_worker is not None and self._reset_map_worker.isRunning():
-            return  # already in flight - the button is disabled meanwhile anyway
-
-        self.page_slam.btn_reset_map.setEnabled(False)
-        self.console.log_warning("[TACTICAL SLAM] Resetting SLAM map...")
-        self.page_terminal.log_warning("[TACTICAL SLAM] Resetting SLAM map...")
-        self.toast.show_message("Resetting SLAM map...", "#d29922", 4000)
-
-        self._reset_map_worker = SlamMapResetWorker(self.map_listener.tcp_host, tcp_port=5765, parent=self)
-        self._reset_map_worker.finished_result.connect(self._on_reset_map_result)
-        self._reset_map_worker.start()
-
-    def _on_reset_map_result(self, success: bool, message: str):
-        if success:
-            self.console.log_success(f"[TACTICAL SLAM] Map reset: {message}")
-            self.page_terminal.log_success(f"[TACTICAL SLAM] Map reset: {message}")
-            self.toast.show_message("SLAM map reset", "#3fb950", 3000)
-            self.page_slam.clear_local_map_display()
-        else:
-            self.console.log_error(f"[TACTICAL SLAM] Map reset FAILED: {message}")
-            self.page_terminal.log_error(f"[TACTICAL SLAM] Map reset FAILED: {message}")
-            self.toast.show_message("Map reset failed - see console", "#f85149", 5000)
-            # Map wasn't actually touched, so leave the display exactly as it was.
-
-        # Re-enable unless armed state changed to True while the reset was in flight.
-        self.page_slam.set_armed_state(self.last_telemetry.armed)
-
-    def _on_pause_path_requested(self):
-        """Called when user clicks 'PAUSE / HOLD' in Tactical SLAM tab."""
-        self.offboard_pump_timer.stop()
-        if not self.worker or not self.worker.isRunning():
-            return
-        self.worker.set_mode("AUTO.LOITER")
-        self.path_in_progress = False
-        self.path_paused = True
-        self.loiter_pause_start_time = time.time()
-        self._loiter_warned = False
-        self.path_awaiting_climb = False
-        self.page_slam.set_executing_state(False, paused=True)
-        self.console.log_warning("[PAUSE] Drone holding position in AUTO.LOITER")
-        self.page_terminal.log_warning("[PAUSE] Drone holding position in AUTO.LOITER")
-        self.toast.show_message("Path Paused: Position Hold", "#d29922", 3000)
-
-    def _on_resume_path_requested(self):
-        """Called when user clicks 'RESUME PATH' in Tactical SLAM tab."""
-        if not self.worker or not self.worker.isRunning():
-            self.console.log_error("Cannot resume path: Not connected to drone")
-            self.toast.show_message("Cannot resume: Disconnected", "#da3633")
-            return
-
-        # 1. Arm Status Interlock
-        if not self.last_telemetry.armed:
-            self.console.log_error(
-                "❌ FLIGHT INTERLOCK REJECTED: Cannot resume path while vehicle is DISARMED! "
-                "Arm drone and confirm clear airspace first."
-            )
-            self.page_terminal.log_error(
-                "❌ FLIGHT INTERLOCK REJECTED: Drone is DISARMED! Arm before resuming path."
-            )
-            self.toast.show_message("Cannot Resume: Drone is Disarmed!", "#da3633", 5000)
-            return
-
-        if not self.active_waypoints or self.current_wpt_idx >= len(self.active_waypoints):
-            self.console.log_warning("No remaining waypoints to resume.")
-            return
-
-        # 2. Dynamic Collision Re-validation Before Resuming
-        if self.latest_map_data is not None:
-            grid, res, ox, oy = self.latest_map_data
-            remaining_wpts = self.active_waypoints[self.current_wpt_idx:]
-            is_blocked, col_pt, col_dist = self.path_planner.check_path_collision(
-                grid, res, ox, oy, remaining_wpts, (self.last_telemetry.x, self.last_telemetry.y), lookahead_m=1.5
-            )
-            if is_blocked:
-                self.console.log_error(
-                    f"🚨 CANNOT RESUME: Path still blocked by obstacle {col_dist:.2f}m ahead! "
-                    "Clear the obstacle or plan a new detour."
-                )
-                self.toast.show_message(f"Cannot Resume: Blocked ({col_dist:.2f}m)!", "#da3633", 5000)
-                return
-
-        # 3. OFFBOARD Mode Interlock - PAUSE puts PX4 into AUTO.LOITER; mode
-        # is never re-engaged silently, so the operator must switch back to
-        # OFFBOARD manually (Mode dropdown -> SET MODE) before resuming.
-        if self.last_telemetry.flight_mode != "OFFBOARD":
-            curr_mode = self.last_telemetry.flight_mode or "UNKNOWN"
-            msg = (f"Cannot resume path: current mode is {curr_mode}, not OFFBOARD. "
-                   "Switch to OFFBOARD manually (Mode dropdown -> SET MODE) first.")
-            self.console.log_error(msg)
-            self.page_terminal.log_error(msg)
-            self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
-            return
-
-        self.console.log_cmd("[RESUME] Resuming path...")
-        self.page_terminal.log_cmd("[RESUME] Resuming path...")
-        self.path_in_progress = True
-        self.path_paused = False
-        self.page_slam.set_executing_state(True, paused=False)
-
-        next_wpt = self.active_waypoints[self.current_wpt_idx]
-        dx = next_wpt[0] - self.last_telemetry.x
-        dy = next_wpt[1] - self.last_telemetry.y
-        seg_dist = math.sqrt(dx * dx + dy * dy)
-        yaw_deg = math.degrees(math.atan2(dy, dx)) if seg_dist > 0.05 else self.last_telemetry.heading
-        self.current_target_yaw = yaw_deg
-
-        self.worker.move_to_waypoint(next_wpt[0], next_wpt[1], z=self.cruise_z, yaw_deg=yaw_deg)
-        self.offboard_pump_timer.start()
-
-        self.exec_tracker.start_tracking(
-            f"waypoint W{self.current_wpt_idx+1}", self.last_telemetry.x, self.last_telemetry.y, self.last_telemetry.z,
-            target_dist=seg_dist
-        )
-        self.toast.show_message("Path Resumed", "#238636", 3000)
-
-    def _on_abort_path_requested(self):
-        """Called when user clicks 'ABORT & LAND' in Tactical SLAM tab."""
-        self._begin_path_generation()
-        self.offboard_pump_timer.stop()
-        self.path_in_progress = False
-        self.path_paused = False
-        self.path_awaiting_climb = False
-        self.active_waypoints = []
-        self.current_wpt_idx = 0
-        self.page_slam.set_executing_state(False, paused=False)
-        self.page_slam.canvas.clear_goal()
-
-        if self.worker and self.worker.isRunning():
-            self.worker.set_mode("AUTO.LAND")
-            self.console.log_error("[ABORT] Emergency transition to AUTO.LAND initiated!")
-            self.page_terminal.log_error("[ABORT] Emergency transition to AUTO.LAND initiated!")
-            self.toast.show_message("ABORT: AUTO.LAND Engaged", "#da3633", 5000)
 
     # -------------------------------------------------------------------------
     # CLI Command Dispatcher
@@ -2278,122 +1568,9 @@ class DroneGCSMainWindow(QMainWindow):
     # Live collision avoidance  (answers from core/planner_worker.PlannerWorker)
     # -------------------------------------------------------------------------
 
-    def _on_collision_result(self, token: int, is_blocked: bool,
-                             collision_point, distance_m: float) -> None:
-        """Act on a collision verdict, if it is still about the current path.
-
-        The generation check is the important part. A verdict computed against
-        a path that has since been aborted, completed or replaced by a detour
-        would otherwise halt a perfectly good new path on the strength of an
-        obstacle that is no longer in front of the aircraft.
-        """
-        if token != self._collision_token:
-            return
-        self._collision_token = None
-
-        if getattr(self, "_collision_generation", None) != self._path_generation:
-            return
-        if not self.path_in_progress or not self.active_waypoints:
-            return
-        if not is_blocked:
-            return
-
-        now = time.time()
-        t = self.last_telemetry
-        self.worker.set_mode("AUTO.LOITER")
-        self.path_in_progress = False
-        self.path_paused = True
-        self.loiter_pause_start_time = now
-        self._loiter_warned = False
-        self.page_slam.set_executing_state(False, paused=True)
-
-        self.console.log_error(
-            f"🚨 COLLISION ALERT: Obstacle detected {distance_m:.2f}m ahead on "
-            "flight path! Halting in AUTO.LOITER.")
-        self.page_terminal.log_error(
-            f"🚨 COLLISION ALERT: Obstacle {distance_m:.2f}m ahead! Switched to AUTO.LOITER.")
-        self.toast.show_message(
-            f"Obstacle Ahead ({distance_m:.2f}m)! Drone Halted", "#da3633", 6000)
-        self.audio.say("Obstacle ahead, holding", Severity.ALARM, key="collision")
-
-        # Look for a way round, also off this thread. The aircraft is already
-        # holding, so the answer can take as long as it takes.
-        if self.latest_map_data is None:
-            return
-        grid, res, ox, oy = self.latest_map_data
-        final_goal = self.active_waypoints[-1]
-        self._detour_generation = self._path_generation
-        remaining = list(getattr(self, "_mission_stops_remaining", None) or [])
-        if len(remaining) > 1:
-            # A mission: detour through every stop not yet reached. Planning
-            # only to the final waypoint - as a single goal did - would drop
-            # the intermediate stops without a word.
-            self._detour_token = self.planner_worker.request_route(
-                grid, res, ox, oy, (t.x, t.y), remaining)
-        else:
-            self._detour_token = self.planner_worker.request_plan(
-                grid, res, ox, oy, (t.x, t.y), final_goal)
-        self.console.log_info("Searching for a detour around the obstacle...")
-
-    def _on_detour_ready(self, token: int, result) -> None:
-        """Adopt a detour, if it is still wanted."""
-        if token != getattr(self, "_detour_token", None):
-            return
-        self._detour_token = None
-        if getattr(self, "_detour_generation", None) != self._path_generation:
-            return
-        if result and result.get("success"):
-            waypoints = result["waypoints"]
-            self.console.log_success(
-                f"🔄 DETOUR READY: Clear path found ({len(waypoints)} WPTs, "
-                f"{result['total_distance_m']:.2f}m). Press RESUME to fly it.")
-            self.page_slam.canvas.planned_waypoints = waypoints
-            self.page_slam.canvas.update()
-            self.active_waypoints = list(waypoints)
-            self.current_wpt_idx = 0
-            self._progress_route_key = None      # the route changed; re-seed
-        else:
-            self.console.log_warning(
-                "No clear detour found. Maintain hold or command manual RTL / LAND.")
-
     # -------------------------------------------------------------------------
     # Mission Progress  (ui/mission_progress.MissionProgressBar)
     # -------------------------------------------------------------------------
-
-    def _progress_state(self) -> str:
-        """Translate the window's navigation flags into one operator-facing word."""
-        if self.path_awaiting_climb:
-            return "CLIMBING"
-        if self.path_paused:
-            # The collision handler pauses and leaves path_in_progress False,
-            # which is what distinguishes an obstacle hold from an operator
-            # pause - worth showing differently, because one of them means
-            # something is in the way.
-            return "PAUSED" if self.path_in_progress else "OBSTACLE HOLD"
-        if self.path_in_progress:
-            return "EN ROUTE"
-        return "STAGED"
-
-    def _update_mission_progress(self, t: TelemetrySnapshot) -> None:
-        """Feed the route strip from state the tick has already computed."""
-        strip = self.page_slam.progress
-        waypoints = self.active_waypoints or self.pending_path_waypoints
-        if not waypoints:
-            if strip.isVisible():
-                strip.clear()
-            self._progress_route_key = None
-            return
-
-        # Re-seed only when the route itself changes. A detour replaces the
-        # waypoint list mid-flight, and the strip has to restart against the new
-        # one rather than keep measuring against the route that was blocked.
-        key = (len(waypoints), waypoints[0], waypoints[-1])
-        if key != self._progress_route_key:
-            self._progress_route_key = key
-            strip.set_route(waypoints, origin=(t.x, t.y), state=self._progress_state())
-
-        strip.update_progress(self.current_wpt_idx, (t.x, t.y), t.ground_speed,
-                              state=self._progress_state())
 
     # -------------------------------------------------------------------------
     # Audio Alerts  (core/audio.AudioAlerts)

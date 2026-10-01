@@ -38,6 +38,36 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("gcs.settings")
 
+# Bump when a stored key is renamed, removed or changes meaning, and add the
+# matching step to _MIGRATIONS. Files written before versioning existed have no
+# "_schema" key and are treated as version 1 (the layout they already use).
+SCHEMA_VERSION = 1
+SCHEMA_KEY = "_schema"
+
+# {from_version: fn(payload) -> payload} - each step upgrades exactly one version.
+_MIGRATIONS: Dict[int, Any] = {}
+
+
+def migrate_payload(payload: dict) -> dict:
+    """Upgrade a loaded settings dict to SCHEMA_VERSION, one step at a time.
+
+    A file from a *newer* build is passed through untouched (unknown keys are
+    already ignored), so rolling the GCS back never discards the operator's file.
+    """
+    try:
+        ver = int(payload.get(SCHEMA_KEY, 1))
+    except (TypeError, ValueError):
+        ver = 1
+    while ver < SCHEMA_VERSION:
+        step = _MIGRATIONS.get(ver)
+        if step is None:
+            log.warning("no settings migration from schema %d - loading as-is", ver)
+            break
+        payload = step(dict(payload))
+        ver += 1
+        payload[SCHEMA_KEY] = ver
+    return payload
+
 
 def settings_dir() -> Path:
     return Path(os.environ.get("DRONE_GCS_HOME", str(Path.home() / ".drone_gcs")))
@@ -346,7 +376,7 @@ def load_settings(path: Optional[Path] = None) -> GCSSettings:
     if p.exists():
         try:
             with open(p, encoding="utf-8") as fh:
-                payload = json.load(fh)
+                payload = migrate_payload(json.load(fh))
             for name in cfg.sections():
                 if isinstance(payload.get(name), dict):
                     _apply(getattr(cfg, name), payload[name])
@@ -367,5 +397,5 @@ def save_settings(cfg: GCSSettings, path: Optional[Path] = None) -> Path:
     p = settings_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
-        json.dump(cfg.to_dict(), fh, indent=2)
+        json.dump({SCHEMA_KEY: SCHEMA_VERSION, **cfg.to_dict()}, fh, indent=2)
     return p

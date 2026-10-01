@@ -45,6 +45,10 @@ jobs:
         working-directory: tests
         run: python -m unittest test_audio -v
 
+      - name: Settings schema, UI stall monitor, diagnostics bundle
+        working-directory: tests
+        run: python -m unittest test_infrastructure -v
+
 
   gui:
     # PyQt5 is installable on the runner, so the import-level smoke tests run
@@ -147,6 +151,7 @@ jobs:
           ruff check --select F \
             scripts/gcs/core \
             scripts/gcs/protocol \
+            scripts/gcs/controllers \
             scripts/diagnostics/map_eval.py \
             scripts/diagnostics/map_recorder.py \
             tests

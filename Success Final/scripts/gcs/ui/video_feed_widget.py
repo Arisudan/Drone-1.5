@@ -36,7 +36,7 @@ USAGE:
 from __future__ import annotations
 import math
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import os
 
@@ -85,6 +85,7 @@ NETWORK_CAPTURE_OPTIONS = (
     "|max_delay;500000|fflags;nobuffer"
 )
 from ui.scaling import px, fit_min_width
+from core.video_health import VideoHealthMonitor, IDLE, CONNECTING, DEGRADED, FROZEN, NO_SIGNAL
 
 #: URL schemes that go through FFmpeg and therefore want the options above.
 NETWORK_SCHEMES = ("rtsp://", "rtsps://", "udp://", "rtp://", "rtmp://", "tcp://")
@@ -104,6 +105,11 @@ class VideoCaptureThread(QThread):
     """Background video frame acquisition thread."""
 
     frame_ready = pyqtSignal(np.ndarray)
+    # (monotonic capture time, is_real). Emitted immediately BEFORE each
+    # frame_ready - same-sender queued signals keep their order, so the slot
+    # always pairs a frame with its own info. is_real=False marks the
+    # "camera not detected" placeholder, which must not count as live video.
+    frame_info = pyqtSignal(float, bool)
 
     def __init__(self, source=0):
         super().__init__()
@@ -155,6 +161,7 @@ class VideoCaptureThread(QThread):
                     frame, f"FPS: 30.0 | TIME: {elapsed:.1f}s", (220, 330),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (88, 166, 255), 1, cv2.LINE_AA
                 )
+                self.frame_info.emit(time.monotonic(), True)
                 self.frame_ready.emit(frame)
                 time.sleep(0.033)
             return
@@ -187,12 +194,14 @@ class VideoCaptureThread(QThread):
                         err_frame, f"CAMERA NOT DETECTED ({self.source})", (100, 180),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (218, 54, 51), 1, cv2.LINE_AA
                     )
+                    self.frame_info.emit(time.monotonic(), False)
                     self.frame_ready.emit(err_frame)
                     time.sleep(0.2)
                     continue
 
             ret, frame = self.cap.read()
             if ret and frame is not None:
+                self.frame_info.emit(time.monotonic(), True)
                 self.frame_ready.emit(frame)
             else:
                 # Stream dropped mid-read - release and let the top of the loop reconnect.
@@ -429,6 +438,9 @@ class VideoFeedWidget(QWidget):
     # Re-emitted decoded frames, for any VideoSink that wants to mirror them.
     frame_broadcast = pyqtSignal(object)
     fullscreen_requested = pyqtSignal()
+    # (state, one-line text) - emitted only when the health STATE changes, so a
+    # listener (the alarm list) is not woken twice a second by a steady feed.
+    health_changed = pyqtSignal(str, str)
 
     # The synthetic test pattern was dropped from the dropdown - it is a
     # bench aid, not a source anyone selects in flight. VideoCaptureThread
@@ -507,6 +519,24 @@ class VideoFeedWidget(QWidget):
         self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.video_label, 1)
 
+        # Feed health line. Neutral grey while healthy; amber/red only when the
+        # feed is actually degraded or dead (see _refresh_health).
+        self.lbl_health = QLabel("IDLE", self)
+        self.lbl_health.setToolTip(
+            "Feed health. 'pipeline' is capture-thread read -> pixel painted inside\n"
+            "this station only; it excludes camera, encoder and network delay, so it\n"
+            "is a floor and an early warning, not true glass-to-glass latency.")
+        self.lbl_health.setContentsMargins(8, 0, 8, 4)
+        layout.addWidget(self.lbl_health)
+
+        self.health = VideoHealthMonitor()
+        self._last_info: Tuple[Optional[float], bool] = (None, True)
+        self._last_health_state = IDLE
+        self._health_timer = QTimer(self)
+        self._health_timer.timeout.connect(self._refresh_health)
+        self._health_timer.start(500)
+        self._refresh_health()
+
         # Capture thread
         self.cap_thread: Optional[VideoCaptureThread] = None
 
@@ -556,7 +586,9 @@ class VideoFeedWidget(QWidget):
     def _start_capture(self):
         src = self._resolve_source(self.combo_source.currentIndex())
         self.cap_thread = VideoCaptureThread(src)
+        self.cap_thread.frame_info.connect(self._on_frame_info)
         self.cap_thread.frame_ready.connect(self._on_frame_ready)
+        self.health.start()
         self.cap_thread.start()
         self.btn_capture.setText("Stop Video")
 
@@ -564,6 +596,8 @@ class VideoFeedWidget(QWidget):
         if self.cap_thread and self.cap_thread.isRunning():
             self.cap_thread.stop()
             self.cap_thread = None
+            self.health.stop()
+            self._refresh_health()
             self.btn_capture.setText("Start Video")
             self.video_label.setText("VIDEO FEED STOPPED")
         else:
@@ -600,6 +634,20 @@ class VideoFeedWidget(QWidget):
     # Frame rendering
     # -------------------------------------------------------------------------
 
+    def _on_frame_info(self, captured_at: float, real: bool):
+        self._last_info = (captured_at, real)
+
+    def _refresh_health(self):
+        h = self.health.snapshot()
+        bad = h.state in (FROZEN, NO_SIGNAL)
+        warn = h.state in (DEGRADED, CONNECTING)
+        colour = "#da3633" if bad else "#d29922" if warn else "#8b949e"
+        self.lbl_health.setStyleSheet(f"color: {colour}; font-size: 11px;")
+        self.lbl_health.setText(h.text())
+        if h.state != self._last_health_state:
+            self._last_health_state = h.state
+            self.health_changed.emit(h.state, h.text())
+
     def _on_frame_ready(self, frame: np.ndarray):
         """Convert BGR OpenCV frame to QPixmap and display."""
         h, w, ch = frame.shape
@@ -612,6 +660,8 @@ class VideoFeedWidget(QWidget):
         scaled_pixmap = QPixmap.fromImage(qimg).scaled(lbl_w, lbl_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
         self.video_label.setPixmap(scaled_pixmap)
+        captured_at, real = self._last_info
+        self.health.on_frame(captured_at, real)
         # Mirror to every other viewport on the same decoded frame.
         self.frame_broadcast.emit(frame)
 
