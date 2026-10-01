@@ -13,7 +13,7 @@ ARCHITECTURE & CONTEXT:
 DATA FLOW & INTERFACES:
   * ROS 2 DDS:     Subscribes to /map_thin & /map [nav_msgs/OccupancyGrid] with
                    TRANSIENT_LOCAL durability & RELIABLE QoS (catches latched maps).
-  * TCP Bridge:    Connects to 172.16.101.84:5765; receives DMAP binary framed packets
+  * TCP Bridge:    Connects to 172.16.101.89:5765; receives DMAP binary framed packets
                    with zlib-decompressed int8 arrays and JSON origin/metadata.
   * Qt Signals:    map_received(grid, resolution, origin_x, origin_y, topic, QImage),
                    status_updated(str).
@@ -30,7 +30,7 @@ KEY LOGIC & FAILSAFES:
     link drops during flight.
 
 USAGE:
-  listener = ROS2MapListener(tcp_host="172.16.101.84", tcp_port=5765)
+  listener = ROS2MapListener(tcp_host="172.16.101.89", tcp_port=5765)
   listener.map_received.connect(self.update_map_display)
   listener.start()
 ================================================================================
@@ -102,7 +102,7 @@ class ROS2MapListener(QThread):
     map_received = pyqtSignal(object, float, float, float, str, object)
     status_updated = pyqtSignal(str)
 
-    def __init__(self, tcp_host: str = "172.16.101.84", tcp_port: int = 5765,
+    def __init__(self, tcp_host: str = "172.16.101.89", tcp_port: int = 5765,
                  parent=None, stall_after_s: float = 20.0,
                  degrade_after_s: float = 8.0):
         super().__init__(parent)

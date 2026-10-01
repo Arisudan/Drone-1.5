@@ -189,6 +189,11 @@ class TelemetrySnapshot:
 
     # Motor / Actuator Telemetry (PWM µs)
     motor_pwms: List[int] = field(default_factory=lambda: [1000, 1000, 1000, 1000])
+    # Output-indexed (SERVO_OUTPUT_RAW servo1..4), exactly as received. When the
+    # last SERVO_OUTPUT_RAW arrived, so a dead stream is distinguishable from
+    # motors that are genuinely sitting still.
+    last_motor_time: float = 0.0
+    motor_age: float = 999.0
 
     # Companion Computer Metrics (Radxa Dragon Q6A)
     cpu_percent: float = 0.0
@@ -341,6 +346,16 @@ class TelemetrySnapshot:
             getattr(msg, "servo4_raw", 1000),
         ]
         self.motor_pwms = pwms
+        self.last_motor_time = time.time()
+        self.motor_age = 0.0
+
+    def check_motor_staleness(self) -> None:
+        """Refresh ``motor_age``. Called every UI tick, like the position check,
+        so the age keeps growing after SERVO_OUTPUT_RAW stops arriving."""
+        if self.last_motor_time > 0.0:
+            self.motor_age = max(0.0, time.time() - self.last_motor_time)
+        else:
+            self.motor_age = 999.0
 
     def update_command_ack(self, msg) -> None:
         """Decode COMMAND_ACK response from Pixhawk."""

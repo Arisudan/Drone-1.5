@@ -34,7 +34,7 @@ import _env  # noqa: F401  -- sets sys.path + offscreen Qt; must import first
 try:
     from PyQt5.QtWidgets import (QApplication, QLabel, QPushButton, QCheckBox,
                                  QComboBox, QLineEdit, QScrollArea,
-                                 QAbstractScrollArea)
+                                 QAbstractScrollArea, QFrame)
     HAVE_QT = True
 except Exception:
     HAVE_QT = False
@@ -113,6 +113,55 @@ class LayoutIntegrityTest(unittest.TestCase):
                 # overlapping themselves as any workspace is.
                 yield win, f"{PAGES[idx]} @{size[0]}x{size[1]} scale={scale}"
 
+    def test_servo_and_kill_share_a_row_with_a_clear_divider(self):
+        """Servo left, EMERGENCY KILL right, divider between, kill the bigger
+        target - at every supported scale and window size."""
+        problems = []
+        for win, scale, size in self._windows():
+            win._switch_workspace(0)
+            for _ in range(4):
+                self.app.processEvents()
+            tag = f"@{size[0]}x{size[1]} scale={scale}"
+
+            def box(w):
+                tl = w.mapTo(win, w.rect().topLeft())
+                return tl.x(), tl.y(), w.width(), w.height()
+
+            sx, sy, sw, sh = box(win.actuator.btn_toggle)
+            kx, ky, kw, kh = box(win.btn_kill)
+            div = win.findChild(QFrame, "rowDivider")
+            dx, _, dw, _ = box(div)
+            if abs((sy + sh / 2) - (ky + kh / 2)) > 3:
+                problems.append(f"{tag}: servo and kill are not on one row")
+            if not (sx + sw <= dx and dx + dw <= kx):
+                problems.append(f"{tag}: order is not servo | divider | kill")
+            if min(dx - (sx + sw), kx - (dx + dw)) < 12:
+                problems.append(f"{tag}: gap around divider under 12px")
+            if kw <= sw:
+                problems.append(f"{tag}: kill ({kw}px) is not wider than servo ({sw}px)")
+            if hasattr(win, "_actuator_card"):
+                problems.append(f"{tag}: separate actuator card still present")
+        self.assertEqual(problems, [])
+
+    def test_the_navigation_rail_is_never_shorter_than_it_needs(self):
+        """The rail's footer (SPD / ALT / MODE / ARMED) is squeezed into
+        overlapping when the rail is given less height than its layout needs.
+        That is the invariant, checked directly - it does not depend on the
+        overlap detector noticing which two labels collided."""
+        problems = []
+        for win, scale, size in self._windows():
+            for idx in (0, 3, 4):                    # a few workspaces
+                win._switch_workspace(idx)
+                for _ in range(4):
+                    self.app.processEvents()
+                rail = win.sidebar
+                need = rail.layout().minimumSize().height()
+                if rail.height() < need:
+                    problems.append(
+                        f"@{size[0]}x{size[1]} scale={scale} tab={idx}: rail {rail.height()}px "
+                        f"< needs {need}px (compact={rail.is_compact()})")
+        self.assertEqual(problems, [])
+
     def test_no_text_is_clipped(self):
         problems = []
         for page, tag in self._each_page():
@@ -184,6 +233,39 @@ class LayoutIntegrityTest(unittest.TestCase):
                         f"{tag}: {_text(child)[:22]!r} at {g.x()},{g.y()} "
                         f"{g.width()}x{g.height()} outside parent {pr.width()}x{pr.height()}")
         self.assertEqual(problems, [], "widgets outside their parent:\n  " + "\n  ".join(problems))
+
+
+@unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
+class LayoutWithAlarmShowingTest(LayoutIntegrityTest):
+    """The whole layout suite again, with the alarm card on screen.
+
+    The alarm card is hidden in normal operation, so every layout test above ran
+    without it - and at the smallest window and largest scale it takes enough
+    vertical space to squeeze the navigation rail's footer (SPD / ALT / MODE /
+    ARMED) into overlapping. This runs every page at every size and scale with the
+    alarm card showing and the vehicle armed - the tallest state the layout gets.
+    """
+
+    def _windows(self):
+        for win, scale, size in super()._windows():
+            # Real conditions, not hand-raised alarms: the window's 30 Hz tick
+            # clears any alarm whose condition is not true. A link that was up
+            # and is now lost (CRITICAL, two-line card) plus a frozen video feed
+            # (WARN) is the tallest the card gets.
+            win._ever_connected = True
+            win._on_video_health("FROZEN", "FROZEN")
+            # Connected AND armed: the Motors panel then shows its (wrapping)
+            # "Vehicle is ARMED" warning, the tallest state it can be in.
+            t = win.last_telemetry
+            t.connected, t.armed = True, True
+            win._on_ui_tick()
+            for _ in range(6):
+                self.app.processEvents()
+            if not win.alarm_banner.isVisible():
+                win.shutdown_workers()
+                win.close()
+                self.fail("the alarm card did not appear - the test would prove nothing")
+            yield win, scale, size
 
 
 @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")

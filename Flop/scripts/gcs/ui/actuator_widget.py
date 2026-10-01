@@ -1,7 +1,7 @@
 """
 ================================================================================
 MODULE: actuator_widget.py
-PURPOSE: Cockpit control for the ESP32-C3 WiFi servo actuator (MG995)
+PURPOSE: Compact cockpit servo button for the ESP32-C3 WiFi actuator (MG995)
 ================================================================================
 
 ARCHITECTURE & CONTEXT:
@@ -16,6 +16,12 @@ PROTOCOL (as served by the firmware):
   /clear             -> 200 CLEARED
 
 BEHAVIOUR:
+  Deliberately tiny: a status dot and ONE button, no card, no title. It shares a
+  row with EMERGENCY KILL (see drone_gcs.py), so everything that used to be a
+  second line of text - the IP, the error - lives in the tooltip instead. The
+  button text carries the live state ("SERVO 0° → 90°"); the dot carries
+  health (grey idle, amber moving, red offline - colour only for real status).
+
   The button mirrors the ESP32's own BOOT button: it toggles 0 <-> 90 deg, and
   the first press from an unknown position goes to 0. Commands go through the
   firmware's queue, so pressing while the servo is still moving is safe.
@@ -31,25 +37,24 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from PyQt5.QtCore import QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
-from ui.scaling import px
+from ui.scaling import fit_min_width, px
 
 POLL_MS = 1000
 TIMEOUT_MS = 1500
 
 
-class ActuatorPanel(QFrame):
-    """One-button servo toggle with a live status line."""
+class ActuatorPanel(QWidget):
+    """One-button servo toggle with a status dot."""
 
     # (message, is_error) - lets the host window echo actions to its console.
     log_message = pyqtSignal(str, bool)
 
     def __init__(self, host: str, port: int = 80, parent=None):
         super().__init__(parent)
-        self.setProperty("class", "cardFrame")
         self._base = ""
         self._online = False
         self._angle = -1                    # last angle reported by /status
@@ -63,25 +68,22 @@ class ActuatorPanel(QFrame):
         self._net = QNetworkAccessManager(self)
         self._net.finished.connect(self._on_reply)
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(px(10), px(8), px(10), px(10))
-        lay.setSpacing(px(6))
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(px(8))
 
-        head = QHBoxLayout()
-        head.setSpacing(px(8))
-        title = QLabel("ACTUATOR", self)
-        title.setObjectName("sectionTitle")
-        head.addWidget(title)
-        self.lbl_status = QLabel("", self)
-        self.lbl_status.setObjectName("valueMono")
-        head.addWidget(self.lbl_status, 1)
-        lay.addLayout(head)
+        self.dot = QLabel(self)
+        self.dot.setFixedSize(px(10), px(10))
+        lay.addWidget(self.dot, 0, Qt.AlignVCenter)
 
-        self.btn_toggle = QPushButton("SERVO → 0°", self)
-        self.btn_toggle.setObjectName("btnNav")
-        self.btn_toggle.setMinimumHeight(px(30))
+        self.btn_toggle = QPushButton("SERVO", self)
+        self.btn_toggle.setMinimumHeight(px(32))
+        # Widest state text, so the button never resizes (and shoves its
+        # neighbour) when the label changes.
+        fit_min_width(self.btn_toggle,
+                      ["SERVO 90° → 90°", "SERVO -- → 90°", "SERVO OFFLINE"], h_pad_px=28)
         self.btn_toggle.clicked.connect(self._on_toggle)
-        lay.addWidget(self.btn_toggle)
+        lay.addWidget(self.btn_toggle, 1)
 
         self.set_endpoint(host, port)
 
@@ -169,12 +171,20 @@ class ActuatorPanel(QFrame):
         return self._net.get(req)
 
     def _render(self) -> None:
-        self.btn_toggle.setText(f"SERVO → {self._next_angle()}°")
         if not self._online:
-            self.lbl_status.setText(f"OFFLINE  {self._base}")
-            self.lbl_status.setStyleSheet("color: #f85149;")
+            self.btn_toggle.setText("SERVO OFFLINE")
+            self.btn_toggle.setToolTip(
+                f"ESP32 not reachable at {self._base}.\nClick to retry. "
+                "Set the address in Configuration -> ESP32 SERVO ACTUATOR.")
+            self._set_dot("#f85149")
             return
         pos = "--" if self._angle < 0 else f"{self._angle}°"
+        self.btn_toggle.setText(f"SERVO {pos} → {self._next_angle()}°")
         state = "moving" if self._busy else "idle"
-        self.lbl_status.setText(f"ONLINE  {pos}  {state}")
-        self.lbl_status.setStyleSheet("color: #3fb950;")
+        self.btn_toggle.setToolTip(
+            f"ESP32 online at {self._base} - {state}.\n"
+            f"Click to move the servo to {self._next_angle()}°.")
+        self._set_dot("#d29922" if self._busy else "#6e7681")
+
+    def _set_dot(self, colour: str) -> None:
+        self.dot.setStyleSheet(f"background: {colour}; border-radius: {px(5)}px;")

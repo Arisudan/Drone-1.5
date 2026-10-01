@@ -36,7 +36,7 @@ RUN:
   python3 drone_gcs.py
 
   # Connect to custom companion SBC IP:
-  python3 drone_gcs.py --host 172.16.101.84 --port 5760
+  python3 drone_gcs.py --host 172.16.101.89 --port 5760
 ================================================================================
 """
 
@@ -309,6 +309,9 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_fpv.frame_broadcast.connect(self.fpv_fullscreen.sink.on_frame)
         self.page_fpv.fullscreen_requested.connect(self.fpv_fullscreen.open)
         self.page_fpv.health_changed.connect(self._on_video_health)
+        self.page_fpv.frame_broadcast.connect(self.sidebar.mini_feed.on_frame)
+        self.page_fpv.health_changed.connect(self.sidebar.mini_feed.set_health)
+        self.sidebar.mini_feed.fullscreen_requested.connect(self.fpv_fullscreen.open)
         self.hud.fullscreen_requested.connect(self.fpv_fullscreen.open)
 
         # Auto-connect to default autopilot endpoint on launch (UDP 14550)
@@ -634,25 +637,32 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         ff.addWidget(grp_mode, 2)
         cl.addWidget(flight_frame)
 
-        # ---- Actuator ----
-        # ESP32-C3 WiFi servo. Its own card, above the override box, so the
-        # payload toggle never sits next to EMERGENCY KILL. Talks HTTP to the
-        # ESP32, not MAVLink, so it works whether or not the vehicle is linked.
+        # ---- Servo + Kill (one row) ----
+        # Servo on the left, EMERGENCY KILL on the right, a divider between.
+        # They share a row to save a whole card of height, so the separation is
+        # deliberate: kill gets the larger share (3:2) and stays solid red, the
+        # servo stays neutral, and the divider's margins keep a clear gap a
+        # stray click cannot straddle. The servo talks HTTP to the ESP32, not
+        # MAVLink, so it works whether or not the vehicle is linked.
+        grp_safety = QFrame(self)
+        grp_safety.setProperty("class", "cardFrame")
+        gs = QHBoxLayout(grp_safety)
+        gs.setContentsMargins(10, 8, 10, 8)
+        gs.setSpacing(0)
+
         self.actuator = ActuatorPanel(
             self.settings.actuator.host, self.settings.actuator.port, self)
         self.actuator.log_message.connect(
             lambda msg, err: (self.console.log_error if err else self.console.log_success)(msg))
-        cl.addWidget(self.actuator)
+        gs.addWidget(self.actuator, 2)
 
-        # ---- Override ----
-        # The two controls that bypass or cut flight safety live together, at
-        # the far end of the panel from ARM. Untitled: an amber warning
-        # checkbox above a red bar is not mistakable for anything else.
-        grp_safety = QFrame(self)
-        grp_safety.setProperty("class", "cardFrame")
-        gs = QVBoxLayout(grp_safety)
-        gs.setContentsMargins(10, 8, 10, 10)
-        gs.setSpacing(6)
+        gs.addSpacing(px(16))
+        divider = QFrame(self)
+        divider.setObjectName("rowDivider")
+        divider.setFixedWidth(1)
+        divider.setStyleSheet("QFrame#rowDivider { background: #30363d; border: none; }")
+        gs.addWidget(divider)
+        gs.addSpacing(px(16))
 
         # No glyph prefix: the U+26D4 "no entry" symbol has no coverage in the
         # UI font here and rendered as a tofu box.
@@ -660,7 +670,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.btn_kill.setObjectName("btnKill")
         self.btn_kill.setMinimumHeight(px(32))
         self.btn_kill.clicked.connect(self._request_kill)
-        gs.addWidget(self.btn_kill)
+        gs.addWidget(self.btn_kill, 3)
 
         cl.addWidget(grp_safety)
         rl.addWidget(ctrl_card)
@@ -929,7 +939,11 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # Any workspace that shows the camera starts it. Idempotent - does
         # nothing if a feed is already running, and there is only ever one
         # capture thread regardless of how many viewports are open.
-        if page in (self.page_fpv, self.page_cockpit, self.page_slam):
+        # The rail thumbnail covers the workspaces with no camera of their own,
+        # so those start the feed too.
+        mini = idx in self.sidebar.MINI_FEED_TABS
+        self.sidebar.set_mini_feed_wanted(mini)
+        if mini or page in (self.page_fpv, self.page_cockpit, self.page_slam):
             self.page_fpv.ensure_started()
 
         # The floating viewport belongs to the SLAM workspace: while flying a
@@ -945,6 +959,9 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # Fetch the parameter list the first time the tab is opened, not on
         # every connect - a full PX4 parameter set is 1000-1800+ messages,
         # and the operator may never open this tab in a given session.
+        if page is self.page_motors:
+            self._request_motor_range()
+
         if page is self.page_params and not self.page_params.has_data():
             self._request_param_refresh()
 
@@ -999,6 +1016,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.worker.command_ack_received.connect(self._on_command_ack_received)
         self.worker.rates_updated.connect(self._on_rates_updated)
         self.worker.param_value_received.connect(self.page_params.on_param_value)
+        self.worker.motor_param_received.connect(self.page_motors.on_motor_param)
         self.worker.start()
         # A fresh connect may be a different vehicle with a different
         # parameter set - whatever the Parameters tab showed before is no
@@ -1018,10 +1036,24 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             self.toast.show_message("Disconnected from Drone", "#da3633")
             self.page_params.set_connected(False)
 
+    def _request_motor_range(self) -> None:
+        """Read whichever PWM_MAIN_* parameters the motor scale still lacks.
+        Single reads (not the full list), so the Parameters tab is undisturbed;
+        re-sent on connect and when the Motors tab opens, since UDP can drop."""
+        from core.motor_range import SHARED
+        if self.worker and self.worker.isRunning() and not SHARED.known:
+            self.worker.request_motor_range_params(SHARED.missing() or None)
+
     def _on_connection_changed(self, connected: bool, message: str):
         self.top_strip.set_connection_state(connected, message)
         self.page_params.set_connected(connected)
         if connected:
+            # A new link may be a different vehicle: forget the old motor scale,
+            # then read it once the stream has settled.
+            from core.motor_range import SHARED
+            SHARED.reset()
+            self.page_motors.set_range(SHARED)
+            QTimer.singleShot(1500, self._request_motor_range)
             self.console.log_success(f"MAVLink Link: {message}")
             self.page_terminal.log_success(f"MAVLink Link: {message}")
             self.toast.show_message(message, "#238636")
@@ -1231,7 +1263,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_slam.canvas.set_position_uncertainty(
             t.pos_var_n, t.pos_var_e, t.pos_var_time)
         self.page_slam.set_armed_state(t.armed)
-        self.page_motors.update_pwms(t.motor_pwms)
+        t.check_motor_staleness()
+        self.page_motors.update_pwms(t.motor_pwms, age_s=t.motor_age)
 
         # Safety state machine: a mid-flight `disarm` was redirected to
         # AUTO.LAND (see _cmd_disarm) - watch for PX4's own landed_state to
@@ -1773,15 +1806,24 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # this, a real bench test could spin a motor and update one tab while
         # the other kept reading idle, since the Diagnostics grid only ever
         # reads t.motor_pwms directly and has no reflection of its own.
-        pct = max(0.0, min(100.0, float(throttle_pct)))
-        pwms = [1000, 1000, 1000, 1000]
-        pwms[motor_num - 1] = int(round(1000 + pct / 100.0 * 1000))
-        t.motor_pwms = pwms
+        from core.motor_range import SHARED
+        # t.motor_pwms is OUTPUT-indexed (as SERVO_OUTPUT_RAW is), so the
+        # commanded value goes on the output that feeds this motor.
+        by_output = self._disarmed_output_pwms()
+        by_output[SHARED.output_for_motor(motor_num)] = SHARED.pwm_for_throttle(
+            motor_num, throttle_pct)
+        t.motor_pwms = by_output
+
+    @staticmethod
+    def _disarmed_output_pwms() -> list:
+        from core.motor_range import SHARED
+        return [SHARED.out_dis[i] if SHARED.out_dis[i] is not None else 1000
+                for i in range(4)]
 
     def _on_motor_test_stop(self) -> None:
         if self.worker and self.worker.isRunning():
             self.worker.stop_all_motor_tests()
-        self.last_telemetry.motor_pwms = [1000, 1000, 1000, 1000]
+        self.last_telemetry.motor_pwms = self._disarmed_output_pwms()
 
     # -------------------------------------------------------------------------
     # Map "Fly here now"  (ui/slam_map_widget context menu)

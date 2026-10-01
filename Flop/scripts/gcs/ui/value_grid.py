@@ -29,9 +29,11 @@ COLOUR IS RATIONED, AS EVERYWHERE ELSE IN THIS STATION:
   when the value has crossed into a state the operator should act on. A grid
   where every tile is coloured conveys exactly as much as one where none are.
 
-ARMED IS RED, NOT GREEN:
-  Consistent with the existing diagnostics page. Green reads as "safe", and the
-  one state in which the propellers can spin is not the safe one.
+ARMED IS GREEN, DISARMED IS RED:
+  The same convention as the header badge and the navigation footer, so the one
+  state shown in three places is never coloured two ways. It is a STATE colour,
+  not a severity: disarmed is the normal resting state, so it never raises a
+  health light or a side bar (see FieldSpec.signals).
 
 USAGE:
   grid = ValueGridWidget(fields=cfg.ui.value_grid_fields, columns=3)
@@ -50,8 +52,8 @@ from typing import Callable, Dict, List, Optional, Sequence
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
-    QScrollArea, QDialog, QLineEdit, QListWidget, QListWidgetItem, QSpinBox,
-    QComboBox, QDialogButtonBox, QSizePolicy,
+    QScrollArea, QDialog, QLineEdit, QListWidget, QListWidgetItem,
+    QDialogButtonBox, QSizePolicy, QToolButton, QMenu, QAction, QActionGroup,
 )
 
 from ui.styles import PALETTE
@@ -79,6 +81,10 @@ class FieldSpec:
     category: str
     fmt: Callable[[object], str]
     colour: Optional[Callable[[object], Optional[str]]] = None
+    # False for a STATE colour (armed green / disarmed red): it colours the value
+    # but is not a caution or fault, so it must not light the card's health light
+    # or the tile's side bar. Red-because-disarmed is the resting state, not a fault.
+    signals: bool = True
 
 
 def _g(obj, name, default=0):
@@ -86,10 +92,17 @@ def _g(obj, name, default=0):
 
 
 def _pos_colour(t) -> Optional[str]:
+    """Position is red only when a feed that WAS flowing has stopped. Before the
+    first position packet (or with no link) it is simply unreported: grey, not a
+    wall of red zeros that look like a fault and train the eye to ignore red."""
+    if not _g(t, "connected", False) or _g(t, "last_position_time", 0.0) <= 0.0:
+        return DIM
     return BAD if _g(t, "position_stale", False) else None
 
 
 def _batt_colour(t) -> Optional[str]:
+    """Grey-first: a healthy battery is plain white. Colour appears only when it
+    needs attention (amber low, red critical) - so colour itself means something."""
     pct = _g(t, "battery_percent", 0)
     if pct <= 0:
         return DIM
@@ -97,25 +110,45 @@ def _batt_colour(t) -> Optional[str]:
         return BAD
     if pct <= 35:
         return WARN
-    return OK
+    return None
+
+
+def _motor_pwm(t, i: int):
+    """PWM for Motor i+1 (0-based i), or None when unknown or stale.
+
+    ``motor_pwms`` is output-indexed; the shared range maps it to motor order.
+    A feed older than STALE_S is reported as unknown rather than as the last
+    value - the Diagnostics tile must not show a dead stream as a number.
+    """
+    from core.motor_range import SHARED, STALE_S
+    pwms = _g(t, "motor_pwms", []) or []
+    if len(pwms) < 4:
+        return None
+    last = _g(t, "last_motor_time", 0.0)
+    if last > 0.0 and _g(t, "motor_age", 0.0) > STALE_S:
+        return None
+    return SHARED.motor_pwms(pwms)[i]
 
 
 def _motor_fmt(i: int):
     def _f(t) -> str:
-        pwms = _g(t, "motor_pwms", []) or []
-        return f"{pwms[i]} µs" if i < len(pwms) else "--"
+        pwm = _motor_pwm(t, i)
+        return f"{pwm} µs" if pwm is not None else "--"
     return _f
 
 
 def _motor_colour(i: int):
     def _c(t) -> Optional[str]:
-        pwms = _g(t, "motor_pwms", []) or []
-        if i >= len(pwms):
+        from core import motor_range as mr
+        pwm = _motor_pwm(t, i)
+        if pwm is None:
             return DIM
-        pwm = pwms[i]
-        if pwm > 1920:
+        state = mr.SHARED.state(i + 1, pwm)
+        if state == mr.SATURATED:
             return WARN
-        return OK if pwm > 1100 else DIM
+        # Nominal and high are ordinary running values: plain white. Idle / off
+        # recede to grey.
+        return None if state in (mr.NOMINAL, mr.HIGH) else DIM
     return _c
 
 
@@ -139,7 +172,8 @@ def _build_fields() -> Dict[str, FieldSpec]:
         # ── Flight state ────────────────────────────────────────────
         FieldSpec("arm_state", "Arm state", "Flight state",
                   lambda t: "ARMED" if _g(t, "armed", False) else "DISARMED",
-                  lambda t: BAD if _g(t, "armed", False) else DIM),
+                  lambda t: OK if _g(t, "armed", False) else BAD,
+                  signals=False),
         FieldSpec("flight_mode", "Flight mode", "Flight state",
                   lambda t: _g(t, "flight_mode", "") or "--",
                   lambda t: ACCENT if _g(t, "connected", False) else DIM),
@@ -348,57 +382,112 @@ def _badge_qss(colour: str) -> str:
             f"padding: {px(2)}px {px(8)}px; font-weight: bold;")
 
 
+# A leading numeric token (sign, digits, optional decimal) - "+1.200", "16.40",
+# "-0.4", "1000". Whatever follows is the candidate unit suffix.
+_NUM_RE = re.compile(r"^([+-]?\d[\d,]*\.?\d*)(.*)$")
+
+
+# Values that mean "nothing reported": drawn as plain muted text. As pills they
+# looked like four tiny status badges all saying nothing.
+PLACEHOLDERS = frozenset({"", "--", "—", "n/r"})
+
+
+def split_value(text: str):
+    """(number, unit) for a plain measurement, or None for status text.
+
+    Status text ("ARMED", "NO LINK") is different in kind from a measurement, so
+    it gets a pill rather than a big number. A value counts as a status whenever
+    it has no leading number, or what follows the number still contains a digit
+    (e.g. "1 / 1") - that is presentation noise to keep whole, not a unit."""
+    m = _NUM_RE.match(text)
+    if m and not any(ch.isdigit() for ch in m.group(2)):
+        return m.group(1), m.group(2)
+    return None
+
+
+def severity_of(colour: Optional[str]) -> int:
+    """2 = fault (red), 1 = caution (amber), 0 = nothing to act on."""
+    return 2 if colour == BAD else 1 if colour == WARN else 0
+
+
+_LED_IDLE = "#6e7681"
+
+
 class ValueTile(QFrame):
-    """One caption/value pair, plus its edit-mode controls."""
+    """One value cell: a small-caps caption over a large value, plus the
+    edit-mode controls.
+
+    Caption on top and number below is the whole hierarchy: the caption is quiet
+    (small, grey, spaced capitals) so the number is the loudest thing in the
+    cell. The unit is a size down and muted. A thin bar at the left appears ONLY
+    when the value is in caution or fault - the same severity language as the
+    alarm card - so a glance down the grid finds the abnormal cells by shape
+    before reading anything.
+    """
 
     remove_requested = pyqtSignal(str)
     move_requested = pyqtSignal(str, int)   # key, -1 left / +1 right
 
+    BASE_VALUE_PX = 19
+
     def __init__(self, key: str, font_scale: float = 1.0, parent=None):
         super().__init__(parent)
         self.key = key
-        self.setProperty("class", "cardFrame")
+        self.setProperty("class", "cellFrame")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        # One row, not two: "Battery : 16.40 V" rather than a small caption
-        # stacked over a big value. Caption and the number now share the same
-        # size - the mismatch between a tiny label and a much bigger reading
-        # underneath it was the actual complaint - and only the unit suffix
-        # stays a size down, the one deliberate bit of hierarchy left.
-        top = QHBoxLayout()
-        top.setContentsMargins(px(10), px(7), px(10), px(7))
-        top.setSpacing(px(4))
-
         self._caption = caption_for(key)
+        spec = FIELDS.get(key)
+        self._signals = spec.signals if spec is not None else True
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(px(2), px(3), px(2), px(3))
+        root.setSpacing(px(8))
+
+        self.bar = QFrame(self)
+        self.bar.setFixedWidth(px(3))
+        self.bar.setVisible(False)
+        root.addWidget(self.bar)
+
+        col = QVBoxLayout()
+        col.setSpacing(px(2))
+        col.setContentsMargins(0, 0, 0, 0)
+
+        head = QHBoxLayout()
+        head.setSpacing(px(4))
+        self.lbl_caption = QLabel(self._caption.upper(), self)
+        self.lbl_caption.setObjectName("diagCaption")
+        head.addWidget(self.lbl_caption)
+        head.addStretch(1)
+        self.btn_left = self._chip("◀", "Move this value left")
+        self.btn_left.clicked.connect(lambda: self.move_requested.emit(self.key, -1))
+        head.addWidget(self.btn_left)
+        self.btn_right = self._chip("▶", "Move this value right")
+        self.btn_right.clicked.connect(lambda: self.move_requested.emit(self.key, +1))
+        head.addWidget(self.btn_right)
+        self.btn_remove = self._chip("✕", "Remove this value from the grid")
+        self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.key))
+        head.addWidget(self.btn_remove)
+        col.addLayout(head)
+
+        val = QHBoxLayout()
+        val.setSpacing(px(6))
         self.lbl_value = QLabel(self)
         self.lbl_value.setObjectName("diagValue")
         self.lbl_value.setTextFormat(Qt.RichText)
         self.lbl_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        top.addWidget(self.lbl_value)
+        val.addWidget(self.lbl_value)
 
         # A real widget, not another HTML span: Qt's rich text engine does not
         # support border/border-radius/padding on an inline <span>, only on a
         # block element - a genuine rounded, filled pill needs its own QLabel
-        # styled with real QSS. Shown only for status-style values ("ARMED",
-        # "NO LINK"); hidden (and taking no space) for a plain measurement.
+        # styled with real QSS. Shown only for status-style values.
         self.lbl_badge = QLabel(self)
         self.lbl_badge.setAlignment(Qt.AlignCenter)
         self.lbl_badge.setVisible(False)
-        top.addWidget(self.lbl_badge)
-        top.addStretch(1)
-
-        self.btn_left = self._chip("◀", "Move this value left")
-        self.btn_left.clicked.connect(lambda: self.move_requested.emit(self.key, -1))
-        top.addWidget(self.btn_left)
-
-        self.btn_right = self._chip("▶", "Move this value right")
-        self.btn_right.clicked.connect(lambda: self.move_requested.emit(self.key, +1))
-        top.addWidget(self.btn_right)
-
-        self.btn_remove = self._chip("✕", "Remove this value from the grid")
-        self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self.key))
-        top.addWidget(self.btn_remove)
-        self.setLayout(top)
+        val.addWidget(self.lbl_badge)
+        val.addStretch(1)
+        col.addLayout(val)
+        root.addLayout(col, 1)
 
         self._raw_text = "--"
         self._base_colour = ""
@@ -418,12 +507,12 @@ class ValueTile(QFrame):
             f" border-color: {PALETTE['border_hover']}; }}")
         return b
 
-    # A leading numeric token (sign, digits, optional decimal) - "+1.200",
-    # "16.40", "-0.4", "1000". Whatever follows is the candidate unit suffix.
-    _NUM_RE = re.compile(r"^([+-]?\d[\d,]*\.?\d*)(.*)$")
+    @property
+    def severity(self) -> int:
+        return severity_of(self._base_colour) if self._signals else 0
 
     def set_font_scale(self, font_scale: float) -> None:
-        self._value_size = max(9, int(round(13 * font_scale * get_scale())))
+        self._value_size = max(11, int(round(self.BASE_VALUE_PX * font_scale * get_scale())))
         self._apply_value_style()
 
     def set_edit_mode(self, editing: bool) -> None:
@@ -437,49 +526,281 @@ class ValueTile(QFrame):
             self._apply_value_style()
 
     def _apply_value_style(self) -> None:
-        """Render "Caption : 1.200 m" as one line for a plain measurement -
-        caption and the number at the same size (a tiny caption over a much
-        bigger value was the actual complaint), with only the unit suffix a
-        size down and quietly coloured.
-
-        Status text ("ARMED", "NO LINK", ...) is different in kind, not just
-        in size, so it gets a different treatment: the caption alone stays in
-        the merged label, and the status word itself becomes a small filled
-        pill (lbl_badge) in the same colour language as the header's own
-        badges - not just bold coloured text, which reads as one more string
-        in a page of strings. A value counts as "status" here whenever it has
-        no leading number to split off, or the remainder after that number
-        still contains a digit (e.g. "1 / 1") - that case is presentational
-        noise to split, not a real unit.
-        """
         big = self._value_size
-        small = max(8, int(round(big * 0.72)))
+        small = max(9, int(round(big * 0.56)))
         number_colour = self._base_colour or PALETTE["text_bright"]
         dim = PALETTE["text_dim"]
 
-        caption_only_html = (
-            f'<span style="font-size:{big}px; font-weight:600; color:{dim};">'
-            f'{html.escape(self._caption)} : </span>'
-        )
+        sev = self.severity
+        self.bar.setVisible(sev > 0)
+        if sev:
+            self.bar.setStyleSheet(
+                f"background: {self._base_colour}; border: none; border-radius: {px(1)}px;")
 
-        m = self._NUM_RE.match(self._raw_text)
-        rest = m.group(2) if m else ""
-        if m and not any(ch.isdigit() for ch in rest):
-            number, unit = m.group(1), rest
-            value_html = (
+        if self._raw_text.strip() in PLACEHOLDERS:
+            self.lbl_value.setText(
+                f'<span style="font-size:{big}px; font-weight:bold; '
+                f'color:{PALETTE["text_muted"]};">--</span>')
+            self.lbl_value.setVisible(True)
+            self.lbl_badge.setVisible(False)
+            return
+        parts = split_value(self._raw_text)
+        if parts is not None:
+            number, unit = parts
+            self.lbl_value.setText(
                 f'<span style="font-size:{big}px; font-weight:bold; '
                 f'color:{number_colour};">{html.escape(number)}</span>'
-                f'<span style="font-size:{small}px; color:{dim};">'
-                f'{html.escape(unit)}</span>'
-            )
-            self.lbl_value.setText(caption_only_html + value_html)
+                f'<span style="font-size:{small}px; color:{dim};"> '
+                f'{html.escape(unit.strip())}</span>')
+            self.lbl_value.setVisible(True)
             self.lbl_badge.setVisible(False)
         else:
-            self.lbl_value.setText(caption_only_html)
+            self.lbl_value.setVisible(False)
             self.lbl_badge.setText(self._raw_text)
             self.lbl_badge.setStyleSheet(
-                _badge_qss(number_colour) + f" font-size:{small}px;")
+                _badge_qss(number_colour) + f" font-size:{max(10, int(big * 0.6))}px;")
             self.lbl_badge.setVisible(True)
+
+
+# ─── Glance strip ───────────────────────────────────────────────────
+
+class GlanceReadout(QFrame):
+    """One big readout in the glance strip: caption, large value, small sub-line."""
+
+    BASE_VALUE_PX = 30
+
+    def __init__(self, caption: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("glanceCell")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(px(16), px(10), px(16), px(10))
+        lay.setSpacing(px(3))
+
+        self.lbl_caption = QLabel(caption.upper(), self)
+        self.lbl_caption.setObjectName("diagCaption")
+        lay.addWidget(self.lbl_caption)
+
+        row = QHBoxLayout()
+        row.setSpacing(px(8))
+        self.lbl_main = QLabel("--", self)
+        self.lbl_main.setObjectName("diagValue")
+        self.lbl_main.setTextFormat(Qt.RichText)
+        row.addWidget(self.lbl_main)
+        self.lbl_badge = QLabel(self)
+        self.lbl_badge.setAlignment(Qt.AlignCenter)
+        self.lbl_badge.setVisible(False)
+        row.addWidget(self.lbl_badge)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        self.lbl_sub = QLabel("\u00a0", self)
+        self.lbl_sub.setObjectName("fieldSubLabel")
+        lay.addWidget(self.lbl_sub)
+        lay.addStretch(1)
+
+        self.main_text = "--"
+        self.main_colour = ""
+        self.sub_text = ""
+        self._last = None
+
+    def set_content(self, main: str, colour: Optional[str], sub: str = "",
+                    sub_colour: Optional[str] = None, badge: bool = False) -> None:
+        state = (main, colour, sub, sub_colour, badge)
+        if state == self._last:
+            return
+        self._last = state
+        self.main_text, self.main_colour, self.sub_text = main, colour or "", sub
+        big = max(14, int(round(self.BASE_VALUE_PX * get_scale())))
+        small = max(10, int(round(big * 0.5)))
+        dim = PALETTE["text_dim"]
+        fg = colour or PALETTE["text_bright"]
+
+        if not badge and main.strip() in PLACEHOLDERS:
+            self.lbl_main.setText(
+                f'<span style="font-size:{big}px; font-weight:bold; '
+                f'color:{PALETTE["text_muted"]};">--</span>')
+            self.lbl_main.setVisible(True)
+            self.lbl_badge.setVisible(False)
+            self._finish_sub(sub, sub_colour, dim)
+            return
+        parts = None if badge else split_value(main)
+        if parts is not None:
+            number, unit = parts
+            self.lbl_main.setText(
+                f'<span style="font-size:{big}px; font-weight:bold; color:{fg};">'
+                f'{html.escape(number)}</span>'
+                f'<span style="font-size:{small}px; color:{dim};"> '
+                f'{html.escape(unit.strip())}</span>')
+            self.lbl_main.setVisible(True)
+            self.lbl_badge.setVisible(False)
+        elif badge:
+            self.lbl_main.setVisible(False)
+            self.lbl_badge.setText(main)
+            self.lbl_badge.setStyleSheet(
+                _badge_qss(fg) + f" font-size:{max(11, int(big * 0.5))}px;")
+            self.lbl_badge.setVisible(True)
+        else:                                   # plain text, e.g. a flight mode
+            self.lbl_main.setText(
+                f'<span style="font-size:{int(big * 0.78)}px; font-weight:bold; '
+                f'color:{fg};">{html.escape(main)}</span>')
+            self.lbl_main.setVisible(True)
+            self.lbl_badge.setVisible(False)
+
+        self._finish_sub(sub, sub_colour, dim)
+
+    def _finish_sub(self, sub: str, sub_colour: Optional[str], dim: str) -> None:
+        # The sub-line is ALWAYS present (a non-breaking space when empty) so every
+        # cell in the strip is the same height and the captions line up.
+        self.lbl_sub.setText(sub or "\u00a0")
+        self.lbl_sub.setStyleSheet(f"color: {sub_colour or dim};")
+
+
+class PrimaryStrip(QFrame):
+    """The six numbers you must be able to read in one look: altitude, ground
+    speed, battery, link, mode and flight time - the cockpit's "speedometer".
+
+    Not configurable on purpose. The grid below is the place for choice; this is
+    the place that is always the same, so muscle memory works. The cells follow
+    the same grey-first colour rule as every tile.
+    """
+
+    ORDER = ("alt", "speed", "batt", "link", "mode", "time")
+    CAPTIONS = {"alt": "Altitude", "speed": "Ground speed", "batt": "Battery",
+                "link": "Link", "mode": "Mode", "time": "Flight time"}
+    MIN_CELL_PX = 150
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("glanceStrip")
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(0)
+        self.cells: Dict[str, GlanceReadout] = {
+            k: GlanceReadout(self.CAPTIONS[k], self) for k in self.ORDER}
+        self._per_row = 0
+        self.reflow(10_000)
+
+    def reflow(self, width: int) -> int:
+        """One row when it fits, otherwise two rows of three. Returns cells/row."""
+        per_row = 6 if width >= px(self.MIN_CELL_PX) * 6 else 3
+        if per_row == self._per_row:
+            return per_row
+        self._per_row = per_row
+        for cell in self.cells.values():
+            self._grid.removeWidget(cell)
+        for c in range(len(self.ORDER)):
+            self._grid.setColumnStretch(c, 0)    # stale stretches squeezed the cells
+        for i, key in enumerate(self.ORDER):
+            cell = self.cells[key]
+            r, c = divmod(i, per_row)
+            self._grid.addWidget(cell, r, c)
+            cell.setStyleSheet(
+                "" if c == 0 else
+                f"QFrame#glanceCell {{ border-left: 1px solid {PALETTE['border_soft']}; }}")
+            self._grid.setColumnStretch(c, 1)
+        return per_row
+
+    def update_from(self, t) -> None:
+        connected = bool(_g(t, "connected", False))
+        pos_col = _pos_colour(t)
+
+        self.cells["alt"].set_content(
+            f"{_g(t, 'altitude', 0.0):.2f} m", pos_col)
+        self.cells["speed"].set_content(
+            f"{_g(t, 'ground_speed', 0.0):.2f} m/s", None if connected else DIM)
+
+        pct = _g(t, "battery_percent", 0)
+        self.cells["batt"].set_content(
+            f"{pct} %" if pct > 0 else "--", _batt_colour(t),
+            f"{_g(t, 'battery_voltage', 0.0):.2f} V · {_g(t, 'battery_current', 0.0):.1f} A")
+
+        age = _g(t, "heartbeat_age", 0.0)
+        self.cells["link"].set_content(
+            "CONNECTED" if connected else "NO LINK", OK if connected else BAD,
+            f"heartbeat {age:.1f} s" if connected and age < 100 else "", None, badge=True)
+
+        armed = bool(_g(t, "armed", False))
+        mode = _g(t, "flight_mode", "") or "--"
+        self.cells["mode"].set_content(
+            mode, None if connected else DIM,
+            "ARMED" if armed else "DISARMED", OK if armed else BAD)
+
+        secs = int(_g(t, "flight_time_sec", 0.0))
+        self.cells["time"].set_content(
+            f"{secs // 60:02d}:{secs % 60:02d}", None if connected else DIM)
+
+
+# ─── System cards ───────────────────────────────────────────────────
+
+class SystemCard(QFrame):
+    """One system's values in a single card: Power, Attitude, Position, Motors...
+
+    The header carries a health light that summarises the cells inside it: grey
+    when nothing needs attention (the normal state - grey-first, so the light is
+    only worth looking at when it is not grey), amber for caution, red for fault.
+    """
+
+    INNER_COLUMNS = 2
+
+    def __init__(self, category: str, parent=None):
+        super().__init__(parent)
+        self.category = category
+        self.setProperty("class", "cardFrame")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.tiles: List[ValueTile] = []
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(px(12), px(8), px(12), px(10))
+        lay.setSpacing(px(6))
+
+        head = QHBoxLayout()
+        head.setSpacing(px(8))
+        self.lbl_title = QLabel(category.upper(), self)
+        self.lbl_title.setObjectName("cardGroupTitle")
+        head.addWidget(self.lbl_title)
+        head.addStretch(1)
+        self.led = QLabel(self)
+        self.led.setFixedSize(px(9), px(9))
+        head.addWidget(self.led, 0, Qt.AlignVCenter)
+        lay.addLayout(head)
+
+        rule = QFrame(self)
+        rule.setObjectName("hDivider")
+        rule.setFixedHeight(1)
+        lay.addWidget(rule)
+
+        self._grid = QGridLayout()
+        self._grid.setHorizontalSpacing(px(16))
+        self._grid.setVerticalSpacing(px(8))
+        lay.addLayout(self._grid)
+
+        self._health = -1
+        self.refresh_health()
+
+    def set_tiles(self, tiles: List[ValueTile]) -> None:
+        self.tiles = list(tiles)
+        cols = self.INNER_COLUMNS if len(tiles) > 1 else 1
+        for i, tile in enumerate(tiles):
+            self._grid.addWidget(tile, i // cols, i % cols)
+        for c in range(cols):
+            self._grid.setColumnStretch(c, 1)
+
+    @property
+    def health(self) -> int:
+        return max((t.severity for t in self.tiles), default=0)
+
+    def refresh_health(self) -> None:
+        h = self.health
+        if h == self._health:
+            return
+        self._health = h
+        colour = {2: BAD, 1: WARN}.get(h, _LED_IDLE)
+        self.led.setStyleSheet(f"background: {colour}; border-radius: {px(4)}px;")
+        worst = [t._caption for t in self.tiles if t.severity == h and h > 0]
+        self.led.setToolTip(
+            {2: "Fault: ", 1: "Caution: "}.get(h, "") + ", ".join(worst)
+            if h else "Nothing needs attention")
+
 
 
 # ─── Picker ─────────────────────────────────────────────────────────
@@ -560,9 +881,26 @@ class ValuePickerDialog(QDialog):
 # ─── The grid ───────────────────────────────────────────────────────
 
 class ValueGridWidget(QWidget):
-    """A grid of telemetry tiles the operator chooses, orders and sizes."""
+    """The Diagnostics workspace: a glance strip, then one card per system.
 
-    layout_changed = pyqtSignal(list, int, float)   # keys, columns, font_scale
+    Structure, top to bottom:
+      * a one-line heading and a single "Layout" menu (it used to be five
+        controls at the same level as the title),
+      * the PrimaryStrip - six readouts readable in one look,
+      * system cards (Power, Attitude, Position, ...) packed into as many columns
+        as the width allows, each holding the operator's chosen values for that
+        system.
+
+    The operator still chooses, orders and sizes the values; the registry, the
+    persisted layout and the signal are unchanged. "Columns" is now a MAXIMUM:
+    the grid uses fewer when the window cannot fit that many without clipping,
+    which is what used to push the third column off-screen at the smallest size.
+    """
+
+    layout_changed = pyqtSignal(list, int, float)   # keys, max columns, font_scale
+
+    MIN_CARD_PX = 290
+    GAP_PX = 12
 
     def __init__(self, fields: Optional[Sequence[str]] = None, columns: int = 3,
                  font_scale: float = 1.0, parent=None):
@@ -571,22 +909,36 @@ class ValueGridWidget(QWidget):
         self._columns = max(1, min(8, int(columns)))
         self._font_scale = float(font_scale)
         self._tiles: Dict[str, ValueTile] = {}
+        self._cards: List[SystemCard] = []
+        self._active_cols = 0
         self._editing = False
+        self._size_options = [("Small", 0.85), ("Normal", 1.0),
+                              ("Large", 1.25), ("Huge", 1.6)]
 
         root = QVBoxLayout(self)
         root.setContentsMargins(px(16), px(12), px(16), px(12))
         root.setSpacing(px(10))
         root.addLayout(self._build_header())
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        self._holder = QWidget()
-        self._grid = QGridLayout(self._holder)
-        self._grid.setHorizontalSpacing(px(10))
-        self._grid.setVerticalSpacing(px(10))
-        scroll.setWidget(self._holder)
-        root.addWidget(scroll, 1)
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        holder = QWidget()
+        hv = QVBoxLayout(holder)
+        hv.setContentsMargins(0, 0, px(4), 0)
+        hv.setSpacing(px(self.GAP_PX))
+        self.strip = PrimaryStrip(holder)
+        hv.addWidget(self.strip)
+        self._cards_host = QWidget(holder)
+        self._cards_layout = QHBoxLayout(self._cards_host)
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
+        self._cards_layout.setSpacing(px(self.GAP_PX))
+        hv.addWidget(self._cards_host)
+        hv.addStretch(1)
+        self._holder = holder
+        self._scroll.setWidget(holder)
+        root.addWidget(self._scroll, 1)
 
         self._rebuild()
 
@@ -606,8 +958,7 @@ class ValueGridWidget(QWidget):
         could not survive a restart even if this function tried to make one.
         Falling back is also the forgiving reading - an operator who has cleared
         the entire grid has most likely made a mistake, and gets the default set
-        back rather than a blank workspace with no obvious way out. The "Add
-        values..." button remains the way to build a smaller set deliberately.
+        back rather than a blank workspace with no obvious way out.
         """
         if fields is None:
             return list(DEFAULT_FIELDS)
@@ -619,11 +970,13 @@ class ValueGridWidget(QWidget):
 
     def _build_header(self) -> QHBoxLayout:
         bar = QHBoxLayout()
-        bar.setSpacing(px(8))
+        bar.setSpacing(px(10))
 
         title = QLabel("TELEMETRY VALUES", self)
         title.setObjectName("cardHeading")
-        title.setWordWrap(True)
+        # One line, always: a non-wrapping label can never be laid out narrower
+        # than its text, so the toolbar gives way instead of the heading.
+        title.setWordWrap(False)
         bar.addWidget(title)
 
         self.lbl_hint = QLabel("", self)
@@ -631,107 +984,145 @@ class ValueGridWidget(QWidget):
         bar.addWidget(self.lbl_hint)
         bar.addStretch()
 
-        lbl_cols = QLabel("Columns", self)
-        lbl_cols.setObjectName("fieldSubLabel")
-        bar.addWidget(lbl_cols)
-
-        self.spin_cols = QSpinBox(self)
-        self.spin_cols.setRange(1, 8)
-        self.spin_cols.setValue(self._columns)
-        self.spin_cols.setFixedWidth(px(52))
-        self.spin_cols.valueChanged.connect(self._on_columns_changed)
-        bar.addWidget(self.spin_cols)
-
-        lbl_size = QLabel("Text", self)
-        lbl_size.setObjectName("fieldSubLabel")
-        bar.addWidget(lbl_size)
-
-        self.combo_size = QComboBox(self)
-        self._size_options = [("Small", 0.85), ("Normal", 1.0),
-                              ("Large", 1.25), ("Huge", 1.6)]
-        for label, _ in self._size_options:
-            self.combo_size.addItem(label)
-        nearest = min(range(len(self._size_options)),
-                      key=lambda i: abs(self._size_options[i][1] - self._font_scale))
-        self.combo_size.setCurrentIndex(nearest)
-        self.combo_size.setFixedWidth(px(86))
-        self.combo_size.currentIndexChanged.connect(self._on_font_changed)
-        bar.addWidget(self.combo_size)
-
-        self.btn_add = QPushButton("Add…", self)
-        self.btn_add.setToolTip("Choose which telemetry values this grid shows")
-        self.btn_add.clicked.connect(self._open_picker)
-        bar.addWidget(self.btn_add)
-
-        self.btn_reset = QPushButton("Reset", self)
-        self.btn_reset.setToolTip("Restore the default set of telemetry values")
-        self.btn_reset.clicked.connect(self._reset_layout)
-        bar.addWidget(self.btn_reset)
-
-        self.btn_edit = QPushButton("Edit", self)
-        self.btn_edit.setCheckable(True)
-        self.btn_edit.setToolTip(
-            "Show the per-tile remove and reorder controls")
-        self.btn_edit.toggled.connect(self._set_edit_mode)
-        bar.addWidget(self.btn_edit)
+        # Everything that used to be five controls on this row lives in one menu.
+        self.btn_layout = QToolButton(self)
+        self.btn_layout.setObjectName("layoutBtn")
+        self.btn_layout.setText("Layout  ▾")
+        self.btn_layout.setToolTip("Columns, text size, which values to show, edit mode")
+        self.btn_layout.setPopupMode(QToolButton.InstantPopup)
+        self.btn_layout.setCursor(Qt.PointingHandCursor)
+        self.btn_layout.setMenu(self._build_menu())
+        bar.addWidget(self.btn_layout)
 
         self._set_hint()
         return bar
 
+    def _build_menu(self) -> QMenu:
+        menu = QMenu(self)
+
+        cols = menu.addMenu("Max columns")
+        self._col_group = QActionGroup(self)
+        self._col_actions: Dict[int, QAction] = {}
+        for n in range(1, 7):
+            a = cols.addAction(f"{n}" + ("  (default)" if n == 3 else ""))
+            a.setCheckable(True)
+            a.setChecked(n == self._columns)
+            a.triggered.connect(lambda _c, n=n: self._on_columns_changed(n))
+            self._col_group.addAction(a)
+            self._col_actions[n] = a
+
+        sizes = menu.addMenu("Text size")
+        self._size_group = QActionGroup(self)
+        self._size_actions: List[QAction] = []
+        nearest = min(range(len(self._size_options)),
+                      key=lambda i: abs(self._size_options[i][1] - self._font_scale))
+        for i, (label, _) in enumerate(self._size_options):
+            a = sizes.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(i == nearest)
+            a.triggered.connect(lambda _c, i=i: self._on_font_changed(i))
+            self._size_group.addAction(a)
+            self._size_actions.append(a)
+
+        menu.addSeparator()
+        self.act_add = menu.addAction("Add or remove values…")
+        self.act_add.triggered.connect(self._open_picker)
+        self.act_edit = menu.addAction("Edit tiles (reorder / remove)")
+        self.act_edit.setCheckable(True)
+        self.act_edit.toggled.connect(self._set_edit_mode)
+        menu.addSeparator()
+        self.act_reset = menu.addAction("Reset to default")
+        self.act_reset.triggered.connect(self._reset_layout)
+        return menu
+
     # ── layout ──────────────────────────────────────────────────────
 
     def _rebuild(self) -> None:
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+        """Recreate the tiles and the cards from the selected keys."""
+        for card in self._cards:
+            card.setParent(None)
+            card.deleteLater()
+        self._cards.clear()
         self._tiles.clear()
 
-        # Grouped by category (Power, Position, Motors, ...) rather than one
-        # undifferentiated wall of identical cards in whatever order they
-        # were added - each category gets its own header row and always
-        # starts on a fresh grid row, so two categories never share a row.
         by_category: Dict[str, List[str]] = {}
         for key in self._keys:
             by_category.setdefault(category_for(key), []).append(key)
 
-        row = 0
         for category in category_order():
             cat_keys = by_category.get(category)
             if not cat_keys:
                 continue
-            header = QLabel(category.upper(), self._holder)
-            header.setObjectName("diagSectionHeader")
-            self._grid.addWidget(header, row, 0, 1, self._columns)
-            row += 1
-
-            col = 0
+            card = SystemCard(category, self._cards_host)
+            tiles = []
             for key in cat_keys:
-                tile = ValueTile(key, self._font_scale, self._holder)
+                tile = ValueTile(key, self._font_scale, card)
                 tile.remove_requested.connect(self._remove_key)
                 tile.move_requested.connect(self._move_key)
                 tile.set_edit_mode(self._editing)
-                self._grid.addWidget(tile, row, col)
                 self._tiles[key] = tile
-                col += 1
-                if col >= self._columns:
-                    col = 0
-                    row += 1
-            if col != 0:
-                row += 1
+                tiles.append(tile)
+            card.set_tiles(tiles)
+            self._cards.append(card)
 
-        for c in range(self._columns):
-            self._grid.setColumnStretch(c, 1)
-        # Collapse the trailing space so tiles stay at their natural height
-        # instead of stretching to fill a tall window.
-        self._grid.setRowStretch(self._grid.rowCount(), 1)
+        self._active_cols = 0           # force a fresh placement
+        self._place_cards()
         self._set_hint()
+
+    def _effective_columns(self) -> int:
+        """How many card columns fit: never more than the operator's maximum,
+        never more than there are cards, and never so many that a card would be
+        squeezed under its minimum width (which is what clipped the third column
+        at the smallest window)."""
+        avail = max(1, self._scroll.viewport().width())
+        gap = px(self.GAP_PX)
+        min_w = px(int(self.MIN_CARD_PX * max(1.0, self._font_scale ** 0.5)))
+        fit = max(1, (avail + gap) // (min_w + gap))
+        return max(1, min(self._columns, fit, max(1, len(self._cards))))
+
+    def _place_cards(self) -> None:
+        """Pack cards into columns, each card going to the currently shortest
+        column (masonry), so mixed-height cards leave no ragged holes."""
+        cols = self._effective_columns()
+        if cols == self._active_cols and self._cards_layout.count():
+            return
+        self._active_cols = cols
+
+        while self._cards_layout.count():
+            item = self._cards_layout.takeAt(0)
+            lay = item.layout()
+            if lay is not None:
+                while lay.count():
+                    lay.takeAt(0)           # widgets stay parented to the host
+                lay.deleteLater()
+
+        columns = [QVBoxLayout() for _ in range(cols)]
+        heights = [0] * cols
+        for col in columns:
+            col.setSpacing(px(self.GAP_PX))
+            col.setContentsMargins(0, 0, 0, 0)
+        for card in self._cards:
+            i = min(range(cols), key=heights.__getitem__)
+            columns[i].addWidget(card)
+            card.show()
+            heights[i] += card.sizeHint().height() + px(self.GAP_PX)
+        for col in columns:
+            col.addStretch(1)
+            self._cards_layout.addLayout(col, 1)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.strip.reflow(self._scroll.viewport().width())
+        self._place_cards()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.strip.reflow(self._scroll.viewport().width())
+        self._place_cards()
 
     def _set_hint(self) -> None:
         if not self._keys:
-            self.lbl_hint.setText(
-                "No values selected — use “Add values…”")
+            self.lbl_hint.setText("No values selected")
         else:
             self.lbl_hint.setText(f"{len(self._keys)} values")
 
@@ -764,7 +1155,9 @@ class ValueGridWidget(QWidget):
 
     def _on_columns_changed(self, value: int) -> None:
         self._columns = max(1, min(8, int(value)))
-        self._rebuild()
+        self._sync_menu()
+        self._active_cols = 0
+        self._place_cards()
         self._emit_changed()
 
     def _on_font_changed(self, index: int) -> None:
@@ -773,7 +1166,18 @@ class ValueGridWidget(QWidget):
         self._font_scale = self._size_options[index][1]
         for tile in self._tiles.values():
             tile.set_font_scale(self._font_scale)
+        self._sync_menu()
+        self._active_cols = 0
+        self._place_cards()
         self._emit_changed()
+
+    def _sync_menu(self) -> None:
+        a = self._col_actions.get(self._columns)
+        if a is not None:
+            a.setChecked(True)
+        nearest = min(range(len(self._size_options)),
+                      key=lambda i: abs(self._size_options[i][1] - self._font_scale))
+        self._size_actions[nearest].setChecked(True)
 
     def _open_picker(self) -> None:
         dlg = ValuePickerDialog(self._keys, self)
@@ -793,19 +1197,14 @@ class ValueGridWidget(QWidget):
         self._keys = list(DEFAULT_FIELDS)
         self._columns = 3
         self._font_scale = 1.0
-        self.spin_cols.blockSignals(True)
-        self.spin_cols.setValue(self._columns)
-        self.spin_cols.blockSignals(False)
-        self.combo_size.blockSignals(True)
-        self.combo_size.setCurrentIndex(1)
-        self.combo_size.blockSignals(False)
+        self._sync_menu()
         self._rebuild()
         self._emit_changed()
 
     # ── live values ─────────────────────────────────────────────────
 
     def update_values(self, snapshot, extras: Optional[Dict[str, str]] = None) -> None:
-        """Refresh every visible tile. Called from the GUI tick.
+        """Refresh the glance strip and every visible tile. Called from the GUI tick.
 
         Only the tiles actually on the grid are formatted: a field the operator
         removed costs nothing per frame, which is the other half of why this is
@@ -827,6 +1226,12 @@ class ValueGridWidget(QWidget):
                 else:
                     text, colour = (value if value is not None else "--"), None
             tile.set_value(text, colour)
+        for card in self._cards:
+            card.refresh_health()
+        try:
+            self.strip.update_from(snapshot)
+        except Exception:
+            pass      # a bad snapshot field must not take the whole tab down
 
     # ── state ───────────────────────────────────────────────────────
 
@@ -835,6 +1240,10 @@ class ValueGridWidget(QWidget):
 
     def columns(self) -> int:
         return self._columns
+
+    def active_columns(self) -> int:
+        """Columns actually in use right now (<= columns())."""
+        return self._active_cols
 
     def font_scale(self) -> float:
         return self._font_scale

@@ -3,7 +3,7 @@
 **Project**: Drone-1.5 / Flop Autonomous Indoor Drone System  
 **Hardware Stack**: Radxa Dragon Q6A SBC, Auterion Pixhawk 6X FMU, Intel RealSense D435i Depth Camera  
 **Software Stack**: ROS 2 Jazzy, RTAB-Map SLAM, PX4 Autopilot, MAVLink 2.0 (`mavlink-routerd`), Python 3 (early Tkinter prototype, superseded by the current PyQt5 `Drone-GCS` app — see [`guide.md`](guide.md))  
-**Last Updated**: 2026-09-29  
+**Last Updated**: 2026-10-01  
 
 This is the project's single chronological engineering log — every real problem hit on hardware, what caused it, and exactly what was changed. For installing/running the pipeline, see [`setup.md`](setup.md); for how to use the GCS application itself, see [`guide.md`](guide.md).
 
@@ -402,6 +402,16 @@ Everything from here on tracks the PyQt5 `Drone-GCS` rewrite (superseding the Tk
 | — | [GCS Internal Consistency Audit](#milestone-gcs-internal-consistency-audit-clearance-radius-occupancy-threshold-arm-state-sync) |
 | — | [Offscreen Layout/Clipping Audit Across the Whole GCS](#milestone-offscreen-layoutclipping-audit-across-the-whole-gcs) |
 | — | [Read-Only Parameters Tab & SLAM Drone Icon Redesign](#milestone-read-only-parameters-tab--slam-drone-icon-redesign) |
+| — | [GCS Architecture Split & Infrastructure (2026-10-01)](#milestone-gcs-architecture-split--infrastructure-2026-10-01) |
+| — | [Video Health & Standing Alarm Card (2026-10-01)](#milestone-video-health--standing-alarm-card-2026-10-01) |
+| — | [Camera Thumbnail in the Navigation Rail (2026-10-01)](#milestone-camera-thumbnail-in-the-navigation-rail-2026-10-01) |
+| — | [Motor Actuators Tab Rework — Vehicle-Range-Aware Gauges, Realistic Frame, Stale-Data Honesty (2026-10-01)](#milestone-motor-actuators-tab-rework--vehicle-range-aware-gauges-realistic-frame-stale-data-honesty-2026-10-01) |
+| — | [Diagnostics Tab Redesign & the Armed/Disarmed Colour Convention (2026-10-01)](#milestone-diagnostics-tab-redesign--the-armeddisarmed-colour-convention-2026-10-01) |
+| — | [Short-Window Layout Robustness (2026-10-01)](#milestone-short-window-layout-robustness-2026-10-01) |
+| — | [Bundled Heading Fonts (2026-10-01)](#milestone-bundled-heading-fonts-2026-10-01) |
+| — | [Servo + EMERGENCY KILL on One Row (2026-10-01)](#milestone-servo--emergency-kill-on-one-row-2026-10-01) |
+| — | [Link Range Test — Walk-Away Packet-Loss Measurement (2026-10-01)](#milestone-link-range-test--walk-away-packet-loss-measurement-2026-10-01) |
+| — | [Deployment & Network State, 2026-10-01](#milestone-deployment--network-state-2026-10-01) |
 
 ### Milestone 11: Next-Generation Aviation Ground Control Station (`Drone-GCS` & `Radxa-Monitor`)
 
@@ -886,6 +896,106 @@ Two smaller additions, neither a bug fix:
 
 ![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](docs/images/slam_drone_icon_redesign.png)
 
+### Milestone: GCS Architecture Split & Infrastructure (2026-10-01)
+
+`drone_gcs.py` had grown to ~2,700 lines in one class and `slam_map_widget.py` to ~2,800 (drawing and input mixed). Every feature touched the same two files.
+
+- **Main window**: the flight-command and mission/path methods moved, unchanged, into `controllers/flight_commands.py` and `controllers/mission_control.py` as mixins (and later `controllers/alarm_control.py`). `drone_gcs.py` dropped to ~1,900 lines. They are **mixins, not separate controller objects** — the methods still read window state through `self` — so behaviour is identical; real controller objects would be a larger change that needs the app exercised on a real display.
+- **Map widget**: every draw call moved to `ui/map_canvas_render.py` (`CanvasRenderMixin`); `SLAMMapCanvas` keeps input and tool state. Constants the tests import are re-exported from `slam_map_widget.py`.
+- **Settings**: a schema version (`_schema`) and a one-step-at-a-time `migrate_payload()`; a file from a *newer* build is passed through untouched so rolling back never discards the operator's file.
+- **Logging**: `core/log_bundle.py` + an **Export Bundle** button on the Logs tab (flight history, settings, `*.log`/`*.tlog`, manifest in one zip).
+- **Threading**: `core/ui_stall.py` watches the 30 Hz UI tick (a gap over 250 ms logs one console warning per 5 s) and `docs/threading.md` documents every thread, its signals and the rules (workers never touch widgets; tokens not flags; snapshots are not mutated after emit).
+- **Verification**: 348 → 360 tests, lint clean. ⚠️ Offscreen only.
+
+### Milestone: Video Health & Standing Alarm Card (2026-10-01)
+
+- **Video health** (`core/video_health.py`, shown under the FPV picture): fps, jitter, freeze detection (`LIVE` / `DEGRADED` / `FROZEN` / `NO SIGNAL`). The capture thread now emits a per-frame `(capture time, is_real)` first, so the "camera not detected" placeholder card never counts as live video. **"Pipeline" latency is capture→paint inside the GCS only** — it excludes camera, encoder and network and is a floor/early warning, not glass-to-glass; the tooltip says so.
+- **Alarm card** (`core/alarms.py`, `ui/alarm_banner.py`, `controllers/alarm_control.py`): one entry per active fault, prioritised, hidden when empty. Level-triggered conditions (link lost after the first connection, battery low/critical, vision lost and position lost *while airborne*, video frozen). `raise_alarm()` returns True only for a new or escalated alarm; acknowledging silences the card but never clears the alarm; an acknowledged alarm that escalates un-acknowledges.
+- **Bug found by looking at a screenshot**: the card showed "no frame for 2.4 s" frozen at 2.4 s. The seconds were baked into the alarm *text* at raise time and the video monitor only signals on a state change. Fixed by making the title fixed and drawing a separate running timer from `raised_at` (a 1 s QTimer that runs only while the card is visible).
+- **Second thing found while testing**: the window's 30 Hz tick clears any alarm whose condition is not currently true, so an alarm raised by hand in a test vanished instantly — the layout test now drives alarms through real conditions.
+- **Redesign** (card, severity bar, hint line, `+N` pill, Acknowledge): colour only for unacknowledged CRITICAL (red) / WARN (amber).
+- **Verification**: tests for the manager, the monitor, the card and the timer; 21 → 26 tests for this area. ⚠️ Offscreen only; no real frozen camera has been used to trigger it.
+
+### Milestone: Camera Thumbnail in the Navigation Rail (2026-10-01)
+
+The Cockpit, FPV and SLAM tabs show the camera; Motors, Diagnostics, Terminal, Logs, Configuration and Parameters did not, so the drone's view was out of sight exactly when checking or changing things. A 16:9 thumbnail (`ui/mini_feed.py`) now sits in the rail's empty space on those six tabs.
+
+- It is a passive subscriber to the frames the one capture thread already decoded: dropped before any conversion while hidden, thinned to ~10 fps while shown. Click → the existing fullscreen view. Opening one of those tabs starts the feed, as the camera tabs already do.
+- **It never shows a dead frame as live**: when the shared video health says FROZEN / NO SIGNAL / IDLE the image is cleared to `NO VIDEO` and new frames are ignored.
+- It only appears when the rail has room (decided from the layout's own minimum height, which does not change when the thumbnail toggles, so it cannot flap).
+- **Verification**: 8 tests. ⚠️ Rendered offscreen with a synthetic frame only.
+
+### Milestone: Motor Actuators Tab Rework — Vehicle-Range-Aware Gauges, Realistic Frame, Stale-Data Honesty (2026-10-01)
+
+**What the audit found before changing anything** (the wiring from the vehicle to the screen was right — `servo1..4` → M1..M4, FR/RL/FL/RR as PX4 maps them — but):
+
+| Problem | Effect |
+|---|---|
+| Three different threshold sets (diagram/bars vs the status line vs the Diagnostics tiles) | A motor at 1100 µs was green on the diagram but "ALL MOTORS IDLE" in the text |
+| Fixed 1000–2000 µs scale | On this airframe (`PWM_MAIN_MIN/MAX` = 1100/1900) full throttle read ~80 % and "idle" read 10 % |
+| `SERVO_OUTPUT_RAW` (5 Hz) staleness invisible | If the stream died the bars stayed at the last value indefinitely |
+| Bench-test mirror indistinguishable from live data | A commanded value and a real one looked identical |
+
+**What was built**
+- `core/motor_range.py`: the vehicle's `PWM_MAIN_{MIN,MAX,DIS,FUNC}n` → per-motor 0–100 %, state (off / idle / nominal / high / saturated at 5 / 75 / 90 % of *that* range) and the output→motor mapping from `FUNCn` (`ACTUATOR_TEST` addresses by function; a half-known or non-permutation mapping falls back to the identity rather than shuffling the diagram). One shared model feeds the Motors tab and the Diagnostics tiles. Until the parameters arrive the documented 1000–2000 default is used and the footer says so.
+- **Parameter plumbing**: the worker reads the 16 parameters with single `PARAM_REQUEST_READ`s and emits `motor_param_received`. A lone answer is **swallowed before the Parameters tab** — otherwise 16 rows would make it look like it "has data" and it would skip its first full fetch. During a real bulk list the same values pass through as normal.
+- **Freshness**: `TelemetrySnapshot` gained `last_motor_time` / `motor_age` / `check_motor_staleness()`; the tab greys out and stops the propellers after ~2 s (`MOTOR DATA STALE` / `NO MOTOR DATA`). A bench test shows `COMMANDED` until a live sample newer than the command confirms it (`COMMANDED · not yet confirmed` when the vehicle isn't reporting it — see Known Issue 17).
+- **Drone diagram** redrawn top-down: tapered arms, body, camera pod, white front / red rear LEDs (the heading is the drawing, so the "NOSE" text and its reserved space are gone), motor hubs, propellers spinning proportionally (CW/CCW opposite, stopped when stale), rotation arrows.
+- **Two layout bugs found by rendering**: the rotation arrow sat on the diagonal outer side where the caption goes (collision), and at narrow widths the left and right captions printed across each other. Arrows moved to the *horizontal* outer side, captions narrowed to fit between rotors, and the layout budget now includes the arrow head. Tests assert captions never touch an arrow, a disc, or each other across seven pane shapes × three scales.
+- **Bench Motor Test redesign**: interlock checklist, visible 60 s countdown, 2×2 selector laid out like the aircraft, and a **new throttle slider** (`ThrottleSlider`: thick track, 26 px handle, press-anywhere-to-jump, drag, wheel, −/+ buttons, 25 % ceiling tick in amber, label `8 / 25 % · 1080 µs` through the vehicle's own range). Interlock logic untouched.
+- Making the new panel fit the smallest window needed several trims (dropped the divider rule and a separate readout row, shorter buttons, tighter page margins); the rest is covered by the short-window milestone below.
+- **Verification**: 42 + 11 + 5 new tests (response per motor, low→idle→off, sweep monotonic, mapping swap, staleness, commanded vs live, parameter routing, slider behaviour, caption/arrow declutter). ⚠️ The vehicle's real `PWM_MAIN_*` replies, a real `SERVO_OUTPUT_RAW` stream, and whether PX4 reports a test-driven output at all (Known Issue 17) have **not** been observed.
+
+### Milestone: Diagnostics Tab Redesign & the Armed/Disarmed Colour Convention (2026-10-01)
+
+Researched first (ISA-101 high-performance HMI — grey base, colour only for abnormal; Boeing/Airbus alert colours; automotive instrument-cluster glance rules; QGroundControl/Mission Planner layouts), then applied.
+
+- **Found**: every tile equal weight with the label as big as the value; monospace labels; position values red while *unreported* (stale-and-never-seen read as a fault); orphan cells; the third column clipped with a horizontal scrollbar at 1220×700 @ 1.35×; a five-control toolbar next to a heading that wrapped onto two lines.
+- **Built** (`ui/value_grid.py`): one-line heading + one **Layout ▾** menu; a **glance strip** (altitude, ground speed, battery, link, mode/armed, flight time); **system cards** packed as masonry with a health light each; caption-over-value cells with a severity bar only when abnormal; **grey-first colour** (healthy battery/motors plain white; position grey until a feed that was flowing stops); `placeholders` ("--", "n/r") drawn as muted text not pills. "Columns" became a *maximum* (`MIN_CARD_PX`), so nothing clips and saved layouts keep working. The field registry, persisted keys and `layout_changed` signal are unchanged.
+- **Armed green / disarmed red** everywhere (the header and navigation footer already were; the Diagnostics tile and strip were the opposite). Implemented as a **state, not a severity**: `FieldSpec.signals=False` keeps the resting "disarmed" red from lighting a card's health light or a side bar. This reverses the old note in the module header ("armed is red, not green") — by the operator's decision.
+- **Verification**: 33 new tests plus two updated ones (healthy values are now white, not green). ⚠️ Rendered offscreen with simulated telemetry only.
+
+### Milestone: Short-Window Layout Robustness (2026-10-01)
+
+Triggered by one screenshot: with an alarm showing at 1220×700 @ 1.35×, the navigation footer (SPD/ALT/MODE/ARMED) overlapped.
+
+- **Measured, not guessed**: the rail needs 547 px at that scale but gets 526 even with *no* alarm (short by 21), 462 with one (short by 85). The layout tests never showed the alarm card, so they never saw it.
+- **Rail**: nav rows switch to a compact density when shorter than their normal need (hysteresis from the remembered normal need, so no flapping) and return when there is room.
+- **Motors page**: sheds detail in order — footnote → checklist becomes a one-line reason, the 2×2 selector folds into one row — and the armed warning shortens to one line in compact mode.
+- **Second bug found by rendering** (the tests missed it): the page fitted itself only on *resize*, but arming adds a warning line without any resize, so the overlap returned. It now re-checks on every layout request.
+- **Third bug in my own fix**: re-checking from the fullest level on every request toggled widgets back and forth (each toggle posts another request). Replaced with a converging rule — on a layout change the level only goes *up*; going back *down* is tried only on a real resize and undone at once if it doesn't fit. A test asserts the fit settles and stops toggling.
+- **Tests**: the entire layout suite now runs a second time with the alarm card showing and the vehicle armed (the tallest state), a direct "rail is never shorter than it needs" invariant, and density/shedding tests; confirmed that switching the fix off makes the new test fail.
+- Test hygiene lesson: shown top-level widgets must be closed and deleted in `tearDown`, or garbage collection destroys them mid-paint ("paint device that is being painted") and aborts the whole run.
+
+### Milestone: Bundled Heading Fonts (2026-10-01)
+
+`DRONE-GCS` in **Red Hat Display**, every heading in **Ubuntu**; body text, numbers, buttons and the sidebar tab names unchanged.
+
+- **Why bundled**: Red Hat Display is installed nowhere by default — a stylesheet that merely names it silently renders Noto Sans (the first check found exactly that). The static TTFs (Red Hat Display Regular/Bold/ExtraBold/Black, Ubuntu Regular/Medium/Bold) live in `assets/fonts/` with their licences (SIL OFL, Ubuntu Font Licence) and are registered by `ui/fonts.py` from `build_stylesheet()` — so the GCS, the Radxa monitor and the tests all get them, and a missing file falls back to the old font.
+- Two stylesheet tokens (`font_brand`, `font_heading`); the hand-styled page titles moved onto one shared `pageTitle` style. Ubuntu is wider than the old Lato, which clipped the FPV toolbar at the smallest window/largest scale (URL box minimum shrunk, page titles set at 11 px).
+- **Verification**: tests assert the files exist, both families register, and — to catch the silent-fallback trap — that real widgets in the assembled window *resolve* to the intended family. ⚠️ Offscreen only. Side effect: the Radxa monitor's own title also takes the brand font.
+
+### Milestone: Servo + EMERGENCY KILL on One Row (2026-10-01)
+
+The ESP32 servo card cost a whole row of cockpit height. It is now one compact button + status dot, in the **same row as EMERGENCY KILL** with a vertical divider (kill 60 % of the width, solid red; servo neutral grey; 16 px either side of the divider). The IP and error text moved into the tooltip; the button text carries the live state (`SERVO 0° → 90°`, `SERVO OFFLINE`). **Deliberate trade-off**: this puts a payload control beside the kill switch; the separation (width ratio, colour, gap) is the mitigation, and a layout test asserts order, same row, ≥12 px gaps and kill wider at every supported size/scale. ⚠️ The servo itself and the HTTP link to the ESP32 were not exercised.
+
+### Milestone: Link Range Test — Walk-Away Packet-Loss Measurement (2026-10-01)
+
+Goal: *how far can the laptop be carried from the Radxa/router before the live camera feed loses a packet or stalls?* Reference: [`docs/link_range_test.md`](docs/link_range_test.md).
+
+- **Tool**: `scripts/diagnostics/link_range_test.py` (engine, terminal flow, entry point), `link_range_gui.py` (window: setup → walking → result; opens when run with no arguments and asks for the Radxa IP), `link_probe_server.py` (Radxa UDP echo helper, started over SSH to `/tmp`). Standard library only.
+- **Measures**: laptop Wi-Fi signal/speed/retries (`iw`), ping loss + RTT (small and 1200 B), the real MJPEG stream (fps, Mbit/s, stalls, reconnects, by counting JPEG markers), UDP loss up/down, and the Radxa's own Wi-Fi as a control. Distance comes from the operator's marks (no GPS indoors); a path-loss curve is fitted as a rough cross-check.
+- **Headline = `loss_free_to`**: the furthest distance with *nothing* lost and no stall at every mark up to it (strict zero by default). A hold with no loss data is "unknown", never "loss-free".
+- **Why loss is counted from sequence numbers**: duration ÷ interval cannot give a strict 0 % — a reply in flight when a hold ends looks like loss. Ping uses missing sequence numbers inside the received span (+ a dead stretch > 1 s at either end); UDP echoes carry their own sequence number and the helper's running count, giving *exact* up/down loss with nothing in flight at the edges.
+- **Bugs found while building**: `Store.add(kind, …)` collided with an event field named `kind`, so the video thread died on its first line without a trace (renamed `event`); `valid_host("1.2.3")` accepted a malformed IP as a hostname; the Wi-Fi card's retry counter resets when it roams, which made retries/s negative (counter deltas now survive a reset); a leaked ping process/pipe on stop; and — in the window — Python's garbage collector, running inside a sampler thread, deleted Tk objects off the main thread and aborted the process ("Tcl_AsyncDelete: async handler deleted by the wrong thread"; guarded by never running Tk's variable finaliser and keeping each window referenced, with worker threads holding no Tk object).
+- **Verification**: 91 + 29 tests. Real Wi-Fi card readings verified on this laptop; UDP/video paths on loopback against stand-ins for the camera and the helper; the window on a private Xvfb display. ⚠️ **Never run against the real Radxa or on a real walk** — it was powered off — and the over-SSH helper start is untested.
+
+### Milestone: Deployment & Network State, 2026-10-01
+
+- **GitHub**: `Arisudan/Drone-1.5` — folders `Flop/` and `Success Final/` — commit `911efe3`; `drone-beep/DRONE_SRC` — folder `DR_1.5/` — commit `77138bf`. Pushed over **SSH** (HTTPS has no stored credentials here) from temporary clones; the local `Flop` folder itself still has no git remote and is uncommitted. **Everything done after that push (servo+kill row, the mini feed, the Motors rework, fonts, the Diagnostics redesign, the colour/short-window fixes, the range test and these docs) is not on GitHub.**
+- **Radxa**: after `ssh-copy-id`, 96 files (63 new, 33 modified) were `rsync`ed to `radxa@172.16.100.182:/home/radxa/Flop` (nothing newer on the Radxa was overwritten, nothing deleted, caches/logs/`build`/`install`/`log` excluded, `mavlink-routerd` untouched, nothing restarted or rebuilt). Radxa-only leftovers (`gotalldone.md`, `GetItCorrect.md`, `project_flow.html`, old `scripts/diagnostics/{build,install,log}`) remain. The range test, its helper and these docs were written *after* that copy and are not on the Radxa.
+- **Why the GCS could not connect**: the laptop was on Wi-Fi `HTIC_INCUBATION` (`172.16.100.52`), not `HTIC_RND`, and the Radxa did not answer. The Radxa has been seen at `172.16.101.84` (the original docs / preset value), `172.16.101.89` and `172.16.100.182`, and was powered off afterwards. **The `HTIC_RND` network preset, the settings defaults (connection host, camera URL, map-bridge host), the video / MAVLink / map-listener defaults and the saved `~/.drone_gcs/settings.json` were all changed to `172.16.101.89` on 2026-10-01** (operator-reported current address). The standalone diagnostics tools (`duplex_check.py`, `c2_validate.py`, `live_status.py`, `test_udp_drone_control.py`, `drone_gcs_gui.py`, `fix_accel2_bias.py`) keep their own `172.16.101.84` defaults and take `--host` / `--port`.
+
 ---
 
 ## ROS 2 Pipeline & Flight-REPL Engineering Log
@@ -945,6 +1055,14 @@ This section consolidates the pipeline/flight-controller-side debugging history 
 | 16 | The ROS2 TCP Map Bridge disconnect announcement hasn't been watched happen on a real bridge drop — the state machine is unit-tested in isolation only. | ROS2 TCP Map Bridge Disconnect Announcement |
 | 17 | Whether PX4 reports `SERVO_OUTPUT_RAW` at all for an `ACTUATOR_TEST`-driven output, or just too slowly to notice, is unconfirmed — the bars no longer depend on the answer. | Bench Motor-Test Telemetry Reflection |
 | 18 | The Parameters tab is read-only — no `PARAM_SET`, no write-then-verify, no guided-confirm gate for a reboot-required parameter. Also untested against a real vehicle's full parameter set (only a synthetic 250-parameter burst so far). | Read-Only Parameters Tab & SLAM Drone Icon Redesign |
+| 19 | The motor-range parameters (`PWM_MAIN_MIN/MAX/DIS/FUNCn`, outputs 1–4) are read with single `PARAM_REQUEST_READ`s (retried on connect and when the Motors tab opens, since UDP can drop them) and have never been tried against the real vehicle; if they never arrive the default 1000–2000 µs scale is used (and the footer says so). Outputs beyond 4 are not covered (all `SERVO_OUTPUT_RAW` carries here). | Motor Actuators Tab Rework |
+| 20 | The alarm card covers link, battery, vision, position and video only. No map-stalled or UI-stall alarm (their trigger conditions were deliberately not guessed). | Video Health & Standing Alarm Card |
+| 21 | The ESP32 servo is controlled over plain HTTP with no authentication, and nothing prevents it being pressed while the vehicle is armed or airborne. It now also sits beside EMERGENCY KILL (mitigated by size/colour/gap, not by an interlock). | Servo + EMERGENCY KILL on One Row |
+| 22 | MAVLink signing is not enabled; the command channel on a shared Wi-Fi is open to anything that can reach the router's UDP port. | — (noted in the 2026-10-01 GCS analysis) |
+| 23 | The link range test has never been run against the real Radxa or on a real walk (the Radxa was off), and its over-SSH helper start is untested. It needs the laptop on the **same Wi-Fi network** as the Radxa and one-time SSH key access (`ssh-copy-id`). | Link Range Test |
+| 24 | Radxa addressing is unstable between networks (`172.16.101.84` / `172.16.101.89` / `172.16.100.182` seen). The GCS `HTIC_RND` preset and saved settings are now `172.16.101.89` (changed 2026-10-01) and must be changed again if it moves; the standalone diagnostics tools still default to `172.16.101.84`. The GCS cannot connect while the laptop is on a different SSID (it was on `HTIC_INCUBATION`, not `HTIC_RND`). | Deployment & Network State |
+| 25 | Everything from 2026-10-01 after the GitHub push (`911efe3` / `77138bf`) exists only locally; the range test, its helper and the docs are also not on the Radxa. The local `Flop` folder has no git remote. | Deployment & Network State |
+| 26 | The GUI test module needs `tkinter` and `Xvfb` (it runs on its own private display and is skipped without them); the layout tests cover the alarm-showing + armed state but not, e.g., airborne or several simultaneous alarms. | Short-Window Layout Robustness |
 
 ---
 *Report compiled and validated by Antigravity Autonomous Systems Engineering Team.*

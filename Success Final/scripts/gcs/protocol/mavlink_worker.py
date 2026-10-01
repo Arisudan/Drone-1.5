@@ -6,7 +6,7 @@ PURPOSE: Asynchronous QThread MAVLink Protocol Engine & Offboard Setpoint Stream
 
 ARCHITECTURE & CONTEXT:
   * Runs On:       Laptop Ground Station (GCS Networking Thread)
-  * Communicates:  Pixhawk 6X via Radxa mavlink-routerd (tcp:172.16.101.84:5760)
+  * Communicates:  Pixhawk 6X via Radxa mavlink-routerd (tcp:172.16.101.89:5760)
   * Upstream:      GCS UI actions, waypoint commands, and OFFBOARD setpoints
   * Downstream:    Qt GUI Main Thread (via thread-safe PyQt5 Signals)
 
@@ -36,7 +36,7 @@ KEY LOGIC & FAILSAFES:
     or secondary consoles to keep the GCS UI synchronized with fleet operations.
 
 USAGE:
-  worker = MAVLinkWorker(host="172.16.101.84", port=5760, source_system=255)
+  worker = MAVLinkWorker(host="172.16.101.89", port=5760, source_system=255)
   worker.telemetry_updated.connect(self.on_telemetry)
   worker.command_ack_received.connect(self.on_ack)
   worker.start()
@@ -54,6 +54,7 @@ from pymavlink import mavutil
 
 from core.telemetry import TelemetrySnapshot
 from core.param_codec import decode_param_value
+from core.motor_range import PARAM_RE as _MOTOR_PARAM_RE
 
 
 
@@ -63,6 +64,10 @@ ACTUATOR_OUTPUT_FUNCTION_MOTOR1 = 1
 
 class MAVLinkWorker(QThread):
     """Worker thread running continuous MAVLink RX/TX loops."""
+
+    # How long after PARAM_REQUEST_LIST a stream of PARAM_VALUEs is assumed to be
+    # part of it.
+    PARAM_LIST_WINDOW_S = 120.0
 
     # How often to re-report an unchanging fault while it keeps repeating.
     STATUSTEXT_REPEAT_NOTICE_S = 15.0
@@ -78,10 +83,14 @@ class MAVLinkWorker(QThread):
     # Emits (name, decoded_value, param_type, index, total_count) for every
     # PARAM_VALUE - see request_param_list() and core/param_codec.py.
     param_value_received = pyqtSignal(str, object, int, int, int)
+    # (name, value) for the PWM_MAIN_{MIN,MAX,DIS,FUNC}n parameters only - the
+    # motor widget's range model. Emitted for every such PARAM_VALUE, whether it
+    # answers a single read or arrives in a full list.
+    motor_param_received = pyqtSignal(str, float)
 
     def __init__(
         self,
-        host: str = "172.16.101.84",
+        host: str = "172.16.101.89",
         port: int = 14550,
         protocol: str = "udp",
         source_system: int = 255
@@ -127,6 +136,11 @@ class MAVLinkWorker(QThread):
         self._ack_dispatch_token: dict = {}
         self._ack_reported_token: dict = {}
 
+        # Single-parameter reads we asked for (see request_param_read) and the
+        # time until which a bulk PARAM_REQUEST_LIST is considered in flight.
+        self._single_reads: set = set()
+        self._list_active_until: float = 0.0
+
         # STATUSTEXT assembly: msg id -> {chunks: {seq: text}, t: first_seen}
         self._statustext_parts: dict = {}
         # Consecutive-repeat suppression state.
@@ -169,6 +183,30 @@ class MAVLinkWorker(QThread):
         _ack_dispatch_token in __init__ for why this exists."""
         self._ack_dispatch_token[cmd_id] = self._ack_dispatch_token.get(cmd_id, 0) + 1
 
+    def request_param_read(self, name: str) -> bool:
+        """Ask the vehicle for ONE parameter (PARAM_REQUEST_READ, by name)."""
+        if self.master is None:
+            return False
+        try:
+            self.master.mav.param_request_read_send(
+                self.target_system, self.target_component,
+                name.encode("ascii"), -1)
+            self.tx_count += 1
+            self._single_reads.add(name)
+            return True
+        except Exception:
+            return False
+
+    def request_motor_range_params(self, names=None) -> bool:
+        """Read the parameters the motor range model needs (all of them, or just
+        the ``names`` still missing). Individual reads rather than a full list so
+        the Parameters tab's own bulk fetch is neither triggered nor disturbed."""
+        from core.motor_range import param_names
+        ok = True
+        for n in (names if names is not None else param_names()):
+            ok = self.request_param_read(n) and ok
+        return ok
+
     def request_param_list(self) -> bool:
         """Ask the vehicle to stream every parameter it holds.
 
@@ -184,6 +222,9 @@ class MAVLinkWorker(QThread):
             self.master.mav.param_request_list_send(
                 self.target_system, self.target_component)
             self.tx_count += 1
+            # While a bulk list is streaming, single-read answers must still
+            # reach the table like any other parameter (see PARAM_VALUE below).
+            self._list_active_until = time.time() + self.PARAM_LIST_WINDOW_S
             return True
         except Exception:
             return False
@@ -562,6 +603,19 @@ class MAVLinkWorker(QThread):
             if not name:
                 return
             value = decode_param_value(msg.param_value, msg.param_type)
+            if _MOTOR_PARAM_RE.match(name):
+                try:
+                    self.motor_param_received.emit(name, float(value))
+                except (TypeError, ValueError):
+                    pass
+                # A lone answer to our own single read must NOT reach the
+                # Parameters tab: sixteen rows would make it look "has data" and
+                # skip its first full fetch. During a bulk list it is part of
+                # that list and goes through as normal.
+                if name in self._single_reads and time.time() > self._list_active_until:
+                    self._single_reads.discard(name)
+                    return
+                self._single_reads.discard(name)
             self.param_value_received.emit(
                 name, value, msg.param_type, msg.param_index, msg.param_count)
 

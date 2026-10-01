@@ -35,6 +35,7 @@ from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QButtonGroup
 )
+from ui.mini_feed import MiniFeed
 from ui.scaling import px, scale_qss
 
 
@@ -74,6 +75,12 @@ class SidebarNav(QFrame):
                 padding: 6px 14px;
                 font-size: 11px;
                 font-weight: 600;
+            }
+            /* Compact density: tighter rows when the rail is short (a small window
+               at a large UI scale, with the alarm card showing). Same buttons,
+               less vertical padding - nothing is hidden or overlapped. */
+            QPushButton[compact="true"] {
+                padding: 2px 14px;
             }
             QPushButton:hover {
                 background-color: #161b22;
@@ -174,6 +181,17 @@ class SidebarNav(QFrame):
 
         layout.addStretch()
 
+        # Camera thumbnail in the rail's empty space (see ui/mini_feed.py). Shown
+        # only on the workspaces that have no camera of their own, and only when
+        # the rail is tall enough - it must never push the nav buttons or the
+        # footer, or force the window taller than its supported minimum.
+        self.mini_feed = MiniFeed(self)
+        self.mini_feed.setVisible(False)
+        layout.addWidget(self.mini_feed)
+        self._mini_wanted = False
+        self._compact = False
+        self._need_normal = 0
+
         # Footer: live flight state. This replaced a two-line build-version
         # string - a constant that told the operator nothing during a flight,
         # sitting in the one spot visible from every workspace.
@@ -260,6 +278,55 @@ class SidebarNav(QFrame):
                 # Qt caches style by objectName; re-polish or the colour sticks.
                 lbl.style().unpolish(lbl)
                 lbl.style().polish(lbl)
+
+    # Workspaces with no camera of their own: Motor Actuators, Diagnostics,
+    # Flight Terminal, Flight Logs, Configuration, Parameters.
+    MINI_FEED_TABS = frozenset({3, 4, 5, 6, 7, 8})
+
+    def set_mini_feed_wanted(self, wanted: bool) -> None:
+        self._mini_wanted = wanted
+        self._apply_mini_feed()
+
+    def _apply_mini_feed(self) -> None:
+        """Show the thumbnail only if wanted AND it fits. The fit test uses the
+        layout's size with the thumbnail hidden, which does not change when it
+        toggles - so there is no show/hide feedback loop."""
+        if not self._mini_wanted:
+            self.mini_feed.setVisible(False)
+            return
+        self.mini_feed.setVisible(False)
+        needed = self.layout().sizeHint().height() + self.mini_feed.wanted_height()
+        self.mini_feed.setVisible(self.height() >= needed)
+
+    def _set_compact(self, compact: bool) -> None:
+        if compact == self._compact:
+            return
+        self._compact = compact
+        for b in self.btn_group.buttons():
+            b.setProperty("compact", compact)
+            b.style().unpolish(b)
+            b.style().polish(b)
+            b.updateGeometry()
+
+    def is_compact(self) -> bool:
+        return self._compact
+
+    def _apply_density(self) -> None:
+        """Tighten the nav rows when the rail is shorter than its normal height.
+
+        The height the rail needs is measured while it is in normal density and
+        remembered, so the decision does not depend on the (smaller) compact
+        measurement - that is what keeps it from flapping between the two.
+        """
+        if not self._compact:
+            self._need_normal = self.layout().minimumSize().height()
+        self._set_compact(self.height() < self._need_normal)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._apply_density()
+        if getattr(self, "_mini_wanted", False):
+            self._apply_mini_feed()
 
     def _on_button_clicked(self, idx: int):
         self.view_changed.emit(idx)

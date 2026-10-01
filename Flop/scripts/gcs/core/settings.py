@@ -105,7 +105,7 @@ class ProfileConfig:
 @dataclass
 class ConnectionConfig:
     default_network: str = "HTIC_RND"
-    host: str = "172.16.101.84"
+    host: str = "172.16.101.89"
     protocol: str = "udp"           # udp | tcp
     udp_port: int = 14550
     tcp_port: int = 5760
@@ -124,8 +124,8 @@ class ConnectionConfig:
 
 @dataclass
 class VideoConfig:
-    stream_url: str = "http://172.16.101.84:8080/video"
-    map_bridge_host: str = "172.16.101.84"
+    stream_url: str = "http://172.16.101.89:8080/video"
+    map_bridge_host: str = "172.16.101.89"
     map_bridge_port: int = 5765
     jpeg_port: int = 8080
 

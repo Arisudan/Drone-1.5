@@ -61,7 +61,7 @@ from PyQt5.QtWidgets import (
     QFrame, QSizePolicy, QLineEdit
 )
 
-DEFAULT_STREAM_URL = "http://172.16.101.84:8080/video"
+DEFAULT_STREAM_URL = "http://172.16.101.89:8080/video"
 
 
 #: FFmpeg options applied to network streams before the capture is opened.
@@ -358,7 +358,8 @@ class FloatingVideoWindow(QWidget):
         title = QLabel("FPV", self)
         title.setStyleSheet(
             "color: #58a6ff; font-size: 9px; font-weight: bold;"
-            " letter-spacing: 1.6px; background: transparent;")
+            " letter-spacing: 1.6px; background: transparent;"
+            " font-family: 'Ubuntu', 'Ubuntu Sans', 'Noto Sans', sans-serif;")
         bar.addWidget(title)
         hint = QLabel("drag to move", self)
         hint.setStyleSheet(
@@ -460,7 +461,7 @@ class VideoFeedWidget(QWidget):
         tb.setContentsMargins(8, 6, 8, 0)
 
         title = QLabel("FPV CAMERA & VISION FEED")
-        title.setStyleSheet("font-weight: bold; color: #58a6ff; font-size: 11px;")
+        title.setObjectName("pageTitle")
         tb.addWidget(title)
 
         tb.addSpacing(16)
@@ -486,7 +487,7 @@ class VideoFeedWidget(QWidget):
         self._custom_url = "rtsp://192.168.1.10:554/stream"
 
         self.txt_url = QLineEdit(self._drone_url, self)
-        self.txt_url.setMinimumWidth(px(240))
+        self.txt_url.setMinimumWidth(px(180))
         self.txt_url.setToolTip(
             "Stream URL for the selected source.\n"
             "Drone FPV: MJPEG over HTTP, follows the Network preset.\n"

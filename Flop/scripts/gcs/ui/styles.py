@@ -114,6 +114,11 @@ PALETTE = {
 
     # Fonts
     "font_ui":       "'Lato', 'Noto Sans', 'Segoe UI', 'DejaVu Sans', sans-serif",
+    # Brand: the "DRONE-GCS" title only. Headings: every title inside the tabs
+    # and group boxes. Both ship in assets/fonts (see ui/fonts.py); the tails of
+    # the chains are the old UI font so a missing file degrades, not breaks.
+    "font_brand":    "'Red Hat Display', 'Ubuntu', 'Lato', 'Noto Sans', sans-serif",
+    "font_heading":  "'Ubuntu', 'Ubuntu Sans', 'Lato', 'Noto Sans', sans-serif",
     "font_mono":     "'Consolas', 'DejaVu Sans Mono', monospace",
     "font_gauge":    "'Noto Sans Mono', 'DejaVu Sans Mono', monospace",
 
@@ -158,6 +163,7 @@ QFrame#topBar {
 }
 
 QLabel#appTitle {
+    font-family: $font_brand;
     font-size: 27px;
     font-weight: 900;
     color: $accent;
@@ -186,6 +192,7 @@ QGroupBox {
     letter-spacing: 2.4px;
 }
 QGroupBox::title {
+    font-family: $font_heading;
     subcontrol-origin: margin;
     subcontrol-position: top left;
     padding: 2px 10px;
@@ -226,6 +233,7 @@ QFrame.cardFrame {
 QFrame.cardFrame:hover { border-color: $border_soft; }
 
 QLabel.cardTitle {
+    font-family: $font_heading;
     font-size: 10px;
     font-weight: bold;
     color: $text_muted;
@@ -299,6 +307,7 @@ QLabel#instValue {
 }
 
 QLabel#cardHeading {
+    font-family: $font_heading;
     color: $accent;
     font-size: 10px;
     font-weight: 700;
@@ -347,6 +356,7 @@ QLabel#footerNote {
 }
 
 QLabel#sectionTitle {
+    font-family: $font_heading;
     color: $accent;
     font-size: 10px;
     font-weight: bold;
@@ -367,9 +377,42 @@ QLabel#diagValue {
     font-family: $font_mono;
 }
 
+/* Diagnostics: caption over value. The caption is a quiet small-caps label so
+   the number is the loudest thing in the cell. */
+QLabel#diagCaption {
+    font-family: $font_heading;
+    color: $text_muted;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+}
+/* A system card's title (POWER, ATTITUDE, ...): quiet, so the numbers lead. */
+QLabel#cardGroupTitle {
+    font-family: $font_heading;
+    color: $text_dim;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 1.6px;
+}
+/* A value cell inside a system card: no border of its own - the card is the
+   container, nested boxes would only add noise. */
+QFrame.cellFrame {
+    background-color: transparent;
+    border: none;
+    padding: 0px;
+}
+/* The glance strip: the few readouts you must be able to read in one look. */
+QFrame#glanceStrip {
+    background-color: $bg_panel;
+    border: 1px solid $border;
+    border-radius: 8px;
+}
+QFrame#glanceCell { background-color: transparent; border: none; padding: 0px; }
+
 /* Diagnostics tab: groups its tiles by category (Power, Position, Motors,
    ...) under one of these instead of one undifferentiated wall of cards. */
 QLabel#diagSectionHeader {
+    font-family: $font_heading;
     color: $text_muted;
     font-size: 10px;
     font-weight: bold;
@@ -453,6 +496,19 @@ QPushButton {
     font-size: 10px;
     min-height: 22px;
 }
+/* The Diagnostics "Layout" menu button: same family as QPushButton. */
+QToolButton#layoutBtn {
+    background-color: $bg_input;
+    color: $text;
+    border: 1px solid $border_soft;
+    border-radius: 5px;
+    padding: 4px 12px;
+    font-weight: 600;
+    font-size: 10px;
+    min-height: 22px;
+}
+QToolButton#layoutBtn:hover { background-color: $bg_raised; border-color: $border_hover; color: $text_bright; }
+QToolButton#layoutBtn::menu-indicator { image: none; width: 0px; }
 QPushButton:hover   { background-color: $bg_raised; border-color: $border_hover; color: $text_bright; }
 QPushButton:pressed { background-color: $bg_sunken; }
 QPushButton:checked { background-color: $accent_fill; border-color: $accent_dim; color: $accent_bright; }
@@ -686,7 +742,16 @@ QFrame#rvizPlaceholder {
     border-radius: 8px;
 }
 QLabel#rvizPlaceholderIcon  { color: $accent; letter-spacing: 2px; }
-QLabel#rvizPlaceholderTitle { color: $text; font-size: 16px; font-weight: bold; }
+QLabel#rvizPlaceholderTitle { font-family: $font_heading; color: $text; font-size: 16px; font-weight: bold; }
+
+/* A tab's own page title (the one-line heading above its cards). */
+QLabel#pageTitle {
+    font-family: $font_heading;
+    color: $accent;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
 QLabel#rvizPlaceholderBody  { color: $text_dim; font-size: 12px; }
 
 QPushButton#btnConnect {
@@ -924,6 +989,8 @@ def build_stylesheet(scale: float = None) -> str:
     which properties are rewritten and why `border:` is not among them.
     """
     from ui.scaling import scale_qss
+    from ui.fonts import load_bundled_fonts
+    load_bundled_fonts()      # before the stylesheet names them
     return scale_qss(Template(_QSS).substitute(PALETTE), scale)
 
 

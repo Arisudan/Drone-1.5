@@ -283,7 +283,7 @@ class RadxaMonitorMainWindow(QMainWindow):
         # Title
         header = QHBoxLayout()
         h_title = QLabel("INCOMING GCS COMMAND & EXECUTION AUDITOR")
-        h_title.setStyleSheet("font-weight: bold; color: #58a6ff; font-size: 12px;")
+        h_title.setObjectName("pageTitle")
         header.addWidget(h_title)
         header.addStretch()
 
@@ -440,7 +440,7 @@ class RadxaMonitorMainWindow(QMainWindow):
             self.val_arm.setStyleSheet("color: #3fb950;")
         else:
             self.val_arm.setText("DISARMED")
-            self.val_arm.setStyleSheet("color: #8b949e;")
+            self.val_arm.setStyleSheet("color: #f85149;")
 
         self.val_mode.setText(t.flight_mode)
         self.val_batt.setText(f"{t.battery_voltage:.1f}V ({t.battery_percent}%)")

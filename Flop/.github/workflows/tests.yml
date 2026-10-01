@@ -49,6 +49,10 @@ jobs:
         working-directory: tests
         run: python -m unittest test_infrastructure -v
 
+      - name: Link range test (parsers, loss accounting, loopback)
+        working-directory: tests
+        run: python -m unittest test_link_range -v
+
 
   gui:
     # PyQt5 is installable on the runner, so the import-level smoke tests run
@@ -154,4 +158,7 @@ jobs:
             scripts/gcs/controllers \
             scripts/diagnostics/map_eval.py \
             scripts/diagnostics/map_recorder.py \
+            scripts/diagnostics/link_range_test.py \
+            scripts/diagnostics/link_range_gui.py \
+            scripts/diagnostics/link_probe_server.py \
             tests

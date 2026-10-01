@@ -6,7 +6,7 @@ that widgets read. Slots must be quick; anything slow goes to a worker.
 
 | Thread | Class | Signals to the UI thread (payload) |
 |---|---|---|
-| MAVLink I/O + reconnect loop | `MAVLinkWorker` | `telemetry_updated(TelemetrySnapshot)`, `connection_changed(bool,str)`, `statustext_received(str,int)`, `command_ack_received(int,int,str,str)`, `rates_updated(float,float)`, `command_broadcast_received(str)`, `param_value_received(...)` |
+| MAVLink I/O + reconnect loop | `MAVLinkWorker` | `telemetry_updated(TelemetrySnapshot)`, `connection_changed(bool,str)`, `statustext_received(str,int)`, `command_ack_received(int,int,str,str)`, `rates_updated(float,float)`, `command_broadcast_received(str)`, `param_value_received(...)`, `motor_param_received(str,float)` (only the `PWM_MAIN_{MIN,MAX,DIS,FUNC}n` parameters, for the motor scale; a lone answer to a single read is not forwarded to `param_value_received`, so the Parameters tab is not tricked into thinking it has data) |
 | Path planning / collision / quality / inflation | `PlannerWorker` | `plan_ready(token,plan)`, `collision_ready(token,ok,pt,dist)`, `quality_ready(token,q)`, `inflation_ready(token,img,meta)`, `job_timing(str,float)` |
 | ROS 2 map subscription + TCP fallback | `ROS2MapListener` (+ inner TCP `threading.Thread`) | `map_received(grid,res,ox,oy,src,extra)`, `status_updated(str)` |
 | Map reset | `SlamMapResetWorker` | `finished_result(bool,str)` |

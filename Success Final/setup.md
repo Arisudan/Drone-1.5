@@ -17,6 +17,7 @@ Everything needed to bring this project up on a fresh machine and fly the pipeli
 9. [Customizing Launch Parameters](#9-customizing-launch-parameters)
 10. [Shutting Down Cleanly](#10-shutting-down-cleanly)
 11. [FAQ & Troubleshooting](#11-faq--troubleshooting)
+12. [Running the Tests](#12-running-the-tests)
 
 ---
 
@@ -29,6 +30,7 @@ Everything needed to bring this project up on a fresh machine and fly the pipeli
   sudo apt update
   sudo apt install -y ros-jazzy-realsense2-camera ros-jazzy-rtabmap-ros python3-opencv python3-numpy
   ```
+- **On the GCS laptop** (not needed on the Radxa): PyQt5 for the GCS itself (`pip install -r requirements.txt`), plus, for the **range test** ([`docs/link_range_test.md`](docs/link_range_test.md)): `python3-tk` (its window), `iw` and `openssh-client` (`sudo apt install python3-tk iw openssh-client`). The GCS's heading fonts (Red Hat Display, Ubuntu) are bundled in `assets/fonts/` — there is nothing to install for them.
 
 ---
 
@@ -94,6 +96,22 @@ source ~/ros2_ws/install/setup.bash
 ```
 
 Re-run just the build+source block above after any code change; you don't need to re-clone.
+
+### Updating the Radxa from the laptop (no GitHub needed)
+
+The Radxa's `~/ros2_ws/src/rtabmap_drone_pkg` is a symlink to `~/Flop`, so copying into `~/Flop` updates the package in place. Authorise this laptop's key once (**type it in a normal terminal** — it needs the Radxa's password): `ssh-copy-id radxa@<radxa-ip>`. Then:
+
+```bash
+cd ~/Flop
+EX="--exclude=.git --exclude=.ruff_cache --exclude=__pycache__ --exclude=*.pyc \
+    --exclude=mav.tlog --exclude=mav.tlog.raw --exclude=/build --exclude=/install \
+    --exclude=/log --exclude=out_mapping --exclude=.venv --exclude=settings.json"
+rsync -rcn -i $EX ./ radxa@<radxa-ip>:/home/radxa/Flop/          # dry run: what WOULD change
+rsync -rcn -i -u $EX ./ radxa@<radxa-ip>:/home/radxa/Flop/       # (compare with the line above: the difference = files NEWER on the Radxa that would be overwritten)
+rsync -rct $EX ./ radxa@<radxa-ip>:/home/radxa/Flop/             # copy
+```
+
+No `--delete`, so files that exist only on the Radxa are left alone. Nothing is restarted or rebuilt by the copy; rebuild (`colcon build …`) only if launch files or package metadata changed, and restart `camera.sh` to pick up changed scripts. The GCS app itself runs on the laptop and is not part of what the Radxa needs.
 
 ---
 
@@ -210,7 +228,7 @@ D435i --(USB 3.0)--> realsense2_camera_node --(/camera/color/image_raw)--> d435i
                                                               Laptop GCS (video_feed_widget.py)
 ```
 
-- **Endpoint**: `http://<radxa_ip>:8080/video` (default `http://172.16.101.84:8080/video`) — a standard `multipart/x-mixed-replace` MJPEG stream, viewable directly in a browser or via `cv2.VideoCapture(url)`.
+- **Endpoint**: `http://<radxa_ip>:8080/video` (default `http://172.16.101.89:8080/video`) — a standard `multipart/x-mixed-replace` MJPEG stream, viewable directly in a browser or via `cv2.VideoCapture(url)`.
 - **Bandwidth**: JPEG quality 80 keeps frames to roughly 15–38 KB depending on scene complexity (~6–8 Mbps at 23–25 FPS real-world, measured on hardware), leaving the rest of the Wi-Fi link free for MAVLink telemetry/commands.
 - **Toggle**: disable with `enable_video_streamer:=false` on the launch command if you need to free up CPU/bandwidth.
 - Depth (`enable_depth`) is intentionally left disabled for this stream — only color is needed for FPV, and keeping depth off preserves USB/CPU headroom for the stereo VIO + SLAM pipeline.
@@ -256,6 +274,9 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py --sigterm-timeout=10 -
 | Q5 | What do warnings like `Received IMU doesn't have orientation set! It is ignored` mean? | **Harmless/expected** — the D435i outputs raw 6-DOF gyro/accel without an orientation quaternion; RTAB-Map integrates the raw data automatically. `Stereo correspondences rejected` means the camera is too close (<0.3m) or facing a featureless surface — move to a textured scene 0.5–1.5 m away. |
 | Q6 | Why did visual odometry get stuck in `LOST!` (`cov0 = 9999.0`)? | Frame-to-Map odometry needs continuous feature matches; a static or featureless view drops `inliers` below 10 and latches `LOST!`. Fixed with `'Odom/ResetCountdown': '1'` and `'Vis/MaxFeatures': '1000'` in `launch/stereo_inertial_odom.launch.py` — RTAB-Map now auto-resets the odometry baseline after 1 lost frame. |
 | Q7 | What does `mavlink-router` do and why is it used? | See [§2](#2-mavlink-router-setup) — it lets multiple processes share one physical serial port. |
+| Q8 | The GCS says it can't connect, but the Radxa is on and `camera.sh` is running. | First check the laptop is on the **same Wi-Fi network** as the Radxa: `iw dev <wlan> link` (or the range-test window, which shows the network name). The laptop was once on `HTIC_INCUBATION` while the Radxa was on `HTIC_RND`; `nmcli connection up HTIC_RND` fixes that. Then check the address: the Radxa has been seen at `172.16.101.84`, `172.16.101.89` and `172.16.100.182` on different networks, and the GCS network preset / saved settings must match whatever it has now (the `HTIC_RND` preset is `172.16.101.89` as of 2026-10-01) (`ping <ip>`; edit it in Configuration or pick **Custom…** in the header). |
+| Q9 | `ssh-copy-id` from inside the GCS/Claude shell fails with "Permission denied" three times. | That shell has no terminal to ask for the password, so it tries an empty one. Run `ssh-copy-id radxa@<ip>` in a normal terminal window instead. |
+| Q10 | The range test says the Radxa does not answer, or packet loss reads "off". | See the troubleshooting table in [`docs/link_range_test.md`](docs/link_range_test.md): wrong network, Radxa off or at a different IP, or no SSH key for the helper (untick the option to measure ping and the stream only). |
 
 **Quick troubleshooting cheat-sheet:**
 
@@ -266,6 +287,26 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py --sigterm-timeout=10 -
 | `ros2 node list` shows almost nothing | `ros2 daemon stop && ros2 daemon start` (stale discovery cache, not a real node failure) |
 | Everything seems frozen after running a long time | Ctrl+C the launch, wait for it to fully exit, then relaunch fresh |
 | `Avoidance`/`Localization` flicker to "STALE" occasionally | Normal — `/map` updates once or twice a second, not continuously |
+| GCS can't connect though the Radxa is up | Laptop on the wrong Wi-Fi (`nmcli connection up HTIC_RND`) or the Radxa's IP changed — `ping` it, then update the GCS network preset / Configuration |
 | GCS "FPV Camera Feed" tab shows "CAMERA NOT DETECTED" | Confirm `d435i_video_streamer` is running (`ros2 node list`) and reachable: `curl -I http://<radxa_ip>:8080/video`. It auto-retries every 2s. |
 
 For the full technical story behind each of these — why each problem happened and exactly what was changed — see [`Progress.md`](Progress.md).
+
+---
+
+## 12. Running the Tests
+
+```bash
+cd tests
+QT_QPA_PLATFORM=offscreen ./run_tests.sh          # everything available on this machine (~4–5 minutes)
+./run_tests.sh hermetic                           # numpy-only subset: no PyQt5, no ROS 2 (what CI's first job runs)
+python3 -m unittest test_link_range -v            # one module
+```
+
+- Most GUI tests render offscreen (`QT_QPA_PLATFORM=offscreen`, set by `tests/_env.py`), so they need no display and never open a window.
+- **`test_link_range_gui.py`** drives a Tk window and starts its **own private Xvfb display** (it never touches your desktop). It is skipped if `tkinter` or `Xvfb` (`sudo apt install xvfb`) is missing.
+- The layout suite (`test_gui_layout.py`) renders every page at every supported window size and UI scale, twice — once normally and once with the alarm card showing and the vehicle armed — so it is the slow part.
+- **Running a test inside Claude Code's `!` shell or any non-interactive runner**: don't call `main([])` of the range test directly — with no arguments it opens a window / waits for input. Tests use `--cli` or call `run()`.
+- If a run ends with no "Ran N tests" line (the process was killed by `SIGABRT`, "paint device that is being painted", or "Tcl_AsyncDelete"), a shown top-level widget was garbage-collected, or a Tk object was finalised off the main thread — close/delete widgets in `tearDown`, and keep worker threads from holding Tk objects.
+- Lint (the CI gate): `ruff check --select F tests scripts/gcs/core scripts/gcs/protocol scripts/gcs/controllers scripts/diagnostics/map_eval.py scripts/diagnostics/map_recorder.py scripts/diagnostics/link_range_test.py scripts/diagnostics/link_range_gui.py scripts/diagnostics/link_probe_server.py`.
+

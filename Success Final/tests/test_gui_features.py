@@ -93,21 +93,35 @@ class ValueGridTest(unittest.TestCase):
         self.assertEqual(g._tiles["pct"]._raw_text, "77 %")
         self.assertEqual(g._tiles["arm_state"]._raw_text, "ARMED")
 
-    def test_armed_is_coloured_as_a_hazard_not_as_healthy(self):
+    def test_armed_is_green_and_disarmed_is_red_like_the_header(self):
         from core.telemetry import TelemetrySnapshot
         from ui.styles import PALETTE
         g = self.ValueGridWidget(["arm_state"])
         t = TelemetrySnapshot()
         t.armed = True
         g.update_values(t)
+        self.assertEqual(g._tiles["arm_state"]._base_colour, PALETTE["ok"])
+        t.armed = False
+        g.update_values(t)
         self.assertEqual(g._tiles["arm_state"]._base_colour, PALETTE["danger"])
+
+    def test_the_arm_state_colour_is_a_state_not_a_fault(self):
+        # Disarmed is the resting state: red text, but never a side bar or a
+        # red health light on its card.
+        from core.telemetry import TelemetrySnapshot
+        g = self.ValueGridWidget(["arm_state", "flight_mode"])
+        g.update_values(TelemetrySnapshot())               # disarmed
+        self.assertEqual(g._tiles["arm_state"].severity, 0)
+        self.assertEqual(g._cards[0].health, 0)
 
     def test_battery_colour_follows_the_band(self):
         from core.telemetry import TelemetrySnapshot
         from ui.styles import PALETTE
         g = self.ValueGridWidget(["pct"])
         t = TelemetrySnapshot()
-        for pct, expected in ((80, PALETTE["ok"]), (30, PALETTE["warn"]),
+        # Grey-first: a healthy battery is plain white (no colour), amber when
+        # low, red when critical - so colour on this tile always means something.
+        for pct, expected in ((80, ""), (30, PALETTE["warn"]),
                               (10, PALETTE["danger"])):
             t.battery_percent = pct
             g.update_values(t)

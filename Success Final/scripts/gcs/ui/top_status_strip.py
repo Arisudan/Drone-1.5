@@ -20,7 +20,8 @@ KEY LOGIC & FAILSAFES:
     and reconnect without restarting the GCS application.
   * Multi-State Status Badges:
       - Flight Mode: Distinct tactical color coding for OFFBOARD, POSCTL, ALTCTL, MANUAL.
-      - Armed / Disarmed: Bright warning red when armed, subdued slate when disarmed.
+      - Armed / Disarmed: green when armed, red when disarmed (same convention in
+        the navigation footer and the Diagnostics tab).
       - VIO Tracking Lock: Visual green/red badge for RealSense D435i odometry health.
       - Battery Capacity: Transitions green (>50%) -> amber (20-50%) -> flashing red (<20%).
   * Throughput Monitor: Displays live packet exchange frequencies to diagnose Wi-Fi link jitter.
@@ -49,7 +50,7 @@ from ui.battery_badge import BatteryBadge
 # IP - port and protocol are independent axes (same MAVLink/map/video ports apply on
 # any of these networks) and are left for the operator to choose separately.
 KNOWN_NETWORKS = [
-    ("HTIC_RND", "172.16.101.84"),
+    ("HTIC_RND", "172.16.101.89"),
     ("DroneBridge5", "192.168.1.2"),
     # DroneNet: a NetworkManager connection-sharing/hotspot link - Radxa is always the
     # shared-connection gateway at 10.42.0.1 (the laptop gets a lease like 10.42.0.200,
@@ -157,7 +158,7 @@ class TopStatusStrip(QFrame):
 
         self.ip_input = QLineEdit(KNOWN_NETWORKS[0][1], self)
         self.ip_input.setFixedWidth(px(120))
-        self.ip_input.setToolTip("Target SBC IP (e.g. 172.16.101.84 or 127.0.0.1) - auto-filled by the Network dropdown, or type your own")
+        self.ip_input.setToolTip("Target SBC IP (e.g. 172.16.101.89 or 127.0.0.1) - auto-filled by the Network dropdown, or type your own")
         self.ip_input.textEdited.connect(self._on_ip_hand_edited)
         conn_box.addWidget(self.ip_input)
 
