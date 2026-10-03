@@ -839,7 +839,8 @@ def findings(holds: Sequence[HoldStats], fit: Optional[Dict[str, float]],
 
 
 def svg_chart(title: str, series: Sequence[Tuple[str, str, Sequence[Tuple[float, float]]]],
-              ylabel: str, hlines: Sequence[Tuple[float, str]] = (), w: int = 560, h: int = 240) -> str:
+              ylabel: str, hlines: Sequence[Tuple[float, str]] = (), w: int = 560, h: int = 240,
+              xlabel: str = "distance (m)", max_xticks: Optional[int] = None) -> str:
     """A small self-contained line chart. series = (label, colour, [(x, y), ...])."""
     pts = [p for _, _, s in series for p in s if p[1] is not None and not math.isnan(p[1])]
     if not pts:
@@ -867,9 +868,13 @@ def svg_chart(title: str, series: Sequence[Tuple[str, str, Sequence[Tuple[float,
         yv = y0 + (y1 - y0) * i / 4
         g.append(f"<line x1='{L}' x2='{w - R}' y1='{Y(yv):.1f}' y2='{Y(yv):.1f}' class='grid'/>"
                  f"<text x='{L - 6}' y='{Y(yv) + 4:.1f}' class='ax' text-anchor='end'>{yv:.0f}</text>")
-    for xv in sorted({round(p[0], 3) for p in pts}):
+    xticks = sorted({round(p[0], 3) for p in pts})
+    if max_xticks and len(xticks) > max_xticks:          # a time axis has hundreds of x values
+        every = math.ceil(len(xticks) / max_xticks)
+        xticks = xticks[::every]
+    for xv in xticks:
         g.append(f"<text x='{X(xv):.1f}' y='{h - 16}' class='ax' text-anchor='middle'>{xv:g}</text>")
-    g.append(f"<text x='{(L + w - R) / 2:.0f}' y='{h - 3}' class='ax' text-anchor='middle'>distance (m)</text>")
+    g.append(f"<text x='{(L + w - R) / 2:.0f}' y='{h - 3}' class='ax' text-anchor='middle'>{html.escape(xlabel)}</text>")
     g.append(f"<text x='12' y='{(T + h - B) / 2:.0f}' class='ax' transform='rotate(-90 12 {(T + h - B) / 2:.0f})' "
              f"text-anchor='middle'>{html.escape(ylabel)}</text>")
     for value, label in hlines:
@@ -1108,6 +1113,7 @@ class SessionConfig:
     loss_tolerance: float = 0.0
     iface: Optional[str] = None
     out_dir: str = ""
+    mode: str = "holds"              # "holds" (marked distances) | "walk" (continuous, signal only)
 
     @property
     def ssh_target(self) -> str:
@@ -1265,6 +1271,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--control-ssh", metavar="USER@HOST", help="read the Radxa's own Wi-Fi signal as a control")
     p.add_argument("--auto-marks", help="comma list of distances, no keypress (e.g. 0,5,10); waits --walk-time between")
     p.add_argument("--walk-time", type=float, default=20.0, help="seconds between marks with --auto-marks")
+    p.add_argument("--walk", action="store_true",
+                   help="continuous walk: stream values every second, verdict in seconds and dBm (no distance)")
+    p.add_argument("--walk-seconds", type=float, default=0.0,
+                   help="with --walk: stop by itself after this many seconds (default: press Enter)")
+    p.add_argument("--auto", action="store_true", help="with --walk: start at once, without waiting for Enter")
     p.add_argument("--out", help="output folder")
     p.add_argument("--force", action="store_true", help="continue even if the Radxa does not answer ping")
     p.add_argument("--demo", action="store_true", help="synthetic data -> report only (no network)")
@@ -1280,7 +1291,7 @@ def config_from_args(args: argparse.Namespace) -> SessionConfig:
         helper_target=args.start_helper or "", control_target=args.control_ssh or "",
         step=args.step, hold=args.hold, baseline_hold=args.baseline_hold,
         ping_interval=args.ping_interval, loss_tolerance=args.loss_tolerance,
-        iface=args.iface, out_dir=args.out or "")
+        iface=args.iface, out_dir=args.out or "", mode="walk" if getattr(args, "walk", False) else "holds")
 
 
 def countdown(label: str, seconds: float, session: "Session") -> None:
@@ -1309,6 +1320,9 @@ def run(args: argparse.Namespace) -> int:
     """Terminal flow (all options on the command line)."""
     out_dir = args.out or os.path.join(os.path.expanduser("~"), "link_range_results",
                                        time.strftime("%Y%m%d_%H%M%S"))
+    if args.demo and getattr(args, "walk", False):
+        import link_range_walk
+        return link_range_walk.run_demo(args, out_dir)
     if args.demo:
         holds, base = demo_holds(args.step)
         summary = finish(holds, base, {"mode": "DEMO (synthetic data - not a measurement)", "step_m": args.step},
@@ -1330,6 +1344,9 @@ def run(args: argparse.Namespace) -> int:
             print("  Fix the network, or re-run with --force to measure anyway.")
             return 2
     sess.start()
+    if getattr(args, "walk", False):
+        import link_range_walk
+        return link_range_walk.run_walk(args, sess)
 
     def do_hold(dist: float, secs: float) -> None:
         t0 = sess.begin_hold()

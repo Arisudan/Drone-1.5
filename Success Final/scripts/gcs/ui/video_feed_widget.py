@@ -117,9 +117,35 @@ class VideoCaptureThread(QThread):
         self.source = source
         self.running = False
         self.cap: Optional[cv2.VideoCapture] = None
+        self._pending_since = 0.0
+        self.frames_skipped = 0
 
     def set_source(self, source):
         self.source = source
+
+    # Newest-frame-only hand-off to the GUI thread. The loop below reads as fast
+    # as the stream delivers; if the GUI has not yet consumed the previous frame
+    # (it was busy, or a Wi-Fi stall just ended and a burst of old frames arrived
+    # at once) the newer frame REPLACES the wait instead of queueing behind it.
+    # Otherwise every queued signal holds a full decoded frame and the picture
+    # runs further behind real time the longer the GUI lags.
+    PENDING_TIMEOUT_S = 0.5      # a GUI that never answers must not freeze the feed
+
+    def frame_consumed(self) -> None:
+        """Called by the GUI slot once it has finished with the last frame."""
+        self._pending_since = 0.0
+
+    def _emit_real_frame(self, frame) -> bool:
+        """Emit info+frame unless the GUI is still busy with the previous one.
+        Returns True if emitted, False if this frame was skipped as stale."""
+        now = time.monotonic()
+        if self._pending_since and now - self._pending_since < self.PENDING_TIMEOUT_S:
+            self.frames_skipped += 1
+            return False
+        self._pending_since = now
+        self.frame_info.emit(now, True)
+        self.frame_ready.emit(frame)
+        return True
 
     def _apply_capture_options(self):
         """Set FFmpeg options for the upcoming open, if this is a live stream.
@@ -202,8 +228,7 @@ class VideoCaptureThread(QThread):
 
             ret, frame = self.cap.read()
             if ret and frame is not None:
-                self.frame_info.emit(time.monotonic(), True)
-                self.frame_ready.emit(frame)
+                self._emit_real_frame(frame)
             else:
                 # Stream dropped mid-read - release and let the top of the loop reconnect.
                 try:
@@ -780,6 +805,8 @@ class VideoFeedWidget(QWidget):
         self.health.on_frame(captured_at, real)
         # Mirror to every other viewport on the same decoded frame.
         self.frame_broadcast.emit(frame)
+        if self.cap_thread is not None:
+            self.cap_thread.frame_consumed()
 
     # -------------------------------------------------------------------------
     # Snapshot / recording / overlay / graph

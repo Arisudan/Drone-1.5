@@ -170,6 +170,7 @@ Connects to the onboard MJPEG stream (`http://<radxa_ip>:8080/video`) and displa
 - **Snapshot** saves the current frame as a PNG; **Record** writes the feed to an MJPEG `.avi` (a red `● REC mm:ss` shows while recording). Both go to `~/.drone_gcs/video/` (or `$DRONE_GCS_HOME/video/`) with a timestamp name and use the frames the single capture already decoded — no second connection to the Radxa. Only real frames are saved (never the grey "no signal" placeholder), and the overlay is never burned in.
 - **Graph** (off by default) shows the last 60 s of frame rate (blue) and pipeline latency (grey), so you can see whether a problem is a slow decay or sudden stalls.
 - There is **no stream-quality picker**: the Radxa streamer takes its JPEG quality from a ROS parameter at start-up and offers no per-client option, so a control here would do nothing.
+- **Latency under Wi-Fi stalls:** the capture thread hands the GUI only the newest frame — if the GUI is still busy, or a burst of old frames arrives when the link recovers, the stale ones are skipped rather than queued — and the Radxa streamer keeps its per-client send buffer small. (The streamer change takes effect once the updated `d435i_video_streamer.py` is on the Radxa and restarted.)
 - A **health line** under the picture: `LIVE · 29 fps · pipeline 18 ms · jitter 4 ms`, or `DEGRADED`, `CONNECTING`, `FROZEN · no frame for 3.0 s`, `NO SIGNAL`. Grey while healthy, amber/red only when not. "pipeline" is the time from the capture thread reading a frame to it being painted *inside the GCS*; it excludes the camera, encoder and network, so it is an early warning, not true glass-to-glass latency. A frozen or dead feed also raises an alarm (§8).
 
 ### Diagnostics
@@ -271,7 +272,11 @@ cd ~/Flop/scripts/diagnostics
 python3 link_range_test.py
 ```
 
-A window asks for the Radxa's IP address (it remembers the last one), shows which Wi-Fi network the laptop is on, can check the connection, and opens a walking screen:
+A window asks for the Radxa's IP address (it remembers the last one), shows which Wi-Fi network the laptop is on, can check the connection, and lets you choose how to measure:
+
+**Continuous walk** *(simplest)* — press **Start walking**, walk away at your own pace, and one line of values streams every second (signal, ping loss, video fps, longest gap between frames, UDP loss, ok / LOSS). Press **Stop** when you are done. The result is in **seconds and dBm — there is no distance**: *"loss-free for the first 42 s, down to −68 dBm; first loss at 43 s (−71 dBm): video stall 1.8 s"*, plus a table of how often each 5 dB signal band was clean. Terminal: `python3 link_range_test.py --cli --radxa <ip> --walk --udp --start-helper radxa@<ip>` (Enter stops it; `--walk-seconds 120 --auto` runs unattended).
+
+**Hold at marked distances** — the original, with a walking screen:
 
 1. Stand next to the Radxa and press **Measure here (0 m)**, then stand still for the countdown.
 2. Walk to a measured spot (tape or floor tiles), type the distance if it is not the suggested one, press **I'm at the mark**, and stand still again. Repeat further out.
@@ -284,7 +289,7 @@ SSH access to the Radxa (`ssh-copy-id radxa@<ip>` once); it copies a small helpe
 `/tmp` on the Radxa and stops it afterwards. "No loss" means exactly that by default;
 raise *Allowed loss* under Advanced options to tolerate a little.
 
-`python3 link_range_test.py --demo` shows a sample report from synthetic data, and
+`python3 link_range_test.py --demo` (or `--demo --walk`) shows a sample report from synthetic data, and
 `python3 link_range_test.py --cli --radxa <ip> --udp --start-helper radxa@<ip>` runs it
 from the terminal with no window. How every number is defined and calculated, and what the
 test cannot tell you: [`docs/link_range_test.md`](docs/link_range_test.md).
@@ -298,6 +303,7 @@ test cannot tell you: [`docs/link_range_test.md`](docs/link_range_test.md).
 - The **alarm card** covers link, battery, vision, position and video. There are no map-stalled or UI-stall alarms yet.
 - The **servo** talks plain HTTP to the ESP32 with no authentication, and nothing stops it being pressed while the vehicle is flying.
 - The **range test** has been verified on this laptop's Wi-Fi card, on loopback and in its window on a virtual display — not yet against the real Radxa or on a real walk.
+- The **low-latency streaming changes** (small send buffer, one write per frame, newest-frame-only GUI hand-off) are tested on loopback only; whether they reduce freezes on the real Wi-Fi link has not been measured — run the range test before and after.
 - **Video recording / snapshots** and the **flight detail charts** were checked offscreen and with synthetic data only; recording has not been run against the live Radxa stream.
 - No fullscreen support outside the video views (map/RViz remain windowed within their tab).
 - Everything above was checked offscreen / on the bench; no real flight has happened.

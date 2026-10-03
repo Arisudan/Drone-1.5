@@ -7,6 +7,12 @@ PURPOSE: Window front-end for link_range_test.py (no command line needed)
 
   python3 link_range_test.py          # opens this window
 
+TWO MODES (chosen on the setup screen)
+  Hold at marked distances   the original: stand at measured spots, press a button.
+  Continuous walk            walk away at your own pace while one line of values
+                             streams every second; the verdict is in seconds and
+                             dBm - there is no distance (see link_range_walk.py).
+
 ONE WINDOW, THREE SCREENS
   1. Setup    asks for the Radxa IP (and a few options), checks the connection.
   2. Walking  big live readouts and one big button: stand still at a mark, press
@@ -39,6 +45,7 @@ from tkinter import messagebox, ttk
 from typing import Callable, Dict, List, Optional
 
 import link_range_test as L
+import link_range_walk as W
 
 BG, PANEL, FIELD = "#0d1117", "#161b22", "#21262d"
 BORDER, TEXT, BRIGHT, MUTED = "#30363d", "#c9d1d9", "#f0f6fc", "#8b949e"
@@ -223,11 +230,12 @@ class App(tk.Tk):
         self._swap(self.setup)
 
     def show_run(self, cfg: L.SessionConfig) -> None:
-        self.run_screen = RunScreen(self, cfg)
+        self.run_screen = WalkScreen(self, cfg) if cfg.mode == "walk" else RunScreen(self, cfg)
         self._swap(self.run_screen)
 
     def show_result(self, session: L.Session, summary: Dict[str, object]) -> None:
-        self.result = ResultScreen(self, session, summary)
+        screen = WalkResultScreen if session.cfg.mode == "walk" else ResultScreen
+        self.result = screen(self, session, summary)
         self._swap(self.result)
 
     def _on_close(self) -> None:
@@ -264,6 +272,7 @@ class SetupScreen(ttk.Frame):
         self.var_tol = tk.StringVar(value=str(pref("loss_tolerance", 0)))
         self.var_mbps = tk.StringVar(value=str(pref("udp_mbps", 1.0)))
         self.var_adv = tk.BooleanVar(value=False)
+        self.var_mode = tk.StringVar(value=str(pref("mode", "holds")) if pref("mode", "holds") in ("holds", "walk") else "holds")
         self.result: Optional[L.SessionConfig] = None
         self._busy = False
 
@@ -283,8 +292,17 @@ class SetupScreen(ttk.Frame):
         self.lbl_net = ttk.Label(self, text="", style="Muted.TLabel")
         self.lbl_net.pack(anchor="w")
 
+        modes = ttk.Frame(self)
+        modes.pack(fill="x", pady=(18, 0))
+        ttk.Label(modes, text="How do you want to measure?").pack(anchor="w")
+        ttk.Radiobutton(modes, text="Continuous walk - walk away at your own pace; values stream every second "
+                                    "(result in seconds and dBm, no distance)",
+                        variable=self.var_mode, value="walk").pack(anchor="w", pady=2)
+        ttk.Radiobutton(modes, text="Hold at marked distances - stand at measured spots and press a button",
+                        variable=self.var_mode, value="holds").pack(anchor="w", pady=2)
+
         box = ttk.Frame(self)
-        box.pack(fill="x", pady=(18, 0))
+        box.pack(fill="x", pady=(14, 0))
         ttk.Checkbutton(box, text="Measure the live camera stream", variable=self.var_video).pack(anchor="w", pady=2)
         ttk.Checkbutton(box, text="Measure packet loss (starts a small helper on the Radxa over SSH)",
                         variable=self.var_udp).pack(anchor="w", pady=2)
@@ -382,13 +400,14 @@ class SetupScreen(ttk.Frame):
             use_udp=self.var_udp.get(), udp_mbps=float(mbps),
             helper_target=target if self.var_udp.get() else "",
             control_target=target if self.var_control.get() else "",
-            step=float(step), hold=float(hold), baseline_hold=float(hold), loss_tolerance=float(tol))
+            step=float(step), hold=float(hold), baseline_hold=float(hold), loss_tolerance=float(tol),
+            mode=self.var_mode.get())
 
     def _save_prefs(self, cfg: L.SessionConfig) -> None:
         L.save_prefs({"radxa": cfg.radxa, "ssh_user": cfg.ssh_user, "video_port": cfg.video_port,
                       "video": cfg.use_video, "udp": cfg.use_udp, "control": bool(cfg.control_target),
                       "step": cfg.step, "hold": cfg.hold, "loss_tolerance": cfg.loss_tolerance,
-                      "udp_mbps": cfg.udp_mbps})
+                      "udp_mbps": cfg.udp_mbps, "mode": cfg.mode})
 
     # ── actions ──
     def check(self) -> None:
@@ -698,6 +717,206 @@ class RunScreen(ttk.Frame):
         self.app.show_result(self.session, summary)
 
 
+# ───────────────────────────── continuous walk ─────────────────────────────
+
+class WalkScreen(ttk.Frame):
+    """Continuous-walk mode: one button to start, one line of values per second,
+    a live "loss-free so far" line, one button to stop. Same attributes as
+    RunScreen (active, finish, cancel_timer) so the App treats both alike."""
+
+    MAX_ROWS = 400
+
+    def __init__(self, app: App, cfg: L.SessionConfig):
+        super().__init__(app)
+        self.app, self.cfg = app, cfg
+        self.session = L.Session(cfg, log=lambda m: None)
+        self.rec = W.WalkRecorder(self.session)
+        self.state = "starting"
+        self.active = True
+        self._fin = False
+
+        head = ttk.Frame(self)
+        head.pack(fill="x")
+        ttk.Label(head, text="LINK RANGE TEST - CONTINUOUS WALK", style="Title.TLabel").pack(side="left")
+        ttk.Label(head, text=f"Radxa {cfg.radxa}", style="Muted.TLabel").pack(side="right", anchor="s")
+
+        self.lbl_instr = tk.Label(self, text="Starting the measurement…", bg=BG, fg=BRIGHT,
+                                  font=app.fonts["big"], anchor="w", justify="left", wraplength=800)
+        self.lbl_instr.pack(fill="x", pady=(14, 2))
+        self.lbl_sub = ttk.Label(self, text="", style="Muted.TLabel", wraplength=800, justify="left")
+        self.lbl_sub.pack(fill="x")
+
+        tiles = ttk.Frame(self)
+        tiles.pack(fill="x", pady=14)
+        self.t_time = Tile(tiles, "TIME", app.fonts)
+        self.t_sig = Tile(tiles, "WI-FI SIGNAL", app.fonts)
+        self.t_ping = Tile(tiles, "PING LOSS", app.fonts)
+        self.t_video = Tile(tiles, "CAMERA FEED", app.fonts)
+        self.t_udp = Tile(tiles, "LOSS UP / DOWN", app.fonts)
+        self.t_state = Tile(tiles, "RIGHT NOW", app.fonts)
+        for i, t in enumerate((self.t_time, self.t_sig, self.t_ping, self.t_video, self.t_udp, self.t_state)):
+            t.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
+            tiles.columnconfigure(i, weight=1, uniform="w")
+
+        controls = ttk.Frame(self)
+        controls.pack(fill="x")
+        self.btn_main = ttk.Button(controls, text="Starting…", style="Accent.TButton", command=self.on_main,
+                                   state="disabled")
+        self.btn_main.pack(side="left")
+
+        self.lbl_head = ttk.Label(self, text="Loss-free so far: –", font=app.fonts["bold"], foreground=BRIGHT)
+        self.lbl_head.pack(anchor="w", pady=(16, 6))
+        cols = ("t", "signal", "ping", "video", "stall", "udp", "state")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=9, selectmode="none")
+        for c, label, w in (("t", "Time", 70), ("signal", "Signal", 90), ("ping", "Ping loss", 90),
+                            ("video", "Video", 100), ("stall", "Longest gap", 100),
+                            ("udp", "UDP up / down", 120), ("state", "State", 200)):
+            self.tree.heading(c, text=label)
+            self.tree.column(c, width=w, anchor="center" if c != "state" else "w")
+        self.tree.tag_configure("loss", foreground=BAD)
+        self.tree.tag_configure("unknown", foreground=MUTED)
+        self.tree.pack(fill="both", expand=True)
+
+        app.bind("<Return>", lambda _e: self.on_main() if str(self.btn_main["state"]) == "normal" else None)
+        app.run_bg(self.session.start, self._started)
+        self._tick_id: Optional[str] = self.after(TICK_MS, self._tick)
+
+    # ── flow ──
+    def _started(self, res) -> None:
+        if isinstance(res, Exception):
+            messagebox.showerror("Could not start", str(res), parent=self.app)
+            self.active = False
+            self.app.destroy()
+            return
+        self.state = "ready"
+        self.lbl_instr.configure(text="Stand next to the Radxa and router.")
+        self.lbl_sub.configure(text="Press the button, then walk away at your own pace. Values stream below "
+                                    "once a second. Press the button again when you want to stop.")
+        self.btn_main.configure(text="Start walking  ▸", state="normal")
+
+    def on_main(self) -> None:
+        if self.state == "ready":
+            self.rec.begin()
+            self.state = "walking"
+            self.lbl_instr.configure(text="Walking - measuring every second")
+            self.lbl_sub.configure(text="Walk away steadily. Stop here when the picture has been bad for a while "
+                                        "or you run out of room.")
+            self.btn_main.configure(text="Stop and show result")
+        elif self.state == "walking":
+            self.finish()
+
+    # ── live display ──
+    def cancel_timer(self) -> None:
+        if getattr(self, "_tick_id", None) is not None:
+            try:
+                self.after_cancel(self._tick_id)
+            except tk.TclError:
+                pass
+            self._tick_id = None
+
+    def _tick(self) -> None:
+        self._tick_id = None
+        if not self.winfo_exists() or self._fin:
+            return
+        try:
+            if self.state == "walking":
+                new = self.rec.update()
+                for p in new:
+                    self._add_row(p)
+                if new:
+                    self._show_point(new[-1])
+                    self._show_verdict()
+        finally:
+            if self.winfo_exists() and not self._fin:
+                self._tick_id = self.after(TICK_MS, self._tick)
+
+    def _add_row(self, p: "W.WalkPoint") -> None:
+        tag = {True: "", False: "loss", None: "unknown"}[p.loss_free]
+        state = {True: "ok", False: "LOSS: " + ", ".join(p.reasons), None: "no data"}[p.loss_free]
+        udp = (f"{fmt(p.udp_up_loss, '{:.1f}')} / {fmt(p.udp_down_loss, '{:.1f}')} %"
+               if p.udp_up_loss is not None or p.udp_down_loss is not None else "–")
+        item = self.tree.insert("", "end", tags=(tag,), values=(
+            f"{p.t_s:.0f} s", fmt(p.signal_dbm, "{:.0f} dBm"), fmt(p.ping_loss, "{:.1f} %"),
+            fmt(p.video_fps, "{:.1f} fps"), fmt(p.stall_s, "{:.1f} s"), udp, state))
+        children = self.tree.get_children()
+        if len(children) > self.MAX_ROWS:
+            self.tree.delete(children[0])
+        self.tree.see(item)
+
+    def _show_point(self, p: "W.WalkPoint") -> None:
+        tol = self.cfg.loss_tolerance
+        self.t_time.set(f"{p.t_s:.0f} s")
+        self.t_sig.set(fmt(p.signal_dbm, "{:.0f} dBm"), signal_colour(p.signal_dbm),
+                       f"{fmt(p.tx_mbps, '{:.0f}')} Mbit/s link" if p.tx_mbps is not None else " ")
+        self.t_ping.set(fmt(p.ping_loss, "{:.1f} %"), loss_colour(p.ping_loss, tol),
+                        f"round trip p95 {fmt(p.ping_p95, '{:.0f}')} ms" if p.ping_p95 is not None else " ")
+        if self.cfg.use_video:
+            stall = f"longest gap {fmt(p.stall_s, '{:.1f}')} s" if p.stall_s is not None else " "
+            self.t_video.set(fmt(p.video_fps, "{:.1f} fps"), BRIGHT if (p.video_fps or 0) > 0 else BAD, stall)
+        else:
+            self.t_video.set("off", MUTED)
+        if self.session.analysis.udp_enabled:
+            worst = max([v for v in (p.udp_up_loss, p.udp_down_loss) if v is not None], default=None)
+            self.t_udp.set(f"{fmt(p.udp_up_loss, '{:.1f}')} / {fmt(p.udp_down_loss, '{:.1f}')} %",
+                           loss_colour(worst, tol))
+        else:
+            self.t_udp.set("off", MUTED)
+        if p.loss_free is None:
+            self.t_state.set("measuring…", MUTED)
+        elif p.loss_free:
+            self.t_state.set("no loss", BRIGHT)
+        else:
+            self.t_state.set("LOSS", BAD, ", ".join(p.reasons)[:40])
+
+    def _show_verdict(self) -> None:
+        v = self.rec.verdict()
+        first = v.get("first_failure")
+        if v.get("loss_free_pct") is None:
+            self.lbl_head.configure(text="Loss-free so far: no loss data yet", foreground=MUTED)
+        elif first is None:
+            dbm = v.get("clean_down_to_dbm")
+            self.lbl_head.configure(text=f"Loss-free so far: {v['clean_for_s']} s"
+                                         + (f", down to {dbm:.0f} dBm" if dbm is not None else ""),
+                                    foreground=BRIGHT)
+        else:
+            dbm = first.get("signal_dbm")
+            self.lbl_head.configure(
+                text=f"Loss-free for {v['clean_for_s']} s. First loss at {first['t_s']:.0f} s"
+                     + (f" ({dbm:.0f} dBm)" if dbm is not None else ""), foreground=WARN)
+
+    # ── finish ──
+    def finish(self) -> None:
+        if self._fin:
+            return
+        if self.state != "walking" or not self.rec.points:
+            if not messagebox.askyesno("Nothing measured yet", "No walk has been measured. Quit without a result?",
+                                       parent=self.app):
+                return
+            self._fin = True
+            self.active = False
+            self.session.stop()
+            self.app.destroy()
+            return
+        self._fin = True
+        self.active = False
+        self.btn_main.configure(state="disabled", text="Writing the report…")
+        self.lbl_instr.configure(text="Finishing - writing the report…")
+
+        def work():
+            self.rec.end()
+            self.session.stop()
+            return self.rec.finish()
+
+        self.app.run_bg(work, self._finished)
+
+    def _finished(self, summary) -> None:
+        if isinstance(summary, Exception) or summary is None:
+            messagebox.showerror("Could not write the report", str(summary), parent=self.app)
+            self.app.destroy()
+            return
+        self.app.show_result(self.session, summary)
+
+
 # ───────────────────────────── screen 3: result ────────────────────────────
 
 class ResultScreen(ttk.Frame):
@@ -770,6 +989,65 @@ class ResultScreen(ttk.Frame):
 
     def again(self) -> None:
         self.app.show_setup()
+
+
+class WalkResultScreen(ResultScreen):
+    """Result of a continuous walk: seconds and dBm, a by-signal-level table, findings."""
+
+    def __init__(self, app: App, session: L.Session, summary: Dict[str, object]):
+        ttk.Frame.__init__(self, app)
+        self.app, self.session, self.summary = app, session, summary
+        self.report = os.path.join(session.cfg.out_dir, "report.html")
+        v = summary["verdict"]                                 # type: ignore[index]
+        notes: List[str] = summary["findings"]                 # type: ignore[assignment]
+        judged = v.get("loss_free_pct") is not None            # type: ignore[union-attr]
+
+        ttk.Label(self, text="RESULT - CONTINUOUS WALK", style="Title.TLabel").pack(anchor="w")
+        card = ttk.Frame(self, style="Panel.TFrame", padding=(22, 16))
+        card.pack(fill="x", pady=(12, 8))
+        ttk.Label(card, text="LIVE FEED LOSS-FREE FOR", style="PanelMuted.TLabel").pack(anchor="w")
+        self.lbl_big = tk.Label(card, text=f"{v['clean_for_s']} s" if judged else "–", bg=PANEL, fg=BRIGHT,
+                                font=app.fonts["huge"], anchor="w")
+        self.lbl_big.pack(anchor="w")
+        dbm = v.get("clean_down_to_dbm")                       # type: ignore[union-attr]
+        first = v.get("first_failure")                         # type: ignore[union-attr]
+        sub = (f"down to {dbm:.0f} dBm" if dbm is not None else "")
+        if first:
+            sub += (f"   •   first loss at {first['t_s']:.0f} s"
+                    + (f" ({first['signal_dbm']:.0f} dBm)" if first.get("signal_dbm") is not None else ""))
+        tk.Label(card, text=sub, bg=PANEL, fg=TEXT, font=app.fonts["body"], anchor="w").pack(anchor="w")
+        tk.Label(card, text=notes[0] if notes else "", bg=PANEL, fg=MUTED, font=app.fonts["body"],
+                 anchor="w", justify="left", wraplength=780).pack(anchor="w", pady=(4, 0))
+
+        bands = v.get("bands", [])                             # type: ignore[union-attr]
+        tree = ttk.Treeview(self, columns=("band", "sec", "clean", "pct"), show="headings",
+                            height=min(8, max(2, len(bands))), selectmode="none")
+        for c, label, w in (("band", "Signal level", 160), ("sec", "Seconds", 90),
+                            ("clean", "Loss-free seconds", 140), ("pct", "Loss-free", 100)):
+            tree.heading(c, text=label)
+            tree.column(c, width=w, anchor="center")
+        tree.tag_configure("marg", foreground=WARN)
+        tree.tag_configure("poor", foreground=BAD)
+        for b in bands:
+            pct = b["clean_pct"]
+            tree.insert("", "end", tags=("" if pct >= 100 else "marg" if pct >= 80 else "poor",), values=(
+                f"{b['lo']} to {b['hi']} dBm", b["seconds"], b["clean_seconds"], f"{pct:.0f} %"))
+        tree.pack(fill="x", pady=(8, 8))
+
+        box = tk.Text(self, height=7, bg=PANEL, fg=TEXT, bd=0, wrap="word", font=app.fonts["small"],
+                      highlightthickness=0, padx=10, pady=8)
+        box.insert("1.0", "\n".join("• " + n for n in notes[1:]))
+        box.configure(state="disabled")
+        box.pack(fill="both", expand=True)
+
+        ttk.Label(self, text=f"Saved in {session.cfg.out_dir}", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Close", command=app.destroy).pack(side="right")
+        ttk.Button(btns, text="Open folder", command=self.open_folder).pack(side="right", padx=8)
+        ttk.Button(btns, text="Open full report", style="Accent.TButton", command=self.open_report).pack(side="right")
+        ttk.Button(btns, text="Run again", command=self.again).pack(side="left")
+        app.unbind("<Return>")
 
 
 def launch(args=None) -> int:

@@ -51,7 +51,7 @@ jobs:
 
       - name: Link range test (parsers, loss accounting, loopback)
         working-directory: tests
-        run: python -m unittest test_link_range -v
+        run: python -m unittest test_link_range test_link_range_walk -v
 
 
   gui:
@@ -160,5 +160,6 @@ jobs:
             scripts/diagnostics/map_recorder.py \
             scripts/diagnostics/link_range_test.py \
             scripts/diagnostics/link_range_gui.py \
+            scripts/diagnostics/link_range_walk.py \
             scripts/diagnostics/link_probe_server.py \
             tests

@@ -71,6 +71,38 @@ except ImportError:
 
 BOUNDARY = b"FRAME"
 
+# A client socket is tuned so that a Wi-Fi stall backs up into THIS process
+# (where FrameHub already skips straight to the newest frame) instead of into the
+# kernel's send buffer, which would hold seconds of stale frames and deliver them
+# in a burst once the link recovers.
+CLIENT_SNDBUF_BYTES = 96 * 1024
+CLIENT_SEND_TIMEOUT_S = 10.0      # a client that takes this long to accept a frame is gone
+
+
+def tune_client_socket(sock) -> None:
+    """Low-latency options for one streaming client. Best-effort: never fatal."""
+    import socket as _socket
+    for level, opt, value in (
+            (_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1),
+            (_socket.SOL_SOCKET, _socket.SO_SNDBUF, CLIENT_SNDBUF_BYTES)):
+        try:
+            sock.setsockopt(level, opt, value)
+        except OSError:
+            pass
+    try:
+        sock.settimeout(CLIENT_SEND_TIMEOUT_S)
+    except OSError:
+        pass
+
+
+def frame_chunk(jpeg: bytes) -> bytes:
+    """One multipart part - boundary, headers, image, trailing CRLF - as a single
+    buffer, so it goes out in one write instead of five small ones (every extra
+    small packet is another one Wi-Fi can lose)."""
+    head = (b"--" + BOUNDARY + b"\r\nContent-Type: image/jpeg\r\nContent-Length: "
+            + str(len(jpeg)).encode() + b"\r\n\r\n")
+    return head + jpeg + b"\r\n"
+
 
 class FrameHub:
     """Holds the latest encoded JPEG and wakes any HTTP client threads waiting on it."""
@@ -98,6 +130,10 @@ def make_handler(hub: FrameHub, log):
     class MJPEGHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
+        def setup(self):
+            super().setup()
+            tune_client_socket(self.connection)
+
         def do_GET(self):
             if self.path.rstrip("/") not in ("/video", ""):
                 self.send_response(404)
@@ -117,12 +153,7 @@ def make_handler(hub: FrameHub, log):
                     jpeg, last_id = hub.wait_next(last_id)
                     if jpeg is None:
                         continue
-                    self.wfile.write(b"--" + BOUNDARY + b"\r\n")
-                    self.send_header("Content-Type", "image/jpeg")
-                    self.send_header("Content-Length", str(len(jpeg)))
-                    self.end_headers()
-                    self.wfile.write(jpeg)
-                    self.wfile.write(b"\r\n")
+                    self.wfile.write(frame_chunk(jpeg))
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
 

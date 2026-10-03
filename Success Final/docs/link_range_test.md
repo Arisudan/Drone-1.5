@@ -13,8 +13,38 @@ This page is the reference: how it measures, how every number is defined, and wh
 |---|---|---|
 | `scripts/diagnostics/link_range_test.py` | laptop | The engine (`Session`), parsers, analysis, report writer, terminal flow, and the entry point. |
 | `scripts/diagnostics/link_range_gui.py` | laptop | The window: setup → walking → result. Opened when you run with no arguments. |
+| `scripts/diagnostics/link_range_walk.py` | laptop | Continuous-walk mode: per-second points, the seconds-and-dBm verdict, its report, the terminal stream. |
 | `scripts/diagnostics/link_probe_server.py` | Radxa | Tiny UDP echo helper for the packet-loss probe. Standalone; copied to `/tmp` and started over SSH, exits when idle. |
-| `tests/test_link_range.py`, `tests/test_link_range_gui.py` | — | Hermetic tests (loopback only; the window tests run on a private Xvfb display and are skipped without it). |
+| `tests/test_link_range.py`, `tests/test_link_range_walk.py`, `tests/test_link_range_gui.py` | — | Hermetic tests (loopback only; the window tests run on a private Xvfb display and are skipped without it). |
+
+## Continuous-walk mode (`--walk`, or the first option in the window)
+
+Instead of stopping at measured marks, you walk away at your own pace and the test streams one line of
+values per second. **No distance is recorded or estimated** — the answer is in seconds and dBm, the two things
+the laptop actually knows.
+
+**How a second is judged.** Each second, the 2 s ending then is analysed with the same code and strict rules
+as a hold: any ping or UDP loss beyond the allowed tolerance, any video reconnect, or a gap of more than 0.5 s
+between frames makes it **LOSS**. A window with no loss figure at all is **unknown**, never clean. (2 s rather
+than 1 s so a single reply still in flight at the window edge cannot look like loss; loss itself is counted from
+sequence numbers, as in a hold.)
+
+**The verdict**
+
+| Item | Meaning |
+|---|---|
+| loss-free for *N* s | verified loss-free seconds before the first LOSS second |
+| down to *X* dBm | weakest signal reached during that clean run |
+| first loss at *t* s (*Y* dBm) | when it first broke, at what signal, and why |
+| by signal level | for each 5 dB band: seconds spent, loss-free seconds, % clean |
+| "signal alone did not decide it" | printed when loss happened more than 3 dB above the weakest clean signal — look for walls, corners, interference |
+
+Outputs in the same folder layout: `report.html` / `report.md` (time-axis charts: signal, video fps, longest
+gap, data lost), `walk.json` (every second), `summary.json`, `samples.csv`.
+
+Terminal: `--walk` (Enter stops), `--walk-seconds N` (stop by itself), `--auto` (start without waiting for Enter).
+`--demo --walk` writes a synthetic report. Limits: a walk is a single pass, so it shows where it first broke but
+does not average like a 15 s hold; moving through a room is also noisier than standing still.
 
 ## Setup assumed
 

@@ -87,6 +87,7 @@ Everything else in this guide is reference material for once those two are runni
 │   │   ├── link_probe_server.py
 │   │   ├── link_range_gui.py
 │   │   ├── link_range_test.py
+│   │   ├── link_range_walk.py
 │   │   ├── live_status.py
 │   │   ├── map_eval.py
 │   │   ├── map_recorder.py
@@ -185,6 +186,7 @@ Everything else in this guide is reference material for once those two are runni
 │   ├── test_layout_density.py
 │   ├── test_link_range.py
 │   ├── test_link_range_gui.py
+│   ├── test_link_range_walk.py
 │   ├── test_map_eval.py
 │   ├── test_mini_feed.py
 │   ├── test_flight_logs.py
@@ -253,7 +255,8 @@ Everything else in this guide is reference material for once those two are runni
 - **c2_validate.py** — Pre-flight ground test confirming the GCS→FC command/ack uplink is alive (mode changes, arm/disarm, takeoff probe) — no real flight needed.
 - **fix_accel2_bias.py** — Retires the faulty IMU2 accelerometer and persists that across power cycles (sets the relevant parameters and verifies the readback).
 - **link_probe_server.py** — Radxa-side UDP echo helper for the range test's packet-loss probe. Echoes each probe stamped with how many it has received, which separates uplink from downlink loss. Standalone (copied alone to `/tmp` over SSH), touches no MAVLink/camera port, exits when idle.
-- **link_range_gui.py** — The window for the range test: setup (asks for the Radxa IP, checks the connection) → walking screen (live readouts, one big button per mark) → result (the loss-free distance first). Opened by `link_range_test.py` when run with no arguments.
+- **link_range_gui.py** — The window for the range test: setup (asks for the Radxa IP, checks the connection, chooses continuous walk or marked holds) → walking screen (live readouts, one big button per mark, or a per-second stream) → result (the loss-free distance, or the loss-free seconds and dBm, first). Opened by `link_range_test.py` when run with no arguments.
+- **link_range_walk.py** — Continuous-walk mode of the range test: a point per second from a sliding 2 s window, the verdict in seconds and dBm (loss-free duration, weakest clean signal, first loss, per-signal-band table), its HTML/Markdown report and the streamed terminal lines. No distance.
 - **link_range_test.py** — The walk-away range test engine and entry point: samplers (Wi-Fi via `iw`, ping, the real MJPEG stream, UDP probe), per-distance analysis, verdicts and the loss-free range, path-loss fit, HTML/Markdown/CSV/JSON report, a terminal flow (`--cli`) and a `--demo`. See [`docs/link_range_test.md`](docs/link_range_test.md).
 - **drone_gcs_gui.py** — Earlier standalone Tkinter GCS prototype (dual send/receive mode + CLI); superseded by the PyQt5 app in `scripts/gcs/` but kept as a diagnostics fallback.
 - **duplex_check.py** — Verifies uplink (commands reaching the FC) and downlink (telemetry reaching the GCS) independently, without arming anything.
@@ -335,7 +338,7 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **udp_mavlink_bridge.py** — Standalone UDP↔TCP MAVLink relay bridging the laptop's Wi-Fi UDP link to mavlink-router's local TCP port.
 
 ### `scripts/` (top level)
-- **d435i_video_streamer.py** — Onboard node that JPEG-compresses the D435i color stream and serves it as an MJPEG HTTP stream to the GCS.
+- **d435i_video_streamer.py** — Onboard node that JPEG-compresses the D435i color stream and serves it as an MJPEG HTTP stream to the GCS. Each client socket is tuned for low latency (`TCP_NODELAY`, ~96 KB send buffer, send timeout) and each frame goes out as one buffer, so a Wi-Fi stall backs up into the streamer (which skips to the newest frame) instead of queueing stale frames in the kernel.
 - **map_thinning_node.py** — Post-processes RTAB-Map's raw occupancy grid: purges noise blobs and skeletonizes walls to a single-pixel outline (`/map_thin`).
 - **obstacle_distance_bridge.py** — Raycasts the occupancy grid into a 72-sector MAVLink `OBSTACLE_DISTANCE` ring for PX4's avoidance/failsafe layer (currently decoupled from the main launch — see `Progress.md`'s Phase 1 entry).
 - **px4_vision_bridge.py** — Converts RTAB-Map's `/odom` pose into MAVLink `VISION_POSITION_ESTIMATE` packets and feeds them to the Pixhawk's EKF2.
@@ -359,6 +362,7 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **test_infrastructure.py** — Settings schema versioning and migrations, the UI stall monitor, the diagnostics bundle. Hermetic.
 - **test_keepout_mission.py** — Keep-out zones, multi-stop missions and the inflation layer.
 - **test_layout_density.py** — The rail's compact density (with hysteresis), the Motors page shedding detail and converging, the worst case, and the armed-green / disarmed-red convention.
+- **test_link_range_walk.py** — Continuous-walk mode: per-second points (clean, ping blackout, video stall, no-data stays unknown, Wi-Fi fallback), the seconds-and-dBm verdict, report files and time axis, CLI flags, and a live-fed terminal stream run.
 - **test_link_range.py** — The range test engine: `iw`/`ping` parsers on captured output, the JPEG frame counter at every split point, packet formats, sequence-based loss, verdicts, the loss-free range, path-loss fit, reports, and loopback integration (UDP up/down attribution, a real HTTP stream). Hermetic.
 - **test_link_range_gui.py** — The range-test window: setup validation, prefill, connection checks, the whole walk → result flow against stand-ins. Runs on its own private Xvfb display; skipped without `tkinter`/Xvfb.
 - **test_map_eval.py** — Every SLAM metric against synthetic grids, plus the CLI's exit codes.
@@ -366,6 +370,7 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **test_fpv_tools.py** — Recorder (playable AVI, resize, no-frame = no file), snapshots, placeholder frames never recorded, overlay off by default and never burned in, the 60 s graph.
 - **test_config_tab.py** — Captions for every field, restart rules, parsing, validation mapped to fields, change tracking, presets, search, save/reload, hidden fields preserved.
 - **test_slam_panel.py** — SLAM side panel, state-aware path actions (including RESUME for `paused=True`), route summary, grey-first quality strip.
+- **test_video_streaming.py** — Streamer socket tuning and one-buffer framing, a stalled loopback client receiving the newest frame rather than a backlog (fails without the tuning), and the capture thread's newest-frame-only hand-off to the GUI.
 - **test_mini_feed.py** — The rail thumbnail: no work while hidden, ~10 fps thinning, cleared when frozen, click for fullscreen, shown only when the rail has room.
 - **test_motor_response.py** — The motor range model, per-motor response (low → idle → off, sweep, mapping swap), staleness, commanded vs live, parameter routing, the throttle slider, and the caption/arrow declutter.
 - **test_motor_test.py** — The bench test must use `MAV_CMD_ACTUATOR_TEST` (310), not `DO_MOTOR_TEST` (209), with the exact packet pinned.

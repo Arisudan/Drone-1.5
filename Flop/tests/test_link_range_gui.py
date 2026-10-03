@@ -397,6 +397,92 @@ class RunFlowTest(GuiBase):
         self.assertIsInstance(a.frame, self.G.SetupScreen)
 
 
+class WalkModeSetupTest(GuiBase):
+    def test_the_mode_defaults_to_holds_and_flows_into_the_config(self):
+        a = self.app("1.2.3.4")
+        self.assertEqual(a.setup.build_config().mode, "holds")
+        a.setup.var_mode.set("walk")
+        self.assertEqual(a.setup.build_config().mode, "walk")
+
+    def test_the_chosen_mode_is_remembered(self):
+        self.L.save_prefs({"radxa": "1.2.3.4", "mode": "walk"})
+        a = self.app()
+        self.assertEqual(a.setup.var_mode.get(), "walk")
+        self.L.save_prefs({"radxa": "1.2.3.4", "mode": "nonsense"})
+        self.assertEqual(self.app().setup.var_mode.get(), "holds")
+
+
+class WalkFlowTest(GuiBase):
+    def setUp(self):
+        super().setUp()
+        self.si = StandIns()
+
+    def tearDown(self):
+        self.si.close()
+        super().tearDown()
+
+    def start(self):
+        a = self.app()
+        a.show_run(self.si.config(self.L, os.path.join(self.tmp, "out"), mode="walk"))
+        r = a.run_screen
+        self.assertIsInstance(r, self.G.WalkScreen)
+        self.assertTrue(self.until(a, lambda: r.state == "ready", 15))
+        return a, r
+
+    def test_it_waits_for_the_start_button(self):
+        a, r = self.start()
+        self.assertIn("Start walking", r.btn_main.cget("text"))
+        self.pump(a, 1.5)
+        self.assertEqual(len(r.tree.get_children()), 0)          # nothing streams before the button
+
+    def test_values_stream_once_a_second_after_start(self):
+        a, r = self.start()
+        r.on_main()
+        self.assertEqual(r.state, "walking")
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 3, 10))
+        self.assertIn("s", r.t_time.value.cget("text"))
+        self.assertIn("fps", r.t_video.value.cget("text"))
+        self.assertIn("Loss-free", r.lbl_head.cget("text"))
+        self.assertIn("Stop", r.btn_main.cget("text"))
+
+    def test_stop_writes_the_report_and_shows_seconds_not_distance(self):
+        a, r = self.start()
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 3, 10))
+        r.on_main()                                              # the same button now stops
+        self.assertTrue(self.until(a, lambda: isinstance(a.frame, self.G.WalkResultScreen), 15))
+        res = a.result
+        self.assertTrue(os.path.exists(res.report))
+        self.assertTrue(res.lbl_big.cget("text").endswith(" s") or res.lbl_big.cget("text") == "–")
+        files = set(os.listdir(os.path.join(self.tmp, "out")))
+        self.assertTrue({"report.html", "summary.json", "walk.json", "samples.csv"} <= files)
+        self.assertEqual(res.summary["mode"], "walk")
+
+    def test_stopping_before_starting_asks_first(self):
+        a, r = self.start()
+        with mock.patch.object(self.G.messagebox, "askyesno", return_value=False) as ask:
+            r.finish()
+        self.assertTrue(ask.called)
+        self.assertFalse(r._fin)
+
+    def test_closing_the_window_mid_walk_offers_to_save(self):
+        a, r = self.start()
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 2, 10))
+        with mock.patch.object(self.G.messagebox, "askyesno", return_value=True):
+            a._on_close()
+        self.assertTrue(self.until(a, lambda: isinstance(a.frame, self.G.WalkResultScreen), 15))
+
+    def test_run_again_returns_to_setup(self):
+        a, r = self.start()
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 2, 10))
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: isinstance(a.frame, self.G.WalkResultScreen), 15))
+        a.result.again()
+        self.assertIsInstance(a.frame, self.G.SetupScreen)
+
+
 class ThemeAndHelpersTest(GuiBase):
     def test_signal_colours_follow_the_thresholds(self):
         G = self.G
