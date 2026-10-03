@@ -296,6 +296,9 @@ class MAVLinkWorker(QThread):
         self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_EXTENDED_SYS_STATE, 2.0)
         # RC_CHANNELS: 2 Hz - RC link status badge (rssi + SYS_STATUS health bit).
         self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, 2.0)
+        # DISTANCE_SENSOR: 5 Hz - downward rangefinder height, so a disarm can
+        # tell "genuinely on the floor" from "ON_GROUND flag but held up".
+        self.request_message_interval(mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR, 5.0)
         self._streams_configured = True
 
     def run(self):
@@ -548,6 +551,11 @@ class MAVLinkWorker(QThread):
         elif msg_type == "RC_CHANNELS":
             with self.telemetry_lock:
                 self.telemetry.update_rc_channels(msg)
+            self._emit_telemetry()
+
+        elif msg_type == "DISTANCE_SENSOR":
+            with self.telemetry_lock:
+                self.telemetry.update_distance_sensor(msg)
             self._emit_telemetry()
 
         elif msg_type == "EXTENDED_SYS_STATE":

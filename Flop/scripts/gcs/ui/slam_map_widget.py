@@ -46,11 +46,11 @@ from collections import deque
 from typing import Optional, List, Tuple
 import numpy as np
 
-from PyQt5.QtCore import Qt, QPointF, pyqtSignal
+from PyQt5.QtCore import Qt, QPointF, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QWheelEvent, QMouseEvent
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame, QSizePolicy, QStackedWidget, QComboBox,
-    QMessageBox, QMenu, QAction, QApplication, QButtonGroup, QListWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QBoxLayout, QGridLayout, QPushButton, QLabel, QFrame, QSizePolicy, QStackedWidget, QComboBox,
+    QMessageBox, QMenu, QAction, QApplication, QButtonGroup, QListWidget, QScrollArea,
     QListWidgetItem
 )
 
@@ -971,6 +971,9 @@ class SLAMMapWidget(QWidget):
         self.current_view_mode: int = 0
         self.map_source: str = "none"
         self._armed: bool = False
+        self._map_ever_seen: bool = False
+        self._panel_collapsed: bool = False
+        self._actions_running: bool = False
         self._has_raw_map: bool = False
         self._has_thin_map: bool = False
         self.rviz_status: str = "OFFLINE"
@@ -1013,137 +1016,23 @@ class SLAMMapWidget(QWidget):
         self.view_group.addButton(self.btn_view_rviz, 1)
         r1.addWidget(self.btn_view_rviz)
 
-        # MAP cluster. This is map *state* and a map-level action, so it belongs
-        # beside the view switcher rather than among the zoom buttons below -
-        # and row 2 could not hold it once the layer control became three
-        # buttons instead of one.
-        r1.addWidget(self._cluster_rule())
-        self.lbl_map_caption = self._cluster_caption("MAP")
-        r1.addWidget(self.lbl_map_caption)
 
-        self.pill_status = QLabel("NO DATA", self)
-        self.pill_status.setObjectName("mapPill")
-        self.pill_status.setMinimumHeight(px(24))
-        self.pill_status.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.pill_status.setAlignment(Qt.AlignCenter)
-        # Floored on today's text only, then grown further in
-        # _refresh_map_pill() as wider states are actually seen - not
-        # pre-provisioned for every state up front. "LIVE /map_thin" alone is
-        # nearly double "NO DATA"'s width; reserving that unconditionally
-        # pushed Reset Map into overlapping it at 1220-1280px @1.35x, sizes
-        # this station is meant to support, for a state that is not even the
-        # common case.
-        self._fit_button_to_text(self.pill_status)
-        self.badge_source = self.pill_status  # Backward-compatible alias
-        r1.addWidget(self.pill_status)
-
-        # Reset Map wipes the live SLAM database and restarts mapping from
-        # empty, on a vehicle with no display or keyboard of its own. It keeps
-        # its own colour and never sits inline among the view tools.
-        self.btn_reset_map = QPushButton("Reset Map", self)
-        self.btn_reset_map.setObjectName("mapDanger")
-        self.btn_reset_map.setToolTip(
-            "Wipe the live SLAM map and restart mapping from empty. Disabled while armed.")
-        self._fit_button_to_text(self.btn_reset_map)
-        self.btn_reset_map.clicked.connect(self._handle_reset_map_clicked)
-        r1.addWidget(self.btn_reset_map)
-
-        r1.addStretch(1)
-
-        # The staged-goal chip. Hidden until there is a goal: this row used to
-        # carry a ~1000px bordered box reading "Click map to stage a goal",
-        # empty for most of a flight and occupying the most prominent space on
-        # the tab. The instruction it carried now lives on the canvas overlay,
-        # where the click actually happens.
-        # MISSION cluster. Cruise altitude belongs beside EXECUTE - it is the
-        # altitude the path about to be flown will be flown at - not among the
-        # zoom buttons, which is where it used to sit.
-        r1.addWidget(self._cluster_caption("MISSION"))
-
-        self.combo_alt = QComboBox(self)
-        self.combo_alt.addItems(["0.8m", "1.0m", "1.2m", "1.5m", "2.0m"])
-        self.combo_alt.setCurrentText("1.0m")
-        # padding (20) + border (2) + drop-down arrow well (18) + slack
-        fit_min_width(self.combo_alt, ["0.8m", "1.0m", "1.2m", "1.5m", "2.0m"], h_pad_px=46)
-        self.combo_alt.setToolTip("Cruise altitude AGL for autonomous path traversal")
-        self.combo_alt.currentTextChanged.connect(self._on_altitude_selected)
-        r1.addWidget(self.combo_alt)
-
-        r1.addWidget(self._cluster_rule())
-
-        self.lbl_path_info = QLabel("", self)
-        self.lbl_path_info.setObjectName("goalChip")
-        self.lbl_path_info.setVisible(False)
-        r1.addWidget(self.lbl_path_info)
-
-        self.btn_execute_path = QPushButton("EXECUTE", self)
-        self.btn_execute_path.setObjectName("btnGo")
-        self.btn_execute_path.setToolTip("Fly the planned path (Ctrl+E)")
-        self._fit_button_to_text(self.btn_execute_path)
-        self.btn_execute_path.setEnabled(False)
-        self.btn_execute_path.clicked.connect(self._handle_execute_path)
-        r1.addWidget(self.btn_execute_path)
-
-        self.btn_pause_path = QPushButton("PAUSE", self)
-        self.btn_pause_path.setObjectName("btnHold")
-        self.btn_pause_path.setToolTip("Pause the path and hold position (AUTO.LOITER)")
-        self._fit_button_to_text(self.btn_pause_path, extra_labels=("RESUME",))
-        self.btn_pause_path.setEnabled(False)
-        self.btn_pause_path.clicked.connect(self._handle_pause_path)
-        r1.addWidget(self.btn_pause_path)
-
-        self.btn_abort_path = QPushButton("ABORT", self)
-        self.btn_abort_path.setObjectName("btnAbort")
-        self.btn_abort_path.setToolTip("Abort the path and land immediately")
-        self._fit_button_to_text(self.btn_abort_path)
-        self.btn_abort_path.setEnabled(False)
-        self.btn_abort_path.clicked.connect(self._handle_abort_path)
-        r1.addWidget(self.btn_abort_path)
-
-        self.btn_clear_goal = QPushButton("Clear", self)
-        self.btn_clear_goal.setObjectName("mapTool")
-        self.btn_clear_goal.setToolTip("Clear the staged goal and its planned path")
-        self._fit_button_to_text(self.btn_clear_goal)
-        self.btn_clear_goal.clicked.connect(self._handle_clear_goal)
-        r1.addWidget(self.btn_clear_goal)
+        r1.addSpacing(px(8))
 
         main_hl.addLayout(r1)
 
         # ── Row 2: context bar, swapped by view mode ─────────────────────
         self.context_stack = QStackedWidget(self)
+        self.context_stack.setObjectName("transparentRow")
 
         self.row_2d_controls = QWidget(self)
+        self.row_2d_controls.setObjectName("transparentRow")
         r2 = QHBoxLayout(self.row_2d_controls)
         r2.setContentsMargins(0, 0, 0, 0)
         r2.setSpacing(px(4))
 
         # VIEW cluster ---------------------------------------------------
         r2.addWidget(self._cluster_caption("VIEW"))
-
-        # Map layers, as a real three-way control. The canvas has always
-        # supported raw / skeleton / both, and the README advertises all three,
-        # but the UI was a single button whose handler ignored its own argument
-        # and set "both" every time - so the skeleton could never be inspected
-        # on its own, which is exactly what docs/slam_evaluation.md asks for.
-        self.layer_group = QButtonGroup(self)
-        self.layer_group.setExclusive(True)
-        self.btn_layer_raw = self._seg_button(
-            "Raw", "RTAB-Map occupancy grid only (/map): free space and obstacle mass")
-        self.btn_layer_thin = self._seg_button(
-            "Thin", "Thinned single-pixel wall skeleton only (/map_thin)")
-        self.btn_layer_both = self._seg_button(
-            "Both", "Skeleton overlaid on the raw grid (default)")
-        self.btn_layer_both.setChecked(True)
-        for i, (btn, mode) in enumerate(((self.btn_layer_raw, "raw"),
-                                         (self.btn_layer_thin, "thin"),
-                                         (self.btn_layer_both, "both"))):
-            self.layer_group.addButton(btn, i)
-            btn.clicked.connect(lambda _c, m=mode: self.set_layer_mode(m))
-            r2.addWidget(btn)
-        # Backward-compatible alias for callers that knew the old single button.
-        self.btn_layer_map = self.btn_layer_both
-
-        r2.addWidget(self._cluster_rule())
 
         self.btn_turn_left = self._map_tool("\u21ba 90\u00b0", "Rotate the map 90\u00b0 counter-clockwise")
         self.btn_turn_left.clicked.connect(self._handle_turn_left)
@@ -1183,19 +1072,6 @@ class SLAMMapWidget(QWidget):
         self.btn_reset_view.clicked.connect(lambda: self.canvas.reset_view())
         r2.addWidget(self.btn_reset_view)
 
-        self.btn_ruler = self._map_tool(
-            "Measure",
-            "Measure distances. While active, left-click adds a measuring "
-            "point instead of staging a goal. Esc clears.",
-            checkable=True)
-        self.btn_ruler.toggled.connect(self._on_ruler_toggled)
-        r2.addWidget(self.btn_ruler)
-
-        self.lbl_ruler = QLabel("", self)
-        self.lbl_ruler.setObjectName("rulerTotal")
-        self.lbl_ruler.setVisible(False)
-        r2.addWidget(self.lbl_ruler)
-
         # Kept for callers and tests, but off the toolbar: "Clear trail" is in
         # the map right-click menu and the row could not hold both.
         self.btn_clear_trail = QPushButton("Trail", self)
@@ -1209,6 +1085,7 @@ class SLAMMapWidget(QWidget):
 
         # Context page 1: RViz controls --------------------------------
         self.row_3d_controls = QWidget(self)
+        self.row_3d_controls.setObjectName("transparentRow")
         r3 = QHBoxLayout(self.row_3d_controls)
         r3.setContentsMargins(0, 0, 0, 0)
         r3.setSpacing(px(6))
@@ -1236,7 +1113,8 @@ class SLAMMapWidget(QWidget):
         r3.addStretch()
         self.context_stack.addWidget(self.row_3d_controls)
 
-        main_hl.addWidget(self.context_stack)
+        # One toolbar row: the view switch, then that view's own tools.
+        r1.addWidget(self.context_stack, 1)
         layout.addWidget(header_card)
 
         # Route progress. Hidden until a path is staged - an empty progress bar
@@ -1261,10 +1139,10 @@ class SLAMMapWidget(QWidget):
                            ("frontier", "Frontier"), ("wall_rms", "Walls"),
                            ("squareness", "Square"), ("obstacles", "Obstacles")):
             cap = QLabel(label, self)
-            cap.setObjectName("execAxis")
+            cap.setObjectName("qualCaption")
             ql.addWidget(cap)
             val = QLabel("--", self)
-            val.setObjectName("execReadout")
+            val.setObjectName("qualValue")
             ql.addWidget(val)
             ql.addSpacing(px(4))
             self._quality_cells[key] = val
@@ -1289,34 +1167,6 @@ class SLAMMapWidget(QWidget):
         self.canvas.keepout_changed.connect(self._on_keepout_changed)
         self.canvas.mission_changed.connect(self._on_mission_changed)
 
-        # Map-editing tools live in a vertical strip on the map's own left edge
-        # - QGroundControl's Plan View convention - not in the toolbar row,
-        # which is already full at the minimum window size (test_gui_layout).
-        self.map_tool_strip = QFrame(self.canvas)
-        self.map_tool_strip.setObjectName("mapToolStrip")
-        strip = QVBoxLayout(self.map_tool_strip)
-        strip.setContentsMargins(0, 0, 0, 0)
-        strip.setSpacing(4)
-        self.btn_inflation = self._map_tool(
-            "Inflation",
-            "Show the planner's safety margin: cells the vehicle's centre cannot "
-            "enter because its body would touch a wall or keep-out zone "
-            "(RViz costmap 'inscribed' cyan)",
-            checkable=True)
-        self.btn_inflation.setParent(self.map_tool_strip)
-        self.btn_inflation.setChecked(True)
-        self.btn_inflation.toggled.connect(self.canvas_set_inflation_visible)
-        strip.addWidget(self.btn_inflation)
-        self.btn_keepout = self._map_tool(
-            "Keep-out",
-            "Draw keep-out zones. While active, left-drag draws a rectangle the "
-            "planner will never route through. Right-click a zone to remove it.",
-            checkable=True)
-        self.btn_keepout.setParent(self.map_tool_strip)
-        self.btn_keepout.toggled.connect(self._on_keepout_toggled)
-        strip.addWidget(self.btn_keepout)
-        self.map_tool_strip.adjustSize()
-        self.map_tool_strip.move(8, 8)
         # Needed for the canvas keyPressEvent (Esc clears a measurement) to be
         # reachable at all - without it the canvas never receives key events.
         self.canvas.setFocusPolicy(Qt.StrongFocus)
@@ -1337,9 +1187,14 @@ class SLAMMapWidget(QWidget):
         view_row = QHBoxLayout()
         view_row.setContentsMargins(0, 0, 0, 0)
         view_row.setSpacing(6)
-        view_row.addWidget(self.view_stack, 1)
-        self.mission_panel = self._build_mission_panel()
-        view_row.addWidget(self.mission_panel)
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(4)
+        left_col.addWidget(self.view_stack, 1)
+        left_col.addWidget(self._build_status_strip())
+        view_row.addLayout(left_col, 1)
+        self.side_panel = self._build_side_panel()
+        view_row.addWidget(self.side_panel)
         layout.addLayout(view_row, 1)
 
         # Default to 2D Blueprint view on launch
@@ -1422,6 +1277,8 @@ class SLAMMapWidget(QWidget):
         """
         has_thin = bool(getattr(self, "_has_thin_map", False))
         has_raw = bool(getattr(self, "_has_raw_map", False))
+        if has_thin or has_raw:
+            self._map_ever_seen = True
 
         if self.current_view_mode == 0:
             if has_thin and has_raw:
@@ -1437,8 +1294,12 @@ class SLAMMapWidget(QWidget):
                 text, state = "BENCH", "warn"
                 tip = "Synthetic bench floorplan - not live vehicle data"
             else:
-                text, state = "NO DATA", "bad"
-                tip = "No occupancy grid received on either topic"
+                # Grey until a map has actually been flowing: "nothing yet" is the
+                # normal state at start-up. Red only when a live map has gone away.
+                seen = getattr(self, "_map_ever_seen", False)
+                text, state = ("MAP LOST", "bad") if seen else ("NO DATA", "idle")
+                tip = ("The occupancy grid stopped arriving on both topics" if seen
+                       else "No occupancy grid received yet on either topic")
         else:
             if self.rviz_status == "ACTIVE":
                 text, state, tip = "ACTIVE", "ok", "Embedded RViz2 is running"
@@ -1451,6 +1312,10 @@ class SLAMMapWidget(QWidget):
 
         if hasattr(self, "lbl_map_caption"):
             self.lbl_map_caption.setText("MAP" if self.current_view_mode == 0 else "RVIZ")
+        if hasattr(self, "layers_section"):
+            self.layers_section.setVisible(self.current_view_mode == 0)
+        if hasattr(self, "status_strip"):
+            self.status_strip.setVisible(self.current_view_mode == 0)
         self.pill_status.setText(text)
         grow_min_width(self.pill_status, h_pad_px=22)
         self.pill_status.setToolTip(tip)
@@ -1594,18 +1459,324 @@ class SLAMMapWidget(QWidget):
             worker.planner.set_keepout_zones(zones)
         self.request_inflation()
 
+    # ── side panel: map status, layers, route, path actions ───────────
+
+    def _section_caption(self, text: str) -> QLabel:
+        lbl = QLabel(text, self)
+        lbl.setObjectName("mapCaption")
+        return lbl
+
+    def _build_side_panel(self) -> QFrame:
+        """Everything that is not "how the map is zoomed" or "which view".
+
+        It used to be scattered: the map-state pill and Reset Map in the top
+        row, the layer switch in the second, Inflation/Keep-out on the canvas's
+        own left edge, Measure beside the zoom buttons and the path actions
+        in the first row with a chip nobody could read at a glance. One column
+        now, in the order the operator works: what the map is (MAP), what is
+        drawn on it (LAYERS), what route is staged (ROUTE), then the actions
+        that move the aircraft at the bottom, large and shown only when they
+        apply - EXECUTE while idle, PAUSE and ABORT while flying.
+        """
+        panel = QFrame(self)
+        panel.setObjectName("sidePanel")
+        panel.setProperty("class", "cardFrame")
+        self._panel_expanded_w = px(206)
+        self._panel_collapsed_w = px(92)
+        panel.setFixedWidth(self._panel_expanded_w)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(px(8), px(6), px(8), px(8))
+        outer.setSpacing(px(4))
+        # Status, layers and route scroll if the window is too short to hold
+        # them; the path actions below stay pinned and always fully visible.
+        scroll = QScrollArea(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("transparentRow")
+        scroll.viewport().setAutoFillBackground(False)
+        body = QWidget()
+        body.setObjectName("transparentRow")
+        v = QVBoxLayout(body)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(px(4))
+
+        # MAP ------------------------------------------------------------
+        # The header stays outside the scroll area so the collapse button is
+        # always reachable.
+        head = QHBoxLayout()
+        head.setSpacing(px(4))
+        self.lbl_map_caption = self._section_caption("MAP")
+        head.addWidget(self.lbl_map_caption)
+        self.pill_status = QLabel("NO DATA", self)
+        self.pill_status.setObjectName("mapPill")
+        self.pill_status.setMinimumHeight(px(24))
+        self.pill_status.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.pill_status.setAlignment(Qt.AlignCenter)
+        # Floored on today's text only, then grown further in _refresh_map_pill()
+        # as wider states are actually seen.
+        self._fit_button_to_text(self.pill_status)
+        self.badge_source = self.pill_status  # Backward-compatible alias
+        head.addWidget(self.pill_status)
+        head.addStretch(1)
+        self.btn_collapse_panel = QPushButton("\u203a", self)
+        self.btn_collapse_panel.setObjectName("mapTool")
+        self.btn_collapse_panel.setToolTip("Hide the side panel (keeps the path actions)")
+        self.btn_collapse_panel.setFixedWidth(px(26))
+        self.btn_collapse_panel.clicked.connect(lambda: self.set_panel_collapsed(not self._panel_collapsed))
+        head.addWidget(self.btn_collapse_panel)
+        outer.addLayout(head)
+        self._panel_head_row = head
+
+        # Reset Map wipes the live SLAM database and restarts mapping from
+        # empty, on a vehicle with no display or keyboard of its own. It keeps
+        # its own colour and never sits inline among the view tools.
+        self.btn_reset_map = QPushButton("Reset Map", self)
+        self.btn_reset_map.setObjectName("mapDanger")
+        self.btn_reset_map.setToolTip(
+            "Wipe the live SLAM map and restart mapping from empty. Disabled while armed.")
+        self._fit_button_to_text(self.btn_reset_map)
+        self.btn_reset_map.clicked.connect(self._handle_reset_map_clicked)
+        v.addWidget(self.btn_reset_map)
+
+        # LAYERS ---------------------------------------------------------
+        self.layers_section = QWidget(self)
+        self.layers_section.setObjectName("transparentRow")
+        lv = QVBoxLayout(self.layers_section)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(px(6))
+        lv.addWidget(self._cluster_rule_h())
+        lv.addWidget(self._section_caption("LAYERS"))
+
+        # A real three-way control. The canvas has always supported raw /
+        # skeleton / both, and the README advertises all three; judging wall
+        # quality means looking at the skeleton alone (docs/slam_evaluation.md).
+        self.layer_group = QButtonGroup(self)
+        self.layer_group.setExclusive(True)
+        self.btn_layer_raw = self._seg_button(
+            "Raw", "RTAB-Map occupancy grid only (/map): free space and obstacle mass")
+        self.btn_layer_thin = self._seg_button(
+            "Thin", "Thinned single-pixel wall skeleton only (/map_thin)")
+        self.btn_layer_both = self._seg_button(
+            "Both", "Skeleton overlaid on the raw grid (default)")
+        self.btn_layer_both.setChecked(True)
+        seg = QHBoxLayout()
+        seg.setSpacing(px(2))
+        for i, (btn, mode) in enumerate(((self.btn_layer_raw, "raw"),
+                                         (self.btn_layer_thin, "thin"),
+                                         (self.btn_layer_both, "both"))):
+            self.layer_group.addButton(btn, i)
+            btn.clicked.connect(lambda _c, m=mode: self.set_layer_mode(m))
+            seg.addWidget(btn)
+        lv.addLayout(seg)
+        # Backward-compatible alias for callers that knew the old single button.
+        self.btn_layer_map = self.btn_layer_both
+
+        tools = QGridLayout()
+        tools.setHorizontalSpacing(px(4))
+        tools.setVerticalSpacing(px(4))
+        self.btn_inflation = self._map_tool(
+            "Inflation",
+            "Show the planner's safety margin: cells the vehicle's centre cannot "
+            "enter because its body would touch a wall or keep-out zone "
+            "(RViz costmap 'inscribed' cyan)",
+            checkable=True)
+        self.btn_inflation.setChecked(True)
+        self.btn_inflation.toggled.connect(self.canvas_set_inflation_visible)
+        self.btn_keepout = self._map_tool(
+            "Keep-out",
+            "Draw keep-out zones. While active, left-drag draws a rectangle the "
+            "planner will never route through. Right-click a zone to remove it.",
+            checkable=True)
+        self.btn_keepout.toggled.connect(self._on_keepout_toggled)
+        self.btn_ruler = self._map_tool(
+            "Measure",
+            "Measure distances. While active, left-click adds a measuring "
+            "point instead of staging a goal. Esc clears.",
+            checkable=True)
+        self.btn_ruler.toggled.connect(self._on_ruler_toggled)
+        self.lbl_ruler = QLabel("", self)
+        self.lbl_ruler.setObjectName("rulerTotal")
+        self.lbl_ruler.setVisible(False)
+        tools.addWidget(self.btn_inflation, 0, 0)
+        tools.addWidget(self.btn_keepout, 0, 1)
+        tools.addWidget(self.btn_ruler, 1, 0)
+        tools.addWidget(self.lbl_ruler, 1, 1)
+        lv.addLayout(tools)
+        v.addWidget(self.layers_section)
+
+        # ROUTE ----------------------------------------------------------
+        v.addWidget(self._cluster_rule_h())
+        v.addWidget(self._section_caption("ROUTE"))
+        self.lbl_route_idle = QLabel("Click the map to stage a goal.\nShift+click adds more stops.", self)
+        self.lbl_route_idle.setObjectName("fieldSubLabel")
+        self.lbl_route_idle.setWordWrap(True)
+        v.addWidget(self.lbl_route_idle)
+
+        self.lbl_path_info = QLabel("", self)
+        self.lbl_path_info.setObjectName("goalChip")
+        self.lbl_path_info.setWordWrap(True)
+        self.lbl_path_info.setVisible(False)
+        v.addWidget(self.lbl_path_info)
+
+        self.mission_panel = self._build_mission_panel()
+        v.addWidget(self.mission_panel)
+        self.btn_clear_goal = QPushButton("Clear route", self)
+        self.btn_clear_goal.setObjectName("mapTool")
+        self.btn_clear_goal.setToolTip("Clear the staged goal and its planned path")
+        self._fit_button_to_text(self.btn_clear_goal)
+        self.btn_clear_goal.clicked.connect(self._handle_clear_goal)
+        v.addWidget(self.btn_clear_goal)
+        v.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        outer.addStretch(0)           # takes the space when the scroll area is hidden
+        self._panel_outer = outer
+        v = outer
+
+        # CRUISE ALT: the altitude the route about to be flown will be flown at,
+        # so it sits directly above EXECUTE rather than in the top bar.
+        self._alt_widgets = []
+        alt_row = QHBoxLayout()
+        alt_row.setSpacing(px(8))
+        self._lbl_alt_caption = self._section_caption("CRUISE ALT")
+        alt_row.addWidget(self._lbl_alt_caption)
+        alt_row.addStretch(1)
+        self.combo_alt = QComboBox(self)
+        self.combo_alt.addItems(["0.8m", "1.0m", "1.2m", "1.5m", "2.0m"])
+        self.combo_alt.setCurrentText("1.0m")
+        # padding (20) + border (2) + drop-down arrow well (18) + slack
+        fit_min_width(self.combo_alt, ["0.8m", "1.0m", "1.2m", "1.5m", "2.0m"], h_pad_px=46)
+        self.combo_alt.setToolTip("Cruise altitude AGL for autonomous path traversal")
+        self.combo_alt.currentTextChanged.connect(self._on_altitude_selected)
+        alt_row.addWidget(self.combo_alt)
+        v.addLayout(alt_row)
+
+        # PATH ACTIONS ---------------------------------------------------
+        # Large, because these move the aircraft, and state-aware: only the
+        # actions that apply right now are shown (see set_executing_state).
+        self.btn_execute_path = QPushButton("EXECUTE", self)
+        self.btn_execute_path.setObjectName("btnGo")
+        self.btn_execute_path.setToolTip("Fly the planned path (Ctrl+E)")
+        self._fit_button_to_text(self.btn_execute_path)
+        self.btn_execute_path.setEnabled(False)
+        self.btn_execute_path.clicked.connect(self._handle_execute_path)
+        v.addWidget(self.btn_execute_path)
+
+        run_row = QBoxLayout(QBoxLayout.LeftToRight)
+        self._run_row = run_row
+        run_row.setSpacing(px(6))
+        self.btn_pause_path = QPushButton("PAUSE", self)
+        self.btn_pause_path.setObjectName("btnHold")
+        self.btn_pause_path.setToolTip("Pause the path and hold position (AUTO.LOITER)")
+        self._fit_button_to_text(self.btn_pause_path, extra_labels=("RESUME",))
+        self.btn_pause_path.setEnabled(False)
+        self.btn_pause_path.clicked.connect(self._handle_pause_path)
+        run_row.addWidget(self.btn_pause_path)
+        self.btn_abort_path = QPushButton("ABORT", self)
+        self.btn_abort_path.setObjectName("btnAbort")
+        self.btn_abort_path.setToolTip("Abort the path and land immediately")
+        self._fit_button_to_text(self.btn_abort_path)
+        self.btn_abort_path.setEnabled(False)
+        self.btn_abort_path.clicked.connect(self._handle_abort_path)
+        run_row.addWidget(self.btn_abort_path)
+        v.addLayout(run_row)
+        for b in (self.btn_execute_path, self.btn_pause_path, self.btn_abort_path):
+            b.setMinimumHeight(px(38))
+
+        self._scroll_area = scroll
+        self._apply_action_visibility(running=False)
+        return panel
+
+    def _build_status_strip(self) -> QFrame:
+        """Pose and position-uncertainty, under the map.
+
+        These used to be painted on the canvas's bottom-right corner, where
+        they sat on top of the map and the uncertainty line collided with the
+        pose line. A strip of their own never covers the map and has room for
+        both.
+        """
+        self.status_strip = QFrame(self)
+        self.status_strip.setObjectName("mapStatusStrip")
+        h = QHBoxLayout(self.status_strip)
+        h.setContentsMargins(px(10), px(3), px(10), px(3))
+        h.setSpacing(px(16))
+        self.lbl_pose = QLabel("", self)
+        self.lbl_pose.setObjectName("statusPose")
+        h.addWidget(self.lbl_pose)
+        h.addStretch(1)
+        self.lbl_uncert = QLabel("", self)
+        self.lbl_uncert.setObjectName("statusUncert")
+        h.addWidget(self.lbl_uncert)
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._refresh_status_strip)
+        self._status_timer.start(250)
+        self._refresh_status_strip()
+        return self.status_strip
+
+    def _refresh_status_strip(self) -> None:
+        c = self.canvas
+        follow = "FOLLOW" if c.auto_follow else "FREE PAN"
+        self.lbl_pose.setText(
+            f"N {c.drone_x:+.2f}  E {c.drone_y:+.2f} m   "
+            f"HDG {c.heading:.0f}\u00b0   ROT {c.rotation_deg:.0f}\u00b0   {follow}")
+        state, r95 = c.uncertainty_state()
+        if state == "unknown":
+            text = "POS \u00b1 --  (no EKF covariance)"
+        elif state == "stale":
+            text = f"POS \u00b1{r95:.2f} m (95%)  STALE"
+        else:
+            text = f"POS \u00b1{r95:.2f} m (95%)"
+            if state == "danger":
+                text += "  > safety margin"
+        self.lbl_uncert.setText(text)
+        col = c._uncertainty_colour(state)
+        self.lbl_uncert.setStyleSheet(f"color: {col.name()};")
+
+    def _cluster_rule_h(self) -> QFrame:
+        rule = QFrame(self)
+        rule.setObjectName("hDivider")
+        rule.setFixedHeight(1)
+        return rule
+
+    def panel_collapsed(self) -> bool:
+        return self._panel_collapsed
+
+    def set_panel_collapsed(self, collapsed: bool) -> None:
+        """Fold the side panel to a narrow strip that keeps only the path actions
+        (stacked), giving the map the rest of the width."""
+        self._panel_collapsed = bool(collapsed)
+        c = self._panel_collapsed
+        self.side_panel.setFixedWidth(self._panel_collapsed_w if c else self._panel_expanded_w)
+        for w in (self._scroll_area, self.lbl_map_caption, self.pill_status,
+                  self._lbl_alt_caption, self.combo_alt):
+            w.setVisible(not c)
+        self._panel_outer.setStretch(2, 1 if c else 0)
+        self._run_row.setDirection(QBoxLayout.TopToBottom if c else QBoxLayout.LeftToRight)
+        self.btn_collapse_panel.setText("\u2039" if c else "\u203a")
+        self.btn_collapse_panel.setToolTip("Show the side panel" if c else "Hide the side panel (keeps the path actions)")
+        self._apply_action_visibility(running=self._actions_running)
+        self.canvas.update()
+
+    def _apply_action_visibility(self, running: bool) -> None:
+        self._actions_running = running
+        """EXECUTE while idle; PAUSE/RESUME and ABORT while a path is flying or held."""
+        self.btn_execute_path.setVisible(not running)
+        self.btn_pause_path.setVisible(running)
+        self.btn_abort_path.setVisible(running)
+        self.btn_clear_goal.setVisible(not running and not self._panel_collapsed)
+
     # ── mission panel ──────────────────────────────────────────────
 
     def _build_mission_panel(self) -> QFrame:
         panel = QFrame(self)
         panel.setObjectName("missionPanel")
         panel.setProperty("class", "cardFrame")
-        panel.setFixedWidth(px(230))
         v = QVBoxLayout(panel)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(6)
-        title = QLabel("MISSION", panel)
-        title.setObjectName("cardHeading")
+        v.setContentsMargins(6, 6, 6, 6)
+        v.setSpacing(4)
+        title = QLabel("STOPS", panel)
+        title.setObjectName("mapCaption")
         v.addWidget(title)
         self.lbl_mission_stats = QLabel("", panel)
         self.lbl_mission_stats.setObjectName("fieldSubLabel")
@@ -1614,9 +1785,9 @@ class SLAMMapWidget(QWidget):
         self.list_mission = QListWidget(panel)
         self.list_mission.setToolTip(
             "Stops in flight order. Shift+click the map to add, Backspace removes the last.")
-        v.addWidget(self.list_mission, 1)
+        v.addWidget(self.list_mission)
         row = QHBoxLayout()
-        row.setSpacing(4)
+        row.setSpacing(3)
         for text, tip, fn in (
                 ("▲", "Move selected stop earlier", lambda: self._move_selected(-1)),
                 ("▼", "Move selected stop later", lambda: self._move_selected(+1)),
@@ -1660,12 +1831,16 @@ class SLAMMapWidget(QWidget):
         current = self.list_mission.currentRow()
         self.list_mission.clear()
         for i, (x, y) in enumerate(stops):
-            leg = legs[i] if i < len(legs) else None
-            leg_txt = f"  {leg['distance_m']:.1f}m" if leg else ""
-            self.list_mission.addItem(QListWidgetItem(
-                f"{i + 1}. N{x:+.2f} E{y:+.2f}{leg_txt}"))
+            # No per-leg distance here: the summary line above already gives the
+            # total, and the row has to fit the narrow panel without wrapping.
+            self.list_mission.addItem(QListWidgetItem(f"{i + 1}. N{x:+.1f} E{y:+.1f}"))
         if 0 <= current < self.list_mission.count():
             self.list_mission.setCurrentRow(current)
+        # Height follows the number of stops (2..6 rows) instead of reserving a
+        # tall empty box; beyond six it scrolls.
+        row_h = max(self.list_mission.sizeHintForRow(0), px(18)) if self.list_mission.count() else px(18)
+        rows = max(2, min(6, self.list_mission.count()))
+        self.list_mission.setFixedHeight(rows * row_h + 2 * self.list_mission.frameWidth() + px(6))
         if legs and len(legs) == len(stops):
             total = sum(l["distance_m"] for l in legs)
             t = sum(l.get("est_flight_time_s", 0.0) for l in legs)
@@ -1708,11 +1883,9 @@ class SLAMMapWidget(QWidget):
                 continue
             cell.setText(metric.text)
             cell.setToolTip(metric.detail)
-            if metric.good is None:
-                cell.setStyleSheet("")
-            else:
-                colour = PALETTE["ok"] if metric.good else PALETTE["warn"]
-                cell.setStyleSheet(f"color: {colour};")
+            # Grey-first: a passing or unjudged number stays neutral; only a
+            # value that FAILS its threshold takes the caution colour.
+            cell.setStyleSheet(f"color: {PALETTE['warn']};" if metric.good is False else "")
         failed = [m.label for m in quality.metrics if m.good is False]
         if failed:
             self.lbl_quality_note.setText(
@@ -2025,6 +2198,7 @@ class SLAMMapWidget(QWidget):
         self.canvas._auto_fit_done = False
         self._has_raw_map = False
         self._has_thin_map = False
+        self._map_ever_seen = False       # a deliberate reset is not a lost map
         self.canvas.update()
 
     def on_ros2_map_received(
@@ -2083,29 +2257,29 @@ class SLAMMapWidget(QWidget):
         n_stops = len(self.canvas.mission_stops)
         if waypoints and n_stops > 1:
             self.lbl_path_info.setText(
-                f"MISSION  {n_stops} stops   \u2022   {dist:.2f} m   "
-                f"\u2022   {len(waypoints)} WP   \u2022   ~{est_time:.0f}s")
+                f"MISSION  {n_stops} stops\n{dist:.2f} m  \u2022  {len(waypoints)} WP  \u2022  ~{est_time:.0f} s")
             self.lbl_path_info.setToolTip("Planned obstacle-aware route through every stop")
             self._set_state(self.lbl_path_info, "ok")
             self.btn_execute_path.setEnabled(True)
         elif waypoints:
             self.lbl_path_info.setText(
-                f"GOAL  N {gx:+.2f}  E {gy:+.2f}   \u2022   {dist:.2f} m   "
-                f"\u2022   {len(waypoints)} WP   \u2022   ~{est_time:.0f}s")
+                f"GOAL  N {gx:+.2f}  E {gy:+.2f}\n{dist:.2f} m  \u2022  {len(waypoints)} WP  \u2022  ~{est_time:.0f} s")
             self.lbl_path_info.setToolTip(
                 "Planned obstacle-aware path to the staged goal")
             self._set_state(self.lbl_path_info, "ok")
             self.btn_execute_path.setEnabled(True)
         else:
             self.lbl_path_info.setText(
-                f"BLOCKED  N {gx:+.2f}  E {gy:+.2f}   \u2022   no clear path")
+                f"BLOCKED  N {gx:+.2f}  E {gy:+.2f}\nno clear path")
             self.lbl_path_info.setToolTip(
                 "The A* planner found no obstacle-free route to this point")
             self._set_state(self.lbl_path_info, "blocked")
             self.btn_execute_path.setEnabled(False)
         self.lbl_path_info.setVisible(True)
+        self.lbl_route_idle.setVisible(False)
 
     def _on_goal_cleared(self):
+        self.lbl_route_idle.setVisible(True)
         self.lbl_path_info.setVisible(False)
         self.lbl_path_info.setText("")
         self.btn_execute_path.setEnabled(False)
@@ -2131,7 +2305,11 @@ class SLAMMapWidget(QWidget):
         resume - rather than carrying three inline stylesheets. Disabled
         appearance comes from the shared :disabled rule.
         """
-        self.is_path_paused = is_paused or paused
+        # Callers pass either spelling (mission_control uses paused=True); the
+        # branches below used to test only is_paused, so a paused mission never
+        # showed RESUME.
+        is_paused = bool(is_paused or paused)
+        self.is_path_paused = is_paused
 
         def set_role(button, role):
             if button.objectName() != role:
@@ -2139,6 +2317,7 @@ class SLAMMapWidget(QWidget):
                 button.style().unpolish(button)
                 button.style().polish(button)
 
+        self._apply_action_visibility(running=bool(is_running or is_paused or paused))
         if is_running:
             self.btn_execute_path.setEnabled(False)
             self.btn_pause_path.setEnabled(True)

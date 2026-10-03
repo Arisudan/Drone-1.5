@@ -117,7 +117,8 @@ Everything else in this guide is reference material for once those two are runni
 │   │   │   ├── settings.py
 │   │   │   ├── telemetry.py
 │   │   │   ├── ui_stall.py
-│   │   │   └── video_health.py
+│   │   │   ├── video_health.py
+│   │   │   └── video_recorder.py
 │   │   ├── protocol
 │   │   │   ├── __init__.py
 │   │   │   ├── mavlink_worker.py
@@ -132,6 +133,7 @@ Everything else in this guide is reference material for once those two are runni
 │   │   │   ├── battery_badge.py
 │   │   │   ├── cli_console.py
 │   │   │   ├── config_tab.py
+│   │   │   ├── flight_detail.py
 │   │   │   ├── fonts.py
 │   │   │   ├── guided_confirm.py
 │   │   │   ├── hud_widget.py
@@ -185,6 +187,10 @@ Everything else in this guide is reference material for once those two are runni
 │   ├── test_link_range_gui.py
 │   ├── test_map_eval.py
 │   ├── test_mini_feed.py
+│   ├── test_flight_logs.py
+│   ├── test_fpv_tools.py
+│   ├── test_config_tab.py
+│   ├── test_slam_panel.py
 │   ├── test_motor_response.py
 │   ├── test_motor_test.py
 │   ├── test_param_codec.py
@@ -262,7 +268,7 @@ Everything else in this guide is reference material for once those two are runni
 ### `scripts/gcs/core/`
 - **alarms.py** — The prioritised, acknowledgeable alarm list (pure Python): one entry per active fault, `raise_alarm()` returns True only for a new or escalated alarm, acknowledging silences but never clears, elapsed time is computed on demand (never stored), cleared alarms go to a bounded history.
 - **audio.py** — Spoken and tonal operator alerts. A daemon thread and a bounded queue, so a wedged sound device can never block the GUI; tones are synthesised to WAV once and played through `aplay`, speech goes through `spd-say`, and a machine with neither degrades to silence rather than failing. Per-event rate limiting is the point, not an optimisation: PX4 re-runs its preflight checks every ~2 s, and an alert that repeats forever is one the operator mutes.
-- **flight_log.py** — Persistent flight recorder: one JSON-lines record per armed session (arm → disarm), written the moment the vehicle disarms; backs the Logs tab.
+- **flight_log.py** — Persistent flight recorder: one JSON-lines record per armed session (arm → disarm), written the moment the vehicle disarms, with a ~1 Hz time series and start/min voltage; backs the Logs tab.
 - **log_bundle.py** — Builds the one-click diagnostics zip (flight history, settings, `*.log`/`*.tlog`, manifest) behind the Logs tab's Export Bundle button.
 - **map_quality.py** — Live SLAM map quality score computed from the grid alone, plus the stale-map check.
 - **map_render.py** — Occupancy grid → RGBA image with RViz's exact palettes, built off the GUI thread by the map listener.
@@ -271,6 +277,7 @@ Everything else in this guide is reference material for once those two are runni
 - **planner_worker.py** — Runs A\*, path collision checks, map scoring and the inflation layer on a worker thread, with job tokens so a stale result is dropped.
 - **settings.py** — Typed, validated, persisted ground-station settings (`$DRONE_GCS_HOME/settings.json`), with a schema version and one-step migrations; CLI/env overrides layered on top.
 - **ui_stall.py** — Detects the UI thread blocking: feeds on the 30 Hz tick and reports a gap over 250 ms (rate-limited), with the worst gap kept.
+- **video_recorder.py** — FPV snapshot (PNG) and MJPEG-AVI recorder: real frames only, size-normalised, files in `<DRONE_GCS_HOME>/video/`; no Qt.
 - **video_health.py** — Video feed health from frame arrivals: fps, jitter, capture→paint ("pipeline") latency, and freeze / no-signal detection. Placeholder frames never count as live.
 - **health.py** — Liveness and latency bookkeeping for background workers: heartbeats, measured rate, p95 latency, and stall detection against a declared deadline. Wired into the OFFBOARD setpoint pump (whose 500 ms limit is PX4's, not a UI preference) and the map listener, so a dead worker surfaces instead of silently freezing the last good value on screen.
 - **execution_tracker.py** — Confirms a dispatched flight command was actually physically executed (not just ACKed) by watching real position displacement.
@@ -293,9 +300,10 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **actuator_widget.py** — The ESP32 servo button: a status dot and one button (`SERVO 0° → 90°`) driven over async HTTP with a timeout, so an off ESP32 never freezes the GCS. Sits beside EMERGENCY KILL in the cockpit.
 - **alarm_banner.py** — The standing alarm card under the header: severity bar, title, hint, running timer, `+N`, Acknowledge. Hidden when empty.
 - **battery_badge.py** — The header's battery indicator: a drawn cell with fill level, percentage and voltage.
-- **config_tab.py** — The Configuration workspace: edit, validate and persist the station settings (network, video, alerts, ESP32 servo address, …).
+- **config_tab.py** — The Configuration workspace: section list + search, captions with unit suffixes, per-field modified dots, inline validation, restart-needed tags, per-section reset and Bench / Indoor presets; edits, validates and persists the station settings.
+- **flight_detail.py** — Flight-detail dialog for the Logs tab (altitude / speed / battery / voltage charts, ground track, CSV export) and the cross-flight battery-health trend charts; QPainter only.
 - **fonts.py** — Registers the bundled Red Hat Display / Ubuntu fonts with Qt (idempotent; called from `build_stylesheet()`), and `resolved_family()` for tests.
-- **logs_tab.py** — The Flight Logs workspace: statistics, filters, table, CSV export, the password-gated Reset Logs, and Export Bundle.
+- **logs_tab.py** — The Flight Logs workspace: statistics, filters, table, Details… (flight detail), Trends panel, CSV export, the password-gated Reset Logs, and Export Bundle.
 - **map_canvas_render.py** — The Tactical map canvas's drawing code (grid, keep-outs, mission stops, trail, path, goal, drone glyph, ruler, uncertainty ring, overlay) as a mixin; `slam_map_widget.py` keeps the input and tool state.
 - **mini_feed.py** — The small live camera thumbnail in the navigation rail on the tabs without a camera of their own: ~10 fps, click for fullscreen, cleared to `NO VIDEO` when the feed freezes.
 - **params_tab.py** — The read-only live PX4 parameter table (search, sortable, batched redraws).
@@ -309,13 +317,13 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **scaling.py** — One UI scale factor for the whole station. Rewrites the stylesheet's px dimensions and provides `px()`/`scaled_font()` for code, so a 4K panel or a desktop set to large text gets a readable station instead of the 96 DPI layout everything was authored against. Hairline `border:` widths are deliberately not scaled.
 - **shortcuts.py** — The keyboard binding table and the F1 overlay generated from it. No destructive action fires directly from a key: arm, disarm and abort all open the `guided_confirm` bar, and the emergency kill has no binding at all.
 - **sidebar_nav.py** — Left-hand vertical navigation rail that switches between GCS workspace tabs, shows the speed/altitude/mode/armed footer (armed green, disarmed red), hosts the camera thumbnail on the tabs without a camera, and tightens its rows when the window is short.
-- **slam_map_widget.py** — The 2D Tactical SLAM tab: renders the occupancy grid, drone position/heading, planned path, and the Reset Map button.
+- **slam_map_widget.py** — The 2D Tactical SLAM tab: view and tool bar plus a side panel (map status + Reset Map, layers, route summary / stop list, state-aware EXECUTE / PAUSE-RESUME / ABORT), the grey-first map-quality strip, and the canvas input handling.
 - **styles.py** — Central dark aviation-themed Qt stylesheet (QSS) shared by the entire GCS app, including the `font_brand` / `font_heading` tokens.
 - **toast.py** — Small transient notification popup shown in the header after actions (connect, reset, etc.).
 - **assets/** — Chevron images for the stylesheet's drop-down arrows.
 - **top_status_strip.py** — The header bar: network dropdown/connect controls, mode/arm badges, battery/VIO/EKF2 badges, RX/TX throughput, and VIO NED readout.
 - **value_grid.py** — The Diagnostics workspace: a glance strip (altitude, speed, battery, link, mode/armed, flight time) over one card per system with a health light, holding the telemetry values the operator chooses, orders and sizes, from a registry of ~50 fields. Grey-first colour (`FieldSpec.signals=False` marks a pure *state* colour such as armed/disarmed), one **Layout ▾** menu, "columns" is a maximum. Field keys are written to settings.json, so add a new key rather than renaming one; a saved layout always wins over the default.
-- **video_feed_widget.py** — FPV Camera tab: connects to the onboard MJPEG stream and displays live D435i video with auto-reconnect, plus a health line (fps / pipeline latency / jitter, `FROZEN` / `NO SIGNAL`) that feeds the alarm card and the rail thumbnail.
+- **video_feed_widget.py** — FPV Camera tab (with Snapshot / Record / Telemetry / Graph tools): connects to the onboard MJPEG stream and displays live D435i video with auto-reconnect, plus a health line (fps / pipeline latency / jitter, `FROZEN` / `NO SIGNAL`) that feeds the alarm card and the rail thumbnail.
 
 ### `scripts/gcs/` (top level)
 - **drone_gcs.py** — The main GCS application window; wires every widget/worker together into the running app (the commands themselves live in `controllers/`).
@@ -354,6 +362,10 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **test_link_range.py** — The range test engine: `iw`/`ping` parsers on captured output, the JPEG frame counter at every split point, packet formats, sequence-based loss, verdicts, the loss-free range, path-loss fit, reports, and loopback integration (UDP up/down attribution, a real HTTP stream). Hermetic.
 - **test_link_range_gui.py** — The range-test window: setup validation, prefill, connection checks, the whole walk → result flow against stand-ins. Runs on its own private Xvfb display; skipped without `tkinter`/Xvfb.
 - **test_map_eval.py** — Every SLAM metric against synthetic grids, plus the CLI's exit codes.
+- **test_flight_logs.py** — Flight series recording (sampling, thinning, voltage, forward-compatible loading), the detail helpers/dialog/CSV export, and the Logs tab (ISO dates, Details, Trends).
+- **test_fpv_tools.py** — Recorder (playable AVI, resize, no-frame = no file), snapshots, placeholder frames never recorded, overlay off by default and never burned in, the 60 s graph.
+- **test_config_tab.py** — Captions for every field, restart rules, parsing, validation mapped to fields, change tracking, presets, search, save/reload, hidden fields preserved.
+- **test_slam_panel.py** — SLAM side panel, state-aware path actions (including RESUME for `paused=True`), route summary, grey-first quality strip.
 - **test_mini_feed.py** — The rail thumbnail: no work while hidden, ~10 fps thinning, cleared when frozen, click for fullscreen, shown only when the rail has room.
 - **test_motor_response.py** — The motor range model, per-motor response (low → idle → off, sweep, mapping swap), staleness, commanded vs live, parameter routing, the throttle slider, and the caption/arrow declutter.
 - **test_motor_test.py** — The bench test must use `MAV_CMD_ACTUATOR_TEST` (310), not `DO_MOTOR_TEST` (209), with the exact packet pinned.

@@ -646,28 +646,8 @@ class CanvasRenderMixin:
                     "Right-Drag: Pan | Scroll: Zoom")
         p.drawText(20, int(h - 12), hint)
 
-        # 3. Live Pose & Orientation Readout
-        follow_str = "FOLLOW" if self.auto_follow else "FREE PAN"
-        pose_text = (
-            f"POSE: N {self.drone_x:+.2f}m | E {self.drone_y:+.2f}m | "
-            f"HDG {self.heading:.0f}° | ROT {self.rotation_deg:.0f}° | {follow_str}"
-        )
-        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
-        p.setPen(QColor(226, 232, 240, 230))
-        p.drawText(int(w - 390), int(h - 30), pose_text)
-
-        # Position-uncertainty readout, on its own line above the pose.
-        state, r95 = self.uncertainty_state()
-        if state == "unknown":
-            unc_text = "POS ± --  (no EKF covariance)"
-        elif state == "stale":
-            unc_text = f"POS ±{r95:.2f} m (95%)  STALE"
-        else:
-            unc_text = f"POS ±{r95:.2f} m (95%)"
-            if state == "danger":
-                unc_text += "  > safety margin"
-        p.setPen(self._uncertainty_colour(state))
-        p.drawText(int(w - 390), int(h - 46), unc_text)
+        # 3. Pose and position-uncertainty text moved to the status strip under
+        # the map (SLAMMapWidget._build_status_strip): here they covered the map.
 
         # 4. Tactical Orientation Compass Rose (Top-Right)
         comp_cx = w - 50

@@ -14,11 +14,17 @@ filter row, then the table - because that arrangement answers the two
 questions in the right order: "how much flying is behind this airframe" before
 "what happened on the 3rd of March".
 
+FLIGHT DETAIL AND TRENDS:
+  Each flight now carries a time series (core/flight_log.py), so a row opens a
+  detail view (altitude, speed, battery and voltage charts plus the ground track,
+  ui/flight_detail.py) and a Trends panel shows battery health across flights:
+  percent used per minute and voltage sag. Both say so plainly when a flight
+  predates the recording rather than drawing an empty chart.
+
 WHAT IS NOT HERE:
-  Walle's Replay Flight and Export Video buttons. Neither has anything behind
-  it in this station - there is no per-flight telemetry capture to replay and
-  no recorded video - and a button that cannot do its job is worse than an
-  absent one. Both become straightforward once flight-frame recording exists.
+  Walle's Export Video button: this station records no video. (A frame-by-frame
+  replay of the flight on the map is possible now that positions are recorded,
+  but is not built.)
 ================================================================================
 """
 
@@ -38,6 +44,7 @@ from PyQt5.QtWidgets import (
 from ui.scaling import px, fit_min_width
 from core.flight_log import FlightLogger, FlightRecord, summarise
 from core.log_bundle import create_bundle, default_bundle_name
+from ui.flight_detail import FlightDetailDialog, TrendChart
 
 COLUMNS = ["DATE", "DURATION", "DISTANCE", "MAX ALT", "MAX SPEED",
            "BATTERY USED", "MODES", "STATUS"]
@@ -123,6 +130,10 @@ class LogsTabWidget(QWidget):
         fl.addWidget(lbl_from)
         self.date_from = QDateEdit(self)
         self.date_from.setCalendarPopup(True)
+        # ISO, to match the DATE column and every other date in the station (the
+        # locale default read 7/3/26 - three different dates depending on who
+        # is looking).
+        self.date_from.setDisplayFormat("yyyy-MM-dd")
         self.date_from.setDate(QDate.currentDate().addMonths(-3))
         self.date_from.dateChanged.connect(self._apply_filters)
         fl.addWidget(self.date_from)
@@ -132,6 +143,7 @@ class LogsTabWidget(QWidget):
         fl.addWidget(lbl_to)
         self.date_to = QDateEdit(self)
         self.date_to.setCalendarPopup(True)
+        self.date_to.setDisplayFormat("yyyy-MM-dd")
         self.date_to.setDate(QDate.currentDate())
         self.date_to.dateChanged.connect(self._apply_filters)
         fl.addWidget(self.date_to)
@@ -152,6 +164,24 @@ class LogsTabWidget(QWidget):
         fl.addWidget(btn_reload)
         root.addWidget(filters)
 
+        # ── trends (collapsed until asked for) ──
+        self.trends = QFrame(self)
+        self.trends.setProperty("class", "cardFrame")
+        tl = QHBoxLayout(self.trends)
+        tl.setContentsMargins(px(8), px(8), px(8), px(8))
+        tl.setSpacing(px(8))
+        self.trend_use = TrendChart("Battery used per minute", "%/min", self, decimals=1)
+        self.trend_use.setToolTip("Percent of battery consumed per minute of flight. "
+                                  "A rising trend means the pack is ageing or the airframe is working harder.")
+        self.trend_sag = TrendChart("Voltage sag under load", "V", self, decimals=2)
+        self.trend_sag.setToolTip("Volts lost between arming and the lowest reading in flight. "
+                                  "A growing sag is an early sign of a tired pack.")
+        self.trend_dur = TrendChart("Flight duration", "min", self, decimals=1)
+        for chart in (self.trend_use, self.trend_sag, self.trend_dur):
+            tl.addWidget(chart, 1)
+        self.trends.setVisible(False)
+        root.addWidget(self.trends)
+
         # ── table ──
         self.table = QTableWidget(0, len(COLUMNS), self)
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -163,14 +193,28 @@ class LogsTabWidget(QWidget):
         for c in range(len(COLUMNS)):
             head.setSectionResizeMode(
                 c, QHeaderView.Stretch if COLUMNS[c] == "MODES" else QHeaderView.ResizeToContents)
+        self._shown: List[FlightRecord] = []
+        self.table.itemSelectionChanged.connect(self._on_selection)
+        self.table.itemDoubleClicked.connect(lambda _it: self.open_selected())
         root.addWidget(self.table, 1)
 
         # ── footer ──
         foot = QHBoxLayout()
         self.lbl_count = QLabel("No flights recorded yet", self)
+        self.lbl_count.setToolTip("A record is written each time the vehicle disarms")
         self.lbl_count.setObjectName("fieldSubLabel")
         foot.addWidget(self.lbl_count)
         foot.addStretch()
+        self.btn_trends = QPushButton("Trends", self)
+        self.btn_trends.setCheckable(True)
+        self.btn_trends.setToolTip("Battery health and duration across the flights shown")
+        self.btn_trends.toggled.connect(self.trends.setVisible)
+        foot.addWidget(self.btn_trends)
+        self.btn_details = QPushButton("Details…", self)
+        self.btn_details.setToolTip("Open the selected flight: charts and ground track (or double-click a row)")
+        self.btn_details.setEnabled(False)
+        self.btn_details.clicked.connect(self.open_selected)
+        foot.addWidget(self.btn_details)
         btn_csv = QPushButton("Export CSV", self)
         btn_csv.clicked.connect(self._export_csv)
         foot.addWidget(btn_csv)
@@ -238,14 +282,44 @@ class LogsTabWidget(QWidget):
             ]
             for c, text in enumerate(cells):
                 item = QTableWidgetItem(text)
-                if c:
+                if c and COLUMNS[c] != "MODES":
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                elif COLUMNS[c] == "MODES":
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 self.table.setItem(i, c, item)
+        self._shown = list(rows)
+        self._on_selection()
+        self._update_trends(rows)
 
         total = len(self._records)
         self.lbl_count.setText(
             f"Showing {len(rows)} of {total} recorded flight(s)" if total
-            else "No flights recorded yet - a record is written each time the vehicle disarms")
+            else "No flights recorded yet")
+
+    def _selected_record(self) -> Optional[FlightRecord]:
+        row = self.table.currentRow()
+        return self._shown[row] if 0 <= row < len(self._shown) else None
+
+    def _on_selection(self) -> None:
+        self.btn_details.setEnabled(self._selected_record() is not None)
+
+    def open_selected(self) -> Optional[FlightDetailDialog]:
+        """Open the detail view for the selected flight (None if nothing selected)."""
+        rec = self._selected_record()
+        if rec is None:
+            return None
+        dlg = FlightDetailDialog(rec, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.show()
+        self._detail = dlg
+        return dlg
+
+    def _update_trends(self, rows: List[FlightRecord]) -> None:
+        """Trend charts over the flights shown, oldest first."""
+        chrono = sorted(rows, key=lambda r: r.started_epoch)
+        self.trend_use.set_values([r.battery_used_per_min for r in chrono])
+        self.trend_sag.set_values([r.voltage_sag for r in chrono])
+        self.trend_dur.set_values([r.duration_s / 60.0 if r.duration_s > 0 else None for r in chrono])
 
     def _export_csv(self) -> None:
         rows = self._visible()

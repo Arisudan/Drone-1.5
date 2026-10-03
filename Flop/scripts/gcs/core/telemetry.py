@@ -43,7 +43,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 # PX4 Custom Mode Mapping
@@ -120,6 +120,14 @@ def decode_px4_mode(custom_mode: int) -> str:
     return main_str
 
 
+#: Above this height over the floor (m) a disarm is a controlled landing, never a
+#: motor cutoff. Below it the vehicle counts as on the ground for auto-disarm.
+AIRBORNE_HEIGHT_M = 0.15
+
+#: A downward range reading older than this (s) is not trusted for that decision.
+RANGE_MAX_AGE_S = 1.5
+
+
 @dataclass
 class TelemetrySnapshot:
     """Comprehensive snapshot of current vehicle, D435i VIO, and companion state."""
@@ -155,6 +163,10 @@ class TelemetrySnapshot:
     y: float = 0.0
     z: float = 0.0
     altitude: float = 0.0  # -z AGL from VIO/EKF2
+    # Downward rangefinder (DISTANCE_SENSOR, orientation 25) in metres above the
+    # floor. NaN until a valid reading arrives - unknown must never read as 0 m.
+    range_m: float = float("nan")
+    last_range_time: float = 0.0
     last_position_time: float = 0.0
     position_stale: bool = True
     position_age: float = 999.0
@@ -242,6 +254,43 @@ class TelemetrySnapshot:
         # landed_state == 0 (UNDEFINED) - never received a real report yet.
         return self.armed and abs(self.z) > 0.15
 
+    def height_over_floor(self, max_age_s: float = RANGE_MAX_AGE_S) -> Optional[float]:
+        """Height above the floor from the downward rangefinder, or None when
+        there is no fresh valid reading. Deliberately rangefinder-only: -z is
+        relative to an EKF origin that can sit away from the floor, so using it
+        here could make a grounded vehicle look airborne."""
+        if self.last_range_time <= 0.0 or not math.isfinite(self.range_m):
+            return None
+        if time.time() - self.last_range_time > max_age_s:
+            return None
+        return self.range_m
+
+    @property
+    def needs_controlled_landing(self) -> bool:
+        """Should Disarm be a controlled AUTO.LAND instead of a motor cutoff?
+
+        True when PX4 says it is off the ground OR the rangefinder says the
+        floor is further than AIRBORNE_HEIGHT_M away - landed_state alone can
+        report ON_GROUND while the vehicle is physically up (held in the hand,
+        some manual modes, just after lift-off), and a forced disarm there
+        would free-fall it."""
+        if not self.armed:
+            return False
+        if self.landed_state in (2, 3, 4):
+            return True
+        h = self.height_over_floor()
+        if h is not None and h > AIRBORNE_HEIGHT_M:
+            return True
+        return self.is_airborne
+
+    def is_on_ground_for_disarm(self) -> bool:
+        """Safe to cut power: PX4 says ON_GROUND and the floor is within
+        AIRBORNE_HEIGHT_M (or the rangefinder has no fresh reading)."""
+        if self.landed_state != 1:
+            return False
+        h = self.height_over_floor()
+        return h is None or h <= AIRBORNE_HEIGHT_M
+
     def clone(self) -> TelemetrySnapshot:
         """Create a thread-safe shallow copy with cloned mutable lists."""
         import copy
@@ -291,6 +340,16 @@ class TelemetrySnapshot:
         self.vy = msg.vy
         self.vz = msg.vz
         self.ground_speed = math.sqrt(msg.vx**2 + msg.vy**2)
+
+    def update_distance_sensor(self, msg) -> None:
+        """Downward rangefinder only (MAV_SENSOR_ORIENTATION 25 = PITCH_270).
+        Readings at or beyond max_distance mean 'nothing in range', not height."""
+        if getattr(msg, "orientation", -1) != 25:
+            return
+        d = msg.current_distance * 0.01
+        mx = msg.max_distance * 0.01
+        self.last_range_time = time.time()
+        self.range_m = d if (d >= 0.0 and (mx <= 0.0 or d < mx)) else float("nan")
 
     def check_position_staleness(self, max_age_sec: float = 2.0) -> None:
         """Flag position as stale if LOCAL_POSITION_NED has stopped arriving."""

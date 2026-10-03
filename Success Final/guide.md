@@ -16,6 +16,7 @@ A guide to the laptop-side Ground Control Station application (`drone_gcs.py`) �
    - [FPV Camera Tab](#fpv-camera-tab)
    - [Diagnostics](#diagnostics)
    - [Terminal / Logs](#terminal--logs)
+   - [Configuration](#configuration)
    - [Parameters](#parameters)
 5. [Guided Confirm: The Safety Gate](#5-guided-confirm-the-safety-gate)
 6. [Keyboard Shortcuts](#6-keyboard-shortcuts)
@@ -118,13 +119,25 @@ The primary situational-awareness view, with two switchable layers:
 
 ![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](docs/images/slam_drone_icon_redesign.png)
 
-**Click-to-navigate**: clicking anywhere on the 2D map stages a goal pose and runs the obstacle-aware A* planner over the live grid, drawing the route with distance/ETA. Toolbar controls:
-- **EXECUTE PATH** — dispatches the drone through the computed waypoints in OFFBOARD mode, gated behind the slide-to-confirm bar (see [§5](#5-guided-confirm-the-safety-gate)).
+**Layout.** The top bar is one row: the view switch (2D Map / 3D Cloud) followed by that view's tools (rotate, follow, centre, zoom, fit; Launch/Reload/Close for 3D). Under the map a thin **status strip** shows the vehicle's N/E position, heading, rotation, follow state and position uncertainty (it no longer sits on top of the map). Everything else is one narrow **side panel** on the right, top to bottom in the order you work:
+- **MAP** — the map-status pill and **Reset Map** (plain grey; red only on hover). The pill is grey `NO DATA` until a map has arrived, `LIVE` when it flows, and red `MAP LOST` only if a live map stops.
+- **LAYERS** (2D only) — *Raw / Thin / Both*, plus **Inflation**, **Keep-out** and **Measure** (blue when on).
+- **ROUTE** — the staged goal or mission: where, how far, how many waypoints, estimated time; with more than one stop, a compact stop list (▲ ▼ ✕ to reorder/remove) that grows with the number of stops up to six rows.
+- **CRUISE ALT**, then the **path actions**, large and shown only when they apply: **EXECUTE** while idle (greyed until a route is planned); **PAUSE/RESUME** and **ABORT** (red) while a path is flying or held.
+
+The floating camera window opens over the map's **top-left** corner (the compass is top-right, the scale bar bottom-left); drag it anywhere.
+
+The **›** button at the top of the panel folds it to a narrow strip that keeps only the path actions (stacked), giving the map the full width; **‹** brings it back.
+
+**Click-to-navigate**: clicking anywhere on the 2D map stages a goal pose and runs the obstacle-aware A* planner over the live grid, drawing the route with distance/ETA. Shift+click adds more stops.
+- **EXECUTE** — dispatches the drone through the computed waypoints in OFFBOARD mode, gated behind the slide-to-confirm bar (see [§5](#5-guided-confirm-the-safety-gate)).
 - **PAUSE / RESUME** — halts in place (`AUTO.LOITER`) or resumes the remaining route.
-- **ABORT PATH** — cancels the active route and lands, also gated behind slide-to-confirm.
+- **ABORT** — cancels the active route and lands, also gated behind slide-to-confirm.
 - **Reset Map** — wipes the live SLAM map and restarts mapping from empty, for when the map has drifted or accumulated garbage. Confirmation-gated (no undo) and **hard-disabled while armed**, since it would pull the EKF2 vision-fusion reference and any live obstacle data out from under an actively flying vehicle.
   > ⚠️ This is destructive and cannot be undone. Only use it while disarmed.
 - **Dynamic collision re-check**: every 200ms during a flight, the remaining path is re-checked against the live grid; if an obstacle appears within 1.5m ahead, the GCS automatically engages `AUTO.LOITER` and computes a fresh A* detour.
+
+**Map quality strip** (under the toolbar, once a map exists): coverage, explored, frontier, walls, squareness, obstacles. Grey-first — a number that passes (or has no threshold) is plain text; only one that **fails** its `map_eval` threshold turns amber, and the note beside it names which.
 
 ### Motors / Actuators
 Heading: **ACTUATOR OUTPUTS & MOTOR TELEMETRY**, with a one-line status on the right (`ALL MOTORS OFF` / `IDLE` / `MOTORS ACTIVE · 62%` / `HIGH LOAD` / `SATURATION · M3 1850 µs`). Three cards:
@@ -153,7 +166,10 @@ On a short window the page sheds detail rather than overlap: first the footnote,
 Connects to the onboard MJPEG stream (`http://<radxa_ip>:8080/video`) and displays the live D435i color feed, auto-reconnecting every 2s on a dropped or never-opened stream. Also supports a USB webcam, a synthetic test pattern, or a custom RTSP/HTTP URL (with per-source URL memory and RTSP transport/timeout options).
 
 - **Fullscreen (⛶)**: every video view — the docked tab, and the floating/undocked window — has a fullscreen toggle. Press `Esc` or click anywhere to exit.
-- No overlay is drawn on top of the video (no HUD ladder/crosshair/compass) — flight status lives in the header and the Cockpit PFD instead.
+- No overlay is drawn on top of the video by default (no HUD ladder/crosshair/compass) — flight status lives in the header and the Cockpit PFD instead. An optional **Telemetry** toggle (off by default) shows mode, altitude, speed and battery in a small box on the picture, on screen only.
+- **Snapshot** saves the current frame as a PNG; **Record** writes the feed to an MJPEG `.avi` (a red `● REC mm:ss` shows while recording). Both go to `~/.drone_gcs/video/` (or `$DRONE_GCS_HOME/video/`) with a timestamp name and use the frames the single capture already decoded — no second connection to the Radxa. Only real frames are saved (never the grey "no signal" placeholder), and the overlay is never burned in.
+- **Graph** (off by default) shows the last 60 s of frame rate (blue) and pipeline latency (grey), so you can see whether a problem is a slow decay or sudden stalls.
+- There is **no stream-quality picker**: the Radxa streamer takes its JPEG quality from a ROS parameter at start-up and offers no per-client option, so a control here would do nothing.
 - A **health line** under the picture: `LIVE · 29 fps · pipeline 18 ms · jitter 4 ms`, or `DEGRADED`, `CONNECTING`, `FROZEN · no frame for 3.0 s`, `NO SIGNAL`. Grey while healthy, amber/red only when not. "pipeline" is the time from the capture thread reading a frame to it being painted *inside the GCS*; it excludes the camera, encoder and network, so it is an early warning, not true glass-to-glass latency. A frozen or dead feed also raises an alarm (§8).
 
 ### Diagnostics
@@ -171,6 +187,25 @@ Heading **TELEMETRY VALUES** (one line) and a single **Layout ▾** menu: *Max c
 - An embedded command console (`cli_console.py`) with history recall (`↑`/`↓`) for typing flight commands directly.
 - A flight log viewer, with **Export CSV** and **Export Bundle**: one zip of the flight history, your settings, any `.log` / `.tlog` files and a manifest — attach it to a bug report as-is.
 - **Reset Logs** button: password-gated (password: `admin`). Prompts for the password via a dialog before clearing the flight log file — the in-progress session's own state is left untouched.
+
+**Flight Logs** (its own tab) lists every armed session — dates in ISO form (`2026-09-17 10:15:00`), modes left-aligned. Select a row and press **Details…** (or double-click) for that flight:
+- six summary tiles (duration, distance, max altitude, max speed, battery start→end, voltage sag) and four charts — altitude, ground speed, battery %, battery voltage — with a hover read-out, plus the **ground track** (north up, scale bar, start/end marks);
+- **Export this flight (CSV)** writes the time series (`t_s, altitude_m, speed_ms, battery_pct, voltage_v, north_m, east_m`).
+- Flights recorded before this feature have no series; the dialog says so rather than drawing empty charts.
+
+**Trends** (button at the foot) opens a panel of battery-health charts, one point per flight: **battery used per minute**, **voltage sag under load** and **flight duration**, each with its latest and average. A pack that is ageing shows as a slow upward drift in the first two. Flights shorter than 30 s are left out of the per-minute figure.
+
+The series is sampled about once a second while armed (an hour at most, then thinned), in `flights.jsonl` beside the summary fields.
+
+### Configuration
+A section list on the left (Drone profile, MAVLink connection, Video & map bridge, SLAM & navigation, Command limits, Alert thresholds, Display, Audio alerts, ESP32 servo actuator) and one card per section on the right.
+- **Search** filters every field by its caption.
+- Units are a suffix after the box (`m`, `s`, `%`, `mAh`), not part of the label. Every field has a plain-language caption.
+- A blue **●** marks a field that differs from what is saved, and the footer counts **N unsaved changes**.
+- **restart needed** appears beside a changed field that is only read at start-up. Command limits, alert thresholds, audio, the ESP32 address and the FPV stream URL apply the moment you save; everything else needs a restart.
+- **Inline validation**: a bad value outlines its field in red with the reason under it (a number that isn't, a critical battery level above the warning level, …), and **Save Settings** stays disabled until it is fixed.
+- **Reset section** puts one card back to defaults (not saved until you Save).
+- **Preset** (*Bench* / *Indoor flight*) fills in the few values that differ between those two situations — it saves nothing until you press Save. There is no outdoor preset: the vehicle is indoor and vision-only.
 
 ### Parameters
 *(Ctrl+9)* — a live PX4 parameter table: search box, sortable columns (Name / Value / Type / Index), populated via the standard MAVLink parameter protocol (`PARAM_REQUEST_LIST` / `PARAM_VALUE`). Values are decoded through the same IEEE-754 bit-cast logic used elsewhere in this project for reading typed PX4 parameters correctly (an int32 param read as a naive float produces nonsense like `1.4e-45`).
@@ -263,6 +298,7 @@ test cannot tell you: [`docs/link_range_test.md`](docs/link_range_test.md).
 - The **alarm card** covers link, battery, vision, position and video. There are no map-stalled or UI-stall alarms yet.
 - The **servo** talks plain HTTP to the ESP32 with no authentication, and nothing stops it being pressed while the vehicle is flying.
 - The **range test** has been verified on this laptop's Wi-Fi card, on loopback and in its window on a virtual display — not yet against the real Radxa or on a real walk.
+- **Video recording / snapshots** and the **flight detail charts** were checked offscreen and with synthetic data only; recording has not been run against the live Radxa stream.
 - No fullscreen support outside the video views (map/RViz remain windowed within their tab).
 - Everything above was checked offscreen / on the bench; no real flight has happened.
 

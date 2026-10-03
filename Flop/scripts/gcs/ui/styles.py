@@ -603,12 +603,12 @@ QPushButton#mapTool:disabled {
     color: $text_muted;
     border-color: $border;
 }
-/* Latched tool (measure, auto-follow). Amber, because it changes what the
-   next click does - the operator has to know it is on. */
+/* Latched tool (measure, follow, inflation, keep-out). Blue like every other
+   "on" state - amber is reserved for caution. */
 QPushButton#mapTool:checked {
-    background-color: $warn_fill;
-    color: $warn;
-    border-color: $warn;
+    background-color: $accent_fill;
+    color: $accent_bright;
+    border-color: $accent_dim;
     font-weight: bold;
 }
 
@@ -641,7 +641,7 @@ QPushButton#segItem:disabled {
 
 /* Cluster caption above the toolbar groups. */
 QLabel#rulerTotal {
-    color: $warn;
+    color: $text;
     font-size: 10px;
     font-weight: bold;
 }
@@ -678,13 +678,20 @@ QLabel#mapPill[state="bad"] {
    box taking up the most prominent row on the tab. */
 QLabel#goalChip {
     border-radius: 4px;
-    padding: 4px 10px;
+    padding: 5px 10px;
     font-size: 11px;
     font-weight: bold;
-    background-color: $ok_fill;
-    color: $ok;
-    border: 1px solid $ok_dim;
+    background-color: $bg_input;
+    color: $text;
+    border: 1px solid $border_soft;
 }
+QWidget#transparentRow { background: transparent; }
+QFrame#mapStatusStrip { background-color: $bg_panel; border: 1px solid $border; border-radius: 4px; }
+QLabel#statusPose { color: $text; font-size: 11px; font-weight: 600; }
+QLabel#statusUncert { font-size: 11px; font-weight: 600; }
+/* Map-quality strip: quiet labels, plain (not monospace) values. */
+QLabel#qualCaption { color: $text_muted; font-size: 10px; }
+QLabel#qualValue { color: $text; font-size: 11px; font-weight: 600; }
 QLabel#goalChip[state="blocked"] {
     background-color: $danger_fill; color: $danger; border-color: $danger_dim;
 }
@@ -719,18 +726,18 @@ QPushButton#btnAbort:disabled {
     background-color: $bg_panel; color: $text_muted; border-color: $border;
 }
 
-/* Destructive map action, kept outlined and apart from the view tools. */
+/* Destructive map action: plain grey until you reach for it, red on hover. */
 QPushButton#mapDanger {
     background-color: $bg_input;
-    color: $danger;
-    border: 1px solid $danger_dim;
+    color: $text;
+    border: 1px solid $border_soft;
     border-radius: 4px;
     padding: 4px 8px;
     min-height: 24px;
     font-size: 10px;
     font-weight: bold;
 }
-QPushButton#mapDanger:hover:!disabled { background-color: $danger_dim; color: #ffffff; }
+QPushButton#mapDanger:hover:!disabled { background-color: $danger_dim; color: #ffffff; border-color: $danger; }
 QPushButton#mapDanger:disabled {
     background-color: $bg_panel; color: $text_muted; border-color: $border;
 }
@@ -876,6 +883,24 @@ QCheckBox::indicator {
 }
 QCheckBox::indicator:checked { background-color: $warn; }
 QCheckBox::indicator:hover   { border-color: $warn; }
+
+/* ── Configuration tab ───────────────────────────────────────────── */
+QLabel#cfgLabel { color: $text; font-size: 11px; }
+QLabel#cfgUnit  { color: $text_muted; font-size: 10px; }
+QLabel#cfgDirty { color: $accent; font-size: 11px; font-weight: 700; }
+QLabel#cfgRestart { color: $text_dim; font-size: 9px; font-weight: 700; }
+QLabel#cfgError { color: $danger; font-size: 10px; }
+QLineEdit[invalid="true"], QComboBox[invalid="true"] { border: 1px solid $danger_dim; }
+/* Neutral on/off box. The global QCheckBox is amber because its first user was
+   the PROPS OFF safety interlock; ordinary settings must not look like warnings. */
+QCheckBox#cfgToggle { color: $text; font-size: 11px; font-weight: 400; spacing: 8px; }
+QCheckBox#cfgToggle::indicator { border: 1px solid $border_hover; }
+QCheckBox#cfgToggle::indicator:checked { background-color: $accent_dim; border-color: $accent; }
+QCheckBox#cfgToggle::indicator:hover { border-color: $accent; }
+QListWidget#cfgNav { background: transparent; border: none; outline: none; }
+QListWidget#cfgNav::item { padding: 7px 10px; color: $text_dim; border-radius: 6px; }
+QListWidget#cfgNav::item:selected { background: $accent_fill; color: $text_bright; }
+QListWidget#cfgNav::item:hover:!selected { background: $bg_input; }
 
 /* ── Tabs ────────────────────────────────────────────────────────── */
 QTabWidget::pane {

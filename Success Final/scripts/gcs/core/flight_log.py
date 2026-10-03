@@ -23,6 +23,16 @@ FILE FORMAT:
   tool without this codebase. A single JSON array would have to be rewritten
   whole on every landing and would truncate if the process died doing it.
 
+PER-FLIGHT TIME SERIES:
+  Each record also carries ``series``: about one sample per second of altitude,
+  ground speed, battery percent and voltage, and local position (x north, y
+  east), keyed ``t`` (seconds since arming), ``alt``, ``speed``, ``batt``,
+  ``volt``, ``x``, ``y``. That is what the Logs tab's flight-detail view charts
+  and what its battery-health trend is computed from. It is capped (a long
+  session is thinned, not truncated) so one line stays a few tens of KB.
+  Records written by older builds have no series and still load: the new fields
+  default, and a record with fields this build does not know is read, not skipped.
+
 WHAT COUNTS AS A FLIGHT:
   Armed to disarmed. Not takeoff to landing: the vehicle can be armed on the
   bench without ever leaving the ground, and those sessions are worth keeping -
@@ -38,7 +48,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -65,6 +75,31 @@ class FlightRecord:
     modes: List[str] = field(default_factory=list)
     status: str = "COMPLETED"
     forced_arm: bool = False
+    # Battery health inputs (0 = not recorded, e.g. a record from an older build).
+    voltage_start: float = 0.0
+    voltage_min: float = 0.0
+    # Time series, see the module docstring. Empty for older records.
+    series: Dict[str, List[float]] = field(default_factory=dict)
+
+    @property
+    def has_series(self) -> bool:
+        return len(self.series.get("t", [])) >= 2
+
+    @property
+    def battery_used_per_min(self) -> Optional[float]:
+        """Percent of battery consumed per minute of flight - the number that
+        rises as a pack ages. None when the flight was too short to mean anything
+        or the battery percentage was not reported."""
+        if self.duration_s < 30.0 or self.battery_start_pct <= 0:
+            return None
+        return self.battery_used_pct / (self.duration_s / 60.0)
+
+    @property
+    def voltage_sag(self) -> Optional[float]:
+        """Volts lost between arming and the lowest reading under load."""
+        if self.voltage_start <= 0 or self.voltage_min <= 0:
+            return None
+        return max(0.0, self.voltage_start - self.voltage_min)
 
     @property
     def battery_used_pct(self) -> int:
@@ -93,6 +128,7 @@ class FlightLogger:
         self.active: Optional[FlightRecord] = None
         self._last_xyz: Optional[tuple] = None
         self._was_armed = False
+        self._last_sample_t = 0.0
 
     # ── recording ───────────────────────────────────────────────────
 
@@ -117,9 +153,12 @@ class FlightLogger:
             started_epoch=time.time(),
             battery_start_pct=int(getattr(t, "battery_percent", 0) or 0),
             forced_arm=forced,
+            voltage_start=float(getattr(t, "battery_voltage", 0.0) or 0.0),
         )
         self._last_xyz = (t.x, t.y, t.z)
+        self._last_sample_t = 0.0
         self._note_mode(t)
+        self._sample(t, force=True)
         log.info("flight session started")
 
     def _accumulate(self, t) -> None:
@@ -138,7 +177,40 @@ class FlightLogger:
                 self._last_xyz = (t.x, t.y, t.z)
         rec.max_altitude_m = max(rec.max_altitude_m, float(getattr(t, "altitude", 0.0)))
         rec.max_speed_ms = max(rec.max_speed_ms, float(getattr(t, "ground_speed", 0.0)))
+        volts = float(getattr(t, "battery_voltage", 0.0) or 0.0)
+        if volts > 0 and (rec.voltage_min <= 0 or volts < rec.voltage_min):
+            rec.voltage_min = volts
         self._note_mode(t)
+        self._sample(t)
+
+    SERIES_PERIOD_S = 1.0
+    MAX_SERIES_POINTS = 3600          # an hour at 1 Hz; longer sessions are thinned
+
+    def _sample(self, t, force: bool = False) -> None:
+        """Append one point to the active record's time series, about once a second."""
+        rec = self.active
+        if rec is None:
+            return
+        elapsed = max(0.0, time.time() - rec.started_epoch)
+        if not force and elapsed - self._last_sample_t < self.SERIES_PERIOD_S:
+            return
+        self._last_sample_t = elapsed
+        row = {
+            "t": elapsed,
+            "alt": float(getattr(t, "altitude", 0.0) or 0.0),
+            "speed": float(getattr(t, "ground_speed", 0.0) or 0.0),
+            "batt": float(getattr(t, "battery_percent", 0) or 0),
+            "volt": float(getattr(t, "battery_voltage", 0.0) or 0.0),
+            "x": float(getattr(t, "x", 0.0) or 0.0),
+            "y": float(getattr(t, "y", 0.0) or 0.0),
+        }
+        for key, value in row.items():
+            rec.series.setdefault(key, []).append(round(value, 3))
+        if len(rec.series["t"]) > self.MAX_SERIES_POINTS:
+            # Thin rather than truncate: keep every second point so the whole
+            # flight is still there, at half the resolution.
+            for key in rec.series:
+                rec.series[key] = rec.series[key][::2]
 
     def _note_mode(self, t) -> None:
         mode = getattr(t, "flight_mode", "") or ""
@@ -154,6 +226,9 @@ class FlightLogger:
             return None
         rec.duration_s = max(0.0, time.time() - rec.started_epoch)
         rec.battery_end_pct = int(getattr(t, "battery_percent", 0) or 0)
+        self.active = rec
+        self._sample(t, force=True)       # the closing point, so the curves reach the end
+        self.active = None
         self.append(rec)
         log.info("flight session ended: %.1fs, %.2f m", rec.duration_s, rec.distance_m)
         return rec
@@ -181,8 +256,13 @@ class FlightLogger:
                     if not line:
                         continue
                     try:
-                        out.append(FlightRecord(**json.loads(line)))
-                    except (ValueError, TypeError):
+                        data = json.loads(line)
+                        # Forward compatible: a record from a NEWER build carries
+                        # fields this one does not know. Reading the ones it does
+                        # is better than silently dropping the whole flight.
+                        known = {f.name for f in fields(FlightRecord)}
+                        out.append(FlightRecord(**{k: v for k, v in data.items() if k in known}))
+                    except (ValueError, TypeError, AttributeError):
                         continue
         except OSError:
             log.exception("could not read flight log")

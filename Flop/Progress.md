@@ -412,6 +412,7 @@ Everything from here on tracks the PyQt5 `Drone-GCS` rewrite (superseding the Tk
 | — | [Servo + EMERGENCY KILL on One Row (2026-10-01)](#milestone-servo--emergency-kill-on-one-row-2026-10-01) |
 | — | [Link Range Test — Walk-Away Packet-Loss Measurement (2026-10-01)](#milestone-link-range-test--walk-away-packet-loss-measurement-2026-10-01) |
 | — | [Deployment & Network State, 2026-10-01](#milestone-deployment--network-state-2026-10-01) |
+| — | [GCS Tab Redesign: SLAM Panel, Configuration, Flight Logs, FPV Tools (2026-10-03)](#milestone-gcs-tab-redesign-slam-panel-configuration-flight-logs-fpv-tools-2026-10-03) |
 
 ### Milestone 11: Next-Generation Aviation Ground Control Station (`Drone-GCS` & `Radxa-Monitor`)
 
@@ -989,6 +990,19 @@ Goal: *how far can the laptop be carried from the Radxa/router before the live c
 - **Why loss is counted from sequence numbers**: duration ÷ interval cannot give a strict 0 % — a reply in flight when a hold ends looks like loss. Ping uses missing sequence numbers inside the received span (+ a dead stretch > 1 s at either end); UDP echoes carry their own sequence number and the helper's running count, giving *exact* up/down loss with nothing in flight at the edges.
 - **Bugs found while building**: `Store.add(kind, …)` collided with an event field named `kind`, so the video thread died on its first line without a trace (renamed `event`); `valid_host("1.2.3")` accepted a malformed IP as a hostname; the Wi-Fi card's retry counter resets when it roams, which made retries/s negative (counter deltas now survive a reset); a leaked ping process/pipe on stop; and — in the window — Python's garbage collector, running inside a sampler thread, deleted Tk objects off the main thread and aborted the process ("Tcl_AsyncDelete: async handler deleted by the wrong thread"; guarded by never running Tk's variable finaliser and keeping each window referenced, with worker threads holding no Tk object).
 - **Verification**: 91 + 29 tests. Real Wi-Fi card readings verified on this laptop; UDP/video paths on loopback against stand-ins for the camera and the helper; the window on a private Xvfb display. ⚠️ **Never run against the real Radxa or on a real walk** — it was powered off — and the over-SSH helper start is untested.
+
+### Milestone: GCS Tab Redesign: SLAM Panel, Configuration, Flight Logs, FPV Tools (2026-10-03)
+
+Four of the redesign ideas from the GUI review were implemented (Control-tab ready strip, Terminal messages, Parameters metadata/diff and header/footer slimming were deliberately left out).
+
+- **Tactical SLAM**: the scattered controls became one side panel (MAP → LAYERS → ROUTE → path actions). Pill and Reset Map moved out of the top row; layer switch, Inflation, Keep-out and Measure joined it (the canvas's own tool strip is gone). EXECUTE / PAUSE-RESUME / ABORT are large and state-aware (EXECUTE while idle, PAUSE + ABORT while flying). The "MISSION" altitude box is now `CRUISE ALT`. The map-quality strip is grey-first (amber only for a failing metric) with plain, non-monospace values. The goal chip is neutral instead of green.
+- **Second pass (same day)**: one-row toolbar; cruise altitude moved above EXECUTE; latched tools blue instead of amber; Reset Map grey until hover; the pill is grey `NO DATA` until a map has been seen and red `MAP LOST` afterwards; pose + uncertainty moved from the map corner to a status strip under it; stop list sized to its content with short rows; side panel narrowed 250 → ~206 px with a collapse button (path actions stay).
+- **Bug found and fixed on the way**: `set_executing_state(False, paused=True)` — the form `mission_control` actually uses — never reached the paused branch, so a paused mission never showed RESUME. It now honours either spelling.
+- **Configuration**: section list + search, human captions with unit suffixes (no raw keys such as `map_bridge_host` / `rviz_config`), per-field modified dot and "N unsaved changes", inline validation mapped to the offending field (Save disabled while invalid), "restart needed" tags derived from what `_on_settings_saved` applies live, per-section reset, Bench / Indoor-flight presets, and a neutral `#cfgToggle` checkbox (the global one is amber because the PROPS-OFF interlock uses it).
+- **Flight Logs**: `FlightLogger` now records a ~1 Hz series (alt, speed, battery %, volts, x, y) plus start voltage and minimum voltage; a flight-detail dialog (charts, ground track, CSV export); battery-health trend charts across flights; ISO dates and left-aligned Modes. Old records still load (no series; unknown keys ignored).
+- **FPV**: Snapshot (PNG), Record (MJPEG AVI, real frames only, size-normalised, REC timer), optional on-screen telemetry (off by default, never recorded), optional 60 s fps/latency graph. **Not done:** a stream-quality picker — the Radxa streamer has no per-client quality option (it is a ROS parameter), and the Radxa was off so a change there could not be tested.
+- **Tests**: `test_flight_logs`, `test_fpv_tools`, `test_config_tab`, `test_slam_panel` added and registered in `tests/run_tests.sh`.
+- **Not verified**: everything was checked offscreen and with synthetic data; recording and the new charts have not been run against the real Radxa stream or a real flight.
 
 ### Milestone: Deployment & Network State, 2026-10-01
 

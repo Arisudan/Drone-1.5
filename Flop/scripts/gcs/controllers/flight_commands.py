@@ -13,6 +13,8 @@ unchanged - they read window state through ``self``.
 
 from __future__ import annotations
 
+from PyQt5.QtCore import QTimer
+
 from core.audio import Severity
 
 
@@ -39,10 +41,10 @@ class FlightCommandsMixin:
         enough that the operator should know which one they are getting."""
         if not self._require_link("disarm"):
             return
-        if self.last_telemetry.is_airborne:
+        if self.last_telemetry.needs_controlled_landing:
             self.confirm_bar.request(
                 "disarm", "DISARM (AIRBORNE)", danger=True,
-                detail="Vehicle is airborne: this commands AUTO.LAND and "
+                detail="Vehicle is off the ground: this commands AUTO.LAND and "
                        "disarms on touchdown. Use EMERGENCY KILL for an "
                        "immediate cutoff.",
                 confirm_text="Slide to land and disarm", anchor=self.btn_disarm)
@@ -237,7 +239,7 @@ class FlightCommandsMixin:
         self.page_slam.canvas.clear_goal()
 
         t = self.last_telemetry
-        if t.is_airborne:
+        if t.needs_controlled_landing:
             # `disarm` while genuinely airborne must never be an instant
             # motor cutoff - that free-falls the vehicle. Redirect to PX4's
             # own AUTO.LAND (a real, tested controlled descent using the
@@ -245,7 +247,11 @@ class FlightCommandsMixin:
             # EKF2_RNG_CTRL/EKF2_OF_CTRL), and only send the real disarm once
             # landed_state confirms touchdown (see _on_telemetry_updated).
             # `kill` remains the true, unconditional emergency cutoff.
-            msg = "DISARM requested while airborne - redirecting to AUTO.LAND for a safe controlled descent (will disarm automatically on touchdown). Use KILL for an immediate cutoff instead."
+            h = t.height_over_floor()
+            where = f" ({h:.2f} m above the floor)" if h is not None else ""
+            msg = (f"DISARM requested while off the ground{where} - redirecting to "
+                   "AUTO.LAND for a safe controlled descent (will disarm automatically "
+                   "on touchdown). Use KILL for an immediate cutoff instead.")
             self.console.log_warning(msg)
             self.page_terminal.log_warning(msg)
             self.toast.show_message("Airborne - landing safely, will disarm on touchdown", "#d29922", 5000)
@@ -255,16 +261,45 @@ class FlightCommandsMixin:
                 "land-then-disarm", t.x, t.y, t.z,
                 cur_armed=t.armed, cur_mode=t.flight_mode
             )
+            # PX4 can refuse AUTO.LAND (e.g. no valid position estimate). Do not
+            # wait silently for a landing that will never start.
+            QTimer.singleShot(self.LAND_VERIFY_MS, self._verify_land_mode)
             return
 
         self.console.log_cmd("Dispatching DISARM...")
         self.page_terminal.log_cmd("Dispatching DISARM...")
-        self.worker.disarm(force=True)
+        # Not forced: if the vehicle is in fact flying, PX4 itself refuses a
+        # normal disarm. Forcing here would switch that safety net off.
+        self.worker.disarm(force=False)
         self.toast.show_message("Dispatching: DISARM", "#da3633")
         self.exec_tracker.start_tracking(
             "disarm", t.x, t.y, t.z,
             cur_armed=t.armed, cur_mode=t.flight_mode
         )
+
+    #: How long to wait for PX4 to confirm AUTO.LAND before warning the operator.
+    LAND_VERIFY_MS = 2500
+
+    def _verify_land_mode(self):
+        """Called shortly after a disarm was redirected to AUTO.LAND. If the
+        vehicle is still armed and not in AUTO.LAND, PX4 refused the mode:
+        say so loudly and leave the motors alone - never fall back to cutting
+        power in the air."""
+        if not getattr(self, "_pending_autodisarm_after_land", False):
+            return
+        t = self.last_telemetry
+        if not t.armed:
+            self._pending_autodisarm_after_land = False
+            return
+        if t.flight_mode == "AUTO.LAND":
+            return
+        self._pending_autodisarm_after_land = False
+        msg = (f"AUTO.LAND was NOT accepted (mode is {t.flight_mode}) - the vehicle is "
+               "still armed and NOT landing. Retry DISARM, fly it down manually, "
+               "or use EMERGENCY KILL.")
+        self.console.log_error(msg)
+        self.page_terminal.log_error(msg)
+        self.toast.show_message("LAND refused - still armed, not landing", "#da3633", 8000)
 
     def _cmd_takeoff_from_ui(self):
         try:

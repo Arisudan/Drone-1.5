@@ -949,10 +949,15 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # The floating viewport belongs to the SLAM workspace: while flying a
         # planned route you want the map full-size and the camera beside it.
         if page is self.page_slam:
-            if not self.fpv_float.isVisible():
+            first = not self.fpv_float.isVisible()
+            if first:
                 self._position_fpv_float()
             self.fpv_float.show()
             self.fpv_float.raise_()
+            if first:
+                # The page has just become current, so the canvas has its real
+                # geometry only after the event loop runs once.
+                QTimer.singleShot(0, self._position_fpv_float)
         else:
             self.fpv_float.hide()
 
@@ -966,10 +971,20 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             self._request_param_refresh()
 
     def _position_fpv_float(self):
-        """Park the floating viewport near the GCS's bottom-right on first show."""
-        geo = self.geometry()
-        self.fpv_float.move(geo.right() - self.fpv_float.width() - 40,
-                            geo.bottom() - self.fpv_float.height() - 60)
+        """Park the floating viewport over the map's top-left corner.
+
+        Top-left, not bottom-right: the map's own readouts (scale bar, hints)
+        live along the bottom, the compass is top-right, and the corner nearest
+        the toolbar is where the operator's eye already is. It stays a separate
+        window, so it can still be dragged anywhere.
+        """
+        canvas = self.page_slam.canvas
+        margin = 12
+        corner = canvas.mapToGlobal(canvas.rect().topLeft())
+        if canvas.width() < 50:           # page not laid out yet: fall back to the window corner
+            corner = self.mapToGlobal(self.rect().topLeft())
+            margin = 160
+        self.fpv_float.move(corner.x() + margin, corner.y() + margin)
 
     def _request_param_refresh(self) -> None:
         """(Re)fetch the full parameter list - the Parameters tab's only
@@ -1269,7 +1284,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # Safety state machine: a mid-flight `disarm` was redirected to
         # AUTO.LAND (see _cmd_disarm) - watch for PX4's own landed_state to
         # confirm real touchdown before actually cutting power.
-        if self._pending_autodisarm_after_land and t.landed_state == 1:
+        if self._pending_autodisarm_after_land and t.is_on_ground_for_disarm():
             self._pending_autodisarm_after_land = False
             self.console.log_success("Landing detected (ON_GROUND) - disarming now.")
             self.page_terminal.log_success("Landing detected (ON_GROUND) - disarming now.")
@@ -1297,6 +1312,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # tile would then show "fresh" forever during a real dropout).
         t.check_position_staleness()
         self.top_strip.update_telemetry(t)
+        self.page_fpv.set_telemetry(t)
         self.sidebar.set_flight_state(t.flight_mode, t.armed)
         self.sidebar.set_instruments(t.ground_speed, t.altitude)
 

@@ -54,8 +54,8 @@ if "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 import numpy as np
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QRectF, QThread, pyqtSignal, Qt, QTimer
+from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
     QFrame, QSizePolicy, QLineEdit
@@ -85,6 +85,7 @@ NETWORK_CAPTURE_OPTIONS = (
     "|max_delay;500000|fflags;nobuffer"
 )
 from ui.scaling import px, fit_min_width
+from core.video_recorder import VideoRecorder, save_snapshot
 from core.video_health import VideoHealthMonitor, IDLE, CONNECTING, DEGRADED, FROZEN, NO_SIGNAL
 
 #: URL schemes that go through FFmpeg and therefore want the options above.
@@ -428,6 +429,68 @@ class FloatingVideoWindow(QWidget):
         self._drag_offset = None
 
 
+class FeedGraph(QWidget):
+    """Sparkline of the feed's frame rate and pipeline latency over the last
+    minute - the shape of a problem (a slow decay vs sudden stalls) that the
+    single live number on the health line cannot show. Grey lines; no colour."""
+
+    WINDOW_S = 60.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(px(76))
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.fps: list = []
+        self.lat: list = []
+
+    def push(self, fps: float, latency_ms: Optional[float], period_s: float = 0.5) -> None:
+        keep = int(self.WINDOW_S / period_s)
+        self.fps = (self.fps + [float(fps)])[-keep:]
+        self.lat = (self.lat + [latency_ms])[-keep:]
+        self.update()
+
+    def clear(self) -> None:
+        self.fps, self.lat = [], []
+        self.update()
+
+    def _line(self, p, rect, vals, top, colour):
+        pts = [(i, v) for i, v in enumerate(vals) if v is not None]
+        if len(pts) < 2:
+            return
+        n = max(len(vals) - 1, 1)
+        path = None
+        from PyQt5.QtGui import QPainterPath
+        for i, v in pts:
+            x = rect.left() + rect.width() * i / n
+            y = rect.bottom() - rect.height() * min(max(v / top, 0.0), 1.0)
+            if path is None:
+                path = QPainterPath()
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        p.setPen(QPen(colour, 1.5))
+        p.drawPath(path)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor("#0d1117"))
+        rect = QRectF(self.rect()).adjusted(px(8), px(20), -px(8), -px(6))
+        p.setPen(QPen(QColor("#262c34"), 1))
+        p.drawLine(rect.bottomLeft(), rect.bottomRight())
+        p.drawLine(rect.topLeft(), rect.topRight())
+        top_fps = max(30.0, max(self.fps or [0.0]))
+        lats = [v for v in self.lat if v is not None]
+        top_lat = max(100.0, max(lats or [0.0]))
+        self._line(p, rect, self.lat, top_lat, QColor("#6e7681"))
+        self._line(p, rect, self.fps, top_fps, QColor("#58a6ff"))
+        p.setFont(QFont("Ubuntu", 8))
+        p.setPen(QColor("#8b949e"))
+        p.drawText(QRectF(px(8), px(3), self.width() - px(16), px(14)), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"fps (blue, 0-{top_fps:.0f})   latency (grey, 0-{top_lat:.0f} ms)   last 60 s")
+        p.end()
+
+
 class VideoFeedWidget(QWidget):
     """Compound widget presenting live video viewport and camera controls.
 
@@ -528,7 +591,53 @@ class VideoFeedWidget(QWidget):
             "this station only; it excludes camera, encoder and network delay, so it\n"
             "is a floor and an early warning, not true glass-to-glass latency.")
         self.lbl_health.setContentsMargins(8, 0, 8, 4)
-        layout.addWidget(self.lbl_health)
+
+        # Capture tools sit beside the health line: snapshot, record, and the
+        # two optional extras (both OFF by default - the operator removed
+        # on-video overlays earlier, so they are opt-in).
+        row = QHBoxLayout()
+        row.setContentsMargins(8, 0, 8, 6)
+        row.addWidget(self.lbl_health, 1)
+        self.lbl_rec = QLabel("", self)
+        self.lbl_rec.setStyleSheet("color: #da3633; font-weight: bold; font-size: 11px;")
+        row.addWidget(self.lbl_rec)
+        self.btn_snapshot = QPushButton("Snapshot", self)
+        self.btn_snapshot.setToolTip("Save the current frame as a PNG in ~/.drone_gcs/video/")
+        self.btn_snapshot.clicked.connect(self.take_snapshot)
+        row.addWidget(self.btn_snapshot)
+        self.btn_record = QPushButton("Record", self)
+        self.btn_record.setToolTip("Record the feed to an MJPEG .avi in ~/.drone_gcs/video/.\n"
+                                   "Raw frames only - overlays are never burned in.")
+        self.btn_record.clicked.connect(self.toggle_recording)
+        row.addWidget(self.btn_record)
+        self.btn_overlay = QPushButton("Telemetry", self)
+        self.btn_overlay.setCheckable(True)
+        self.btn_overlay.setToolTip("Show altitude / speed / battery / mode over the picture on screen only")
+        self.btn_overlay.toggled.connect(lambda _on: self._redraw_last())
+        row.addWidget(self.btn_overlay)
+        self.btn_graph = QPushButton("Graph", self)
+        self.btn_graph.setCheckable(True)
+        self.btn_graph.setToolTip("Frame rate and latency over the last minute")
+        self.btn_graph.toggled.connect(self._on_graph_toggled)
+        row.addWidget(self.btn_graph)
+        layout.addLayout(row)
+
+        self.lbl_note = QLabel("", self)
+        self.lbl_note.setStyleSheet("color: #8b949e; font-size: 11px;")
+        self.lbl_note.setContentsMargins(8, 0, 8, 0)
+        self.lbl_note.setWordWrap(True)
+        self.lbl_note.setVisible(False)
+        layout.addWidget(self.lbl_note)
+
+        self.graph = FeedGraph(self)
+        self.graph.setVisible(False)
+        layout.addWidget(self.graph)
+
+        self.recorder = VideoRecorder()
+        self._last_frame = None
+        self._telemetry = None
+        self._rec_timer = QTimer(self)
+        self._rec_timer.timeout.connect(self._update_rec_label)
 
         self.health = VideoHealthMonitor()
         self._last_info: Tuple[Optional[float], bool] = (None, True)
@@ -645,6 +754,8 @@ class VideoFeedWidget(QWidget):
         colour = "#da3633" if bad else "#d29922" if warn else "#8b949e"
         self.lbl_health.setStyleSheet(f"color: {colour}; font-size: 11px;")
         self.lbl_health.setText(h.text())
+        if self.graph.isVisibleTo(self):
+            self.graph.push(h.fps, h.latency_ms)
         if h.state != self._last_health_state:
             self._last_health_state = h.state
             self.health_changed.emit(h.state, h.text())
@@ -660,13 +771,109 @@ class VideoFeedWidget(QWidget):
         lbl_h = max(180, self.video_label.height())
         scaled_pixmap = QPixmap.fromImage(qimg).scaled(lbl_w, lbl_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
-        self.video_label.setPixmap(scaled_pixmap)
         captured_at, real = self._last_info
+        if real:
+            self._last_frame = frame
+            if self.recorder.recording:
+                self.recorder.write(frame)
+        self._show_pixmap(scaled_pixmap)
         self.health.on_frame(captured_at, real)
         # Mirror to every other viewport on the same decoded frame.
         self.frame_broadcast.emit(frame)
 
+    # -------------------------------------------------------------------------
+    # Snapshot / recording / overlay / graph
+    # -------------------------------------------------------------------------
+
+    def set_telemetry(self, t) -> None:
+        """Latest telemetry, for the optional on-screen overlay (never recorded)."""
+        self._telemetry = t
+
+    def overlay_lines(self) -> list:
+        t = self._telemetry
+        if t is None:
+            return []
+        return [
+            f"{getattr(t, 'flight_mode', '--')}  {'ARMED' if getattr(t, 'armed', False) else 'DISARMED'}",
+            f"ALT {getattr(t, 'altitude', 0.0):.2f} m   SPD {getattr(t, 'ground_speed', 0.0):.1f} m/s",
+            f"BATT {getattr(t, 'battery_percent', 0)}%   {getattr(t, 'battery_voltage', 0.0):.1f} V",
+        ]
+
+    def _show_pixmap(self, pm: QPixmap) -> None:
+        if self.btn_overlay.isChecked() and self._telemetry is not None:
+            pm = QPixmap(pm)
+            p = QPainter(pm)
+            p.setFont(QFont("Ubuntu", 10, QFont.Bold))
+            lines = self.overlay_lines()
+            lh = p.fontMetrics().height()
+            w = max(p.fontMetrics().horizontalAdvance(x) for x in lines) + 16
+            p.fillRect(8, 8, w, lh * len(lines) + 10, QColor(0, 0, 0, 140))
+            p.setPen(QColor("#e6edf3"))
+            for i, text in enumerate(lines):
+                p.drawText(16, 8 + 5 + lh * (i + 1) - p.fontMetrics().descent(), text)
+            p.end()
+        self.video_label.setPixmap(pm)
+
+    def _redraw_last(self) -> None:
+        if self._last_frame is not None:
+            self._on_frame_ready_display_only(self._last_frame)
+
+    def _on_frame_ready_display_only(self, frame: np.ndarray) -> None:
+        h, w, ch = frame.shape
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        pm = QPixmap.fromImage(qimg).scaled(max(320, self.video_label.width()),
+                                            max(180, self.video_label.height()),
+                                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._show_pixmap(pm)
+
+    def take_snapshot(self):
+        """Save the last real frame as a PNG. Returns the path, or None."""
+        path = save_snapshot(self._last_frame)
+        self._notice("Snapshot: no live frame to save" if path is None else f"Snapshot saved: {path}")
+        return path
+
+    def toggle_recording(self):
+        if self.recorder.recording:
+            self.stop_recording()
+        else:
+            self.recorder.start()
+            self.btn_record.setText("Stop rec")
+            self._rec_timer.start(500)
+            self._update_rec_label()
+
+    def stop_recording(self):
+        path = self.recorder.stop()
+        self._rec_timer.stop()
+        self.btn_record.setText("Record")
+        self.lbl_rec.setText("")
+        self._notice(f"Recording saved: {path}" if path else "Recording stopped: no frames received")
+        return path
+
+    def _notice(self, text: str) -> None:
+        """A line under the picture for a few seconds (the health line is rewritten
+        twice a second, so it cannot carry a confirmation)."""
+        self.lbl_note.setText(text)
+        self.lbl_note.setVisible(True)
+
+        def clear():
+            if self.lbl_note.text() == text:
+                self.lbl_note.setText("")
+                self.lbl_note.setVisible(False)
+        QTimer.singleShot(6000, clear)
+
+    def _update_rec_label(self):
+        e = int(self.recorder.elapsed)
+        self.lbl_rec.setText(f"● REC {e // 60:02d}:{e % 60:02d}")
+
+    def _on_graph_toggled(self, on: bool):
+        self.graph.setVisible(on)
+        if on:
+            self.graph.clear()
+
     def closeEvent(self, event):
+        if self.recorder.recording:
+            self.recorder.stop()
         if self.cap_thread:
             self.cap_thread.stop()
         super().closeEvent(event)
