@@ -138,6 +138,24 @@ def signal_colour(dbm: Optional[float]) -> str:
     return BRIGHT
 
 
+def udp_off_note(session: "L.Session") -> str:
+    """One sentence on why UDP loss is not being measured ("" when it is)."""
+    if session.analysis.udp_enabled:
+        return ""
+    why = session.udp_off_reason
+    if why == "not selected":
+        return "UDP packet loss is not being measured (the option was not ticked)."
+    return f"UDP packet loss is NOT being measured: {why}." if why else ""
+
+
+def udp_tile_sub(session: "L.Session") -> str:
+    """Short reason for under the 'off' on the UDP tile."""
+    why = session.udp_off_reason
+    if not why:
+        return " "
+    return "not selected" if why == "not selected" else "helper did not start - see note"
+
+
 def loss_colour(pct: Optional[float], tol: float) -> str:
     if pct is None:
         return MUTED
@@ -514,6 +532,8 @@ class RunScreen(ttk.Frame):
         self.lbl_instr.pack(fill="x", pady=(14, 2))
         self.lbl_sub = ttk.Label(self, text="", style="Muted.TLabel", wraplength=800, justify="left")
         self.lbl_sub.pack(fill="x")
+        self.lbl_udp_note = ttk.Label(self, text="", wraplength=800, justify="left", foreground=WARN)
+        self.lbl_udp_note.pack(fill="x")
 
         tiles = ttk.Frame(self)
         tiles.pack(fill="x", pady=14)
@@ -567,6 +587,7 @@ class RunScreen(ttk.Frame):
             self.active = False
             self.app.destroy()
             return
+        self.lbl_udp_note.configure(text=udp_off_note(self.session))
         self.state = "baseline_wait"
         self.lbl_instr.configure(text="Stand next to the Radxa and router (0 m).")
         self.lbl_sub.configure(text="Press the button, then stand still until the countdown ends. "
@@ -675,7 +696,7 @@ class RunScreen(ttk.Frame):
             self.t_udp.set(f"{fmt(s.udp_up_loss, '{:.1f}')} / {fmt(s.udp_down_loss, '{:.1f}')} %",
                            loss_colour(worst, tol))
         else:
-            self.t_udp.set("off", MUTED)
+            self.t_udp.set("off", MUTED, udp_tile_sub(self.session))
         lf = L.is_loss_free(s, tol)
         if lf is None:
             self.t_state.set("measuring…", MUTED)
@@ -745,6 +766,8 @@ class WalkScreen(ttk.Frame):
         self.lbl_instr.pack(fill="x", pady=(14, 2))
         self.lbl_sub = ttk.Label(self, text="", style="Muted.TLabel", wraplength=800, justify="left")
         self.lbl_sub.pack(fill="x")
+        self.lbl_udp_note = ttk.Label(self, text="", wraplength=800, justify="left", foreground=WARN)
+        self.lbl_udp_note.pack(fill="x")
 
         tiles = ttk.Frame(self)
         tiles.pack(fill="x", pady=14)
@@ -788,6 +811,7 @@ class WalkScreen(ttk.Frame):
             self.active = False
             self.app.destroy()
             return
+        self.lbl_udp_note.configure(text=udp_off_note(self.session))
         self.state = "ready"
         self.lbl_instr.configure(text="Stand next to the Radxa and router.")
         self.lbl_sub.configure(text="Press the button, then walk away at your own pace. Values stream below "
@@ -860,7 +884,7 @@ class WalkScreen(ttk.Frame):
             self.t_udp.set(f"{fmt(p.udp_up_loss, '{:.1f}')} / {fmt(p.udp_down_loss, '{:.1f}')} %",
                            loss_colour(worst, tol))
         else:
-            self.t_udp.set("off", MUTED)
+            self.t_udp.set("off", MUTED, udp_tile_sub(self.session))
         if p.loss_free is None:
             self.t_state.set("measuring…", MUTED)
         elif p.loss_free:
@@ -938,6 +962,9 @@ class ResultScreen(ttk.Frame):
         tk.Label(card, text=notes[0] if notes else "", bg=PANEL, fg=MUTED, font=app.fonts["body"],
                  anchor="w", justify="left", wraplength=780).pack(anchor="w")
 
+        note = udp_off_note(session)
+        if note:
+            ttk.Label(self, text=note, wraplength=780, justify="left", foreground=WARN).pack(anchor="w")
         cols = ("dist", "signal", "ping", "video", "udp", "lf", "verdict")
         tree = ttk.Treeview(self, columns=cols, show="headings", height=min(10, max(3, len(session.holds))),
                             selectmode="none")
@@ -1019,6 +1046,9 @@ class WalkResultScreen(ResultScreen):
         tk.Label(card, text=notes[0] if notes else "", bg=PANEL, fg=MUTED, font=app.fonts["body"],
                  anchor="w", justify="left", wraplength=780).pack(anchor="w", pady=(4, 0))
 
+        note = udp_off_note(session)
+        if note:
+            ttk.Label(self, text=note, wraplength=780, justify="left", foreground=WARN).pack(anchor="w")
         bands = v.get("bands", [])                             # type: ignore[union-attr]
         tree = ttk.Treeview(self, columns=("band", "sec", "clean", "pct"), show="headings",
                             height=min(8, max(2, len(bands))), selectmode="none")

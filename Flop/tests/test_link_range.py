@@ -758,3 +758,65 @@ class LoopbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HelperFailureReasonTest(unittest.TestCase):
+    """The window used to show a bare 'off' when the Radxa helper could not start."""
+
+    def test_explanations_are_plain_language(self):
+        e = L.explain_ssh_failure
+        self.assertIn("ssh-copy-id radxa@1.2.3.4", e("Permission denied (publickey,password).", "radxa@1.2.3.4"))
+        self.assertIn("cannot reach 1.2.3.4", e("ssh: connect to host 1.2.3.4 port 22: No route to host", "radxa@1.2.3.4"))
+        self.assertIn("cannot reach", e("Connection timed out", "radxa@1.2.3.4"))
+        self.assertIn("cannot reach", e("Connection refused", "radxa@1.2.3.4"))
+        self.assertIn("does not trust", e("Host key verification failed.", "radxa@1.2.3.4"))
+        self.assertIn("failed (", e("something odd", "radxa@1.2.3.4"))
+        self.assertIn("no details", e("", "radxa@1.2.3.4"))
+
+    def test_a_failed_copy_gives_the_reason(self):
+        from unittest import mock
+        done = mock.Mock(returncode=255, stdout="", stderr="Permission denied (publickey).")
+        with mock.patch.object(L.subprocess, "run", return_value=done):
+            ok, why = L.start_helper_checked("radxa@1.2.3.4", 9099)
+        self.assertFalse(ok)
+        self.assertIn("ssh-copy-id", why)
+
+    def test_a_helper_that_exits_at_once_is_reported(self):
+        from unittest import mock
+        results = [mock.Mock(returncode=0, stdout="", stderr=""),             # scp ok
+                   mock.Mock(returncode=1, stdout="", stderr="")]             # pgrep finds nothing
+        with mock.patch.object(L.subprocess, "run", side_effect=results):
+            ok, why = L.start_helper_checked("radxa@1.2.3.4", 9099)
+        self.assertFalse(ok)
+        self.assertIn("exited at once", why)
+
+    def test_success_has_no_reason(self):
+        from unittest import mock
+        results = [mock.Mock(returncode=0, stdout="", stderr=""), mock.Mock(returncode=0, stdout="4242\n", stderr="")]
+        with mock.patch.object(L.subprocess, "run", side_effect=results):
+            self.assertEqual(L.start_helper_checked("radxa@1.2.3.4", 9099), (True, ""))
+
+    def test_missing_ssh_and_timeouts(self):
+        from unittest import mock
+        with mock.patch.object(L.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIn("not installed", L.start_helper_checked("r@h", 1)[1])
+        with mock.patch.object(L.subprocess, "run", side_effect=L.subprocess.TimeoutExpired("scp", 20)):
+            self.assertIn("timed out", L.start_helper_checked("r@h", 1)[1])
+
+    def test_session_keeps_the_reason_and_reports_it(self):
+        from unittest import mock
+        cfg = L.SessionConfig(radxa="127.0.0.1", use_video=False, use_udp=True, helper_target="radxa@127.0.0.1")
+        s = L.Session(cfg, log=lambda m: None)
+        with mock.patch.object(L, "start_helper_checked", return_value=(False, "SSH login failed")), \
+                mock.patch.object(L, "WifiSampler"), mock.patch.object(L, "PingSampler"), mock.patch("time.sleep"):
+            s.start()
+        self.assertFalse(s.analysis.udp_enabled)
+        self.assertEqual(s.udp_off_reason, "SSH login failed")
+        self.assertEqual(s.udp_summary(), "off - SSH login failed")
+
+    def test_not_selected_is_its_own_reason_and_a_running_probe_has_none(self):
+        s = L.Session(L.SessionConfig(radxa="127.0.0.1", use_udp=False), log=lambda m: None)
+        self.assertEqual(s.udp_off_reason, "not selected")
+        s2 = L.Session(L.SessionConfig(radxa="127.0.0.1", use_udp=True), log=lambda m: None)
+        self.assertEqual(s2.udp_off_reason, "")
+        self.assertEqual(s2.udp_summary(), "1.0 Mbit/s")

@@ -483,6 +483,74 @@ class WalkFlowTest(GuiBase):
         self.assertIsInstance(a.frame, self.G.SetupScreen)
 
 
+class UdpOffReasonTest(GuiBase):
+    """A bare 'off' on the UDP tile used to hide why the Radxa helper did not start."""
+
+    def setUp(self):
+        super().setUp()
+        self.si = StandIns()
+
+    def tearDown(self):
+        self.si.close()
+        super().tearDown()
+
+    def run_screen(self, mode):
+        a = self.app()
+        cfg = self.si.config(self.L, os.path.join(self.tmp, "out"), mode=mode, helper_target="radxa@127.0.0.1")
+        with mock.patch.object(self.L, "start_helper_checked",
+                               return_value=(False, "SSH login to radxa@127.0.0.1 failed - no key is set up")):
+            a.show_run(cfg)
+            r = a.run_screen
+            want = "baseline_wait" if mode == "holds" else "ready"
+            self.assertTrue(self.until(a, lambda: r.state == want, 15))
+        return a, r
+
+    def test_marked_holds_screen_says_why_udp_is_off(self):
+        a, r = self.run_screen("holds")
+        self.pump(a, 1.0)
+        self.assertIn("NOT being measured", r.lbl_udp_note.cget("text"))
+        self.assertIn("no key is set up", r.lbl_udp_note.cget("text"))
+        self.assertEqual(r.t_udp.value.cget("text"), "off")
+        self.assertIn("helper did not start", r.t_udp.sub.cget("text"))
+
+    def test_walk_screen_says_why_udp_is_off(self):
+        a, r = self.run_screen("walk")
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 1, 10))
+        self.assertIn("no key is set up", r.lbl_udp_note.cget("text"))
+        self.assertEqual(r.t_udp.value.cget("text"), "off")
+
+    def test_the_result_repeats_the_reason_and_the_report_records_it(self):
+        a, r = self.run_screen("walk")
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 2, 10))
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: isinstance(a.frame, self.G.WalkResultScreen), 15))
+        texts = [w.cget("text") for w in a.frame.winfo_children() if w.winfo_class() == "TLabel"]
+        self.assertTrue(any("NOT being measured" in t for t in texts), texts)
+        with open(os.path.join(self.tmp, "out", "report.md"), encoding="utf-8") as fh:
+            self.assertIn("off - SSH login", fh.read())
+
+    def test_not_selected_is_stated_plainly(self):
+        a = self.app()
+        cfg = self.si.config(self.L, os.path.join(self.tmp, "out"), mode="walk")
+        cfg.use_udp = False
+        a.show_run(cfg)
+        r = a.run_screen
+        self.assertTrue(self.until(a, lambda: r.state == "ready", 15))
+        self.assertIn("not ticked", r.lbl_udp_note.cget("text"))
+        r.on_main()
+        self.assertTrue(self.until(a, lambda: len(r.tree.get_children()) >= 1, 10))
+        self.assertIn("not selected", r.t_udp.sub.cget("text"))
+
+    def test_when_udp_works_there_is_no_warning(self):
+        a = self.app()
+        a.show_run(self.si.config(self.L, os.path.join(self.tmp, "out"), mode="walk"))
+        r = a.run_screen
+        self.assertTrue(self.until(a, lambda: r.state == "ready", 15))
+        self.assertEqual(r.lbl_udp_note.cget("text"), "")
+
+
 class ThemeAndHelpersTest(GuiBase):
     def test_signal_colours_follow_the_thresholds(self):
         G = self.G

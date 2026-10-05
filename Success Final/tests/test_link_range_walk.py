@@ -208,6 +208,9 @@ class CliTest(unittest.TestCase):
                 def stop(self):
                     stopped.set()
 
+                def udp_summary(self):
+                    return "off"
+
             sess = FakeSession()
             feed_stop = threading.Event()
 

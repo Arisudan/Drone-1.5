@@ -721,8 +721,24 @@ def _ssh(target: str, command: str, timeout: float = 12.0) -> subprocess.Complet
                           capture_output=True, text=True, timeout=timeout)
 
 
-def start_helper(target: str, port: int) -> bool:
-    """Copy the probe server to /tmp on the Radxa and start it. It writes only to
+def explain_ssh_failure(stderr: str, target: str) -> str:
+    """A plain-language reason for a failed ssh/scp, from its error text."""
+    host = target.split("@")[-1]
+    low = (stderr or "").lower()
+    if "permission denied" in low or "publickey" in low:
+        return (f"SSH login to {target} failed - no key is set up. Run once: ssh-copy-id {target}")
+    if any(w in low for w in ("timed out", "no route", "unreachable", "refused", "could not resolve", "name or service")):
+        return (f"cannot reach {host} over SSH - the Radxa is off, the IP is wrong, "
+                "or this laptop is on a different Wi-Fi network")
+    if "host key verification" in low:
+        return f"SSH does not trust {host} yet - run once: ssh {target}  (and answer yes)"
+    detail = (stderr or "").strip().splitlines()[-1][:90] if (stderr or "").strip() else "no details"
+    return f"SSH to {target} failed ({detail})"
+
+
+def start_helper_checked(target: str, port: int) -> Tuple[bool, str]:
+    """Copy the probe server to /tmp on the Radxa and start it. Returns (ok, reason);
+    the reason is "" on success and a plain sentence otherwise. It writes only to
     /tmp and exits by itself when idle."""
     here = os.path.dirname(os.path.abspath(__file__))
     src = os.path.join(here, "link_probe_server.py")
@@ -730,14 +746,31 @@ def start_helper(target: str, port: int) -> bool:
         cp = subprocess.run(["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", src,
                              f"{target}:/tmp/link_probe_server.py"], capture_output=True, text=True, timeout=20)
         if cp.returncode != 0:
-            print(f"  could not copy the helper: {cp.stderr.strip()[:120]}")
-            return False
+            return False, explain_ssh_failure(cp.stderr, target)
         run = _ssh(target, f"nohup python3 /tmp/link_probe_server.py --port {port} --idle-exit 30 "
                            ">/tmp/link_probe.log 2>&1 & sleep 1; pgrep -f link_probe_server.py")
-        return run.returncode == 0 and bool(run.stdout.strip())
+        if run.returncode == 0 and run.stdout.strip():
+            return True, ""
+        err = (run.stderr or "").strip()
+        if err and "python3" in err.lower() and "not found" in err.lower():
+            return False, "python3 is not installed on the Radxa"
+        if run.returncode != 0 and err:
+            return False, explain_ssh_failure(err, target)
+        return False, ("the helper was copied but exited at once - see /tmp/link_probe.log on the Radxa "
+                       f"(is UDP port {port} already in use?)")
+    except subprocess.TimeoutExpired:
+        return False, f"SSH to {target} timed out"
+    except FileNotFoundError:
+        return False, "ssh/scp is not installed on this laptop"
     except (OSError, subprocess.SubprocessError) as exc:
-        print(f"  helper start failed: {exc}")
-        return False
+        return False, f"helper start failed: {exc}"
+
+
+def start_helper(target: str, port: int) -> bool:
+    ok, why = start_helper_checked(target, port)
+    if not ok:
+        print(f"  could not start the helper: {why}")
+    return ok
 
 
 def stop_helper(target: str) -> None:
@@ -1143,6 +1176,14 @@ class Session:
         self.t_start = 0.0
         self.radxa_before: Optional[float] = None
         self.started = False
+        # Why UDP loss is not being measured ("" = it is, or it was never requested).
+        self.udp_off_reason = "" if cfg.use_udp else "not selected"
+
+    def udp_summary(self) -> str:
+        """For the report and the window: the probe rate, or "off" and why."""
+        if self.analysis.udp_enabled:
+            return f"{self.cfg.udp_mbps} Mbit/s"
+        return f"off - {self.udp_off_reason}" if self.udp_off_reason else "off"
 
     # ── before the test ────────────────────────────────────────────────
     def preflight(self) -> Dict[str, object]:
@@ -1172,9 +1213,12 @@ class Session:
         if c.use_video:
             self.threads.append(VideoSampler(c.url, st, stop))
         if c.use_udp:
-            if c.helper_target and not start_helper(c.helper_target, c.udp_port):
-                self.log("  UDP helper did not start - UDP loss will not be measured.")
-                self.analysis.udp_enabled = False
+            if c.helper_target:
+                ok, why = start_helper_checked(c.helper_target, c.udp_port)
+                if not ok:
+                    self.udp_off_reason = why
+                    self.log(f"  UDP helper did not start - UDP loss will not be measured: {why}")
+                    self.analysis.udp_enabled = False
             if self.analysis.udp_enabled:
                 self.threads.append(UdpProbe(c.radxa, c.udp_port, c.udp_mbps, 1200, st, stop))
                 self.helper = c.helper_target or None
@@ -1240,7 +1284,7 @@ class Session:
         meta = {"started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), "radxa": c.radxa,
                 "wifi_iface": self.iface, "video_url": c.url if c.use_video else "off",
                 "step_m": c.step, "hold_s": c.hold,
-                "udp": f"{c.udp_mbps} Mbit/s" if self.analysis.udp_enabled else "off",
+                "udp": self.udp_summary(),
                 "allowed loss %": c.loss_tolerance,
                 "radxa_wifi_signal_dbm (before/after)": f"{self.radxa_before} / {radxa_after}"}
         timeline = build_timeline(self.store, self.t_start, getattr(self, "t_end", time.monotonic()),

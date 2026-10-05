@@ -171,7 +171,7 @@ only for caution and poor.
 | Symptom | Cause / fix |
 |---|---|
 | "The Radxa does not answer" | The laptop is on a different Wi-Fi network (e.g. `HTIC_INCUBATION` instead of `HTIC_RND`: `nmcli connection up HTIC_RND`), the Radxa is off, or its IP changed between networks. |
-| Packet loss reads "off" | The helper did not start: set up SSH once with `ssh-copy-id radxa@<ip>`, or untick the option (ping and the stream are still measured). |
+| Packet loss reads "off" | The window and the report now say why, in plain words under the readouts, on the result screen and in the run details (`udp: off - …`): *not selected*; *SSH login failed – run ssh-copy-id radxa@<ip>*; *cannot reach <ip> over SSH (Radxa off, wrong IP, other Wi-Fi network)*; *python3 is not installed on the Radxa*; *the helper exited at once – see /tmp/link_probe.log*. Fix that, or untick the option (ping and the stream are still measured). |
 | Camera feed "off" / 0 fps | `camera.sh` / the video streamer is not running on the Radxa; check `curl -I http://<ip>:8080/video`. |
 | "Marginal" at 0 m | The laptop's signal is already below −70 dBm next to the router — worth knowing before walking anywhere. |
 | No window opens | No display or `tkinter` (`sudo apt install python3-tk`); it falls back to asking for the IP in the terminal. |

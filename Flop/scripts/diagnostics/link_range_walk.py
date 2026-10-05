@@ -256,7 +256,7 @@ class WalkRecorder:
         meta = {"mode": "continuous walk (time and signal, no distance)",
                 "started": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), "radxa": c.radxa,
                 "wifi_iface": self.session.iface, "video_url": c.url if c.use_video else "off",
-                "udp": f"{c.udp_mbps} Mbit/s" if self.session.analysis.udp_enabled else "off",
+                "udp": self.session.udp_summary(),
                 "allowed loss %": c.loss_tolerance, "window_s": WINDOW_S,
                 "radxa_wifi_signal_dbm (before/after)": f"{self.session.radxa_before} / {radxa_after}"}
         timeline = L.build_timeline(self.session.store, self.t0, self.t_end or time.monotonic(),
