@@ -190,6 +190,8 @@ Everything else in this guide is reference material for once those two are runni
 │   ├── test_map_eval.py
 │   ├── test_mini_feed.py
 │   ├── test_flight_logs.py
+│   ├── test_preflight.py
+│   ├── test_radxa_services.py
 │   ├── test_fpv_tools.py
 │   ├── test_config_tab.py
 │   ├── test_slam_panel.py
@@ -280,6 +282,8 @@ Everything else in this guide is reference material for once those two are runni
 - **planner_worker.py** — Runs A\*, path collision checks, map scoring and the inflation layer on a worker thread, with job tokens so a stale result is dropped.
 - **settings.py** — Typed, validated, persisted ground-station settings (`$DRONE_GCS_HOME/settings.json`), with a schema version and one-step migrations; CLI/env overrides layered on top.
 - **ui_stall.py** — Detects the UI thread blocking: feeds on the 30 Hz tick and reports a gap over 250 ms (rate-limited), with the worst gap kept.
+- **preflight.py** — The preflight checklist logic (no Qt): turns link / battery / vision / position / video / map / heading facts into pass, fail or unknown rows; which rows are required; the READY / NOT READY line. Unknown never counts as pass.
+- **radxa_status.py** — Fetches and interprets the Radxa watchdog's `/status` JSON (state, restarts, disk). None = not reporting, never healthy.
 - **video_recorder.py** — FPV snapshot (PNG) and MJPEG-AVI recorder: real frames only, size-normalised, files in `<DRONE_GCS_HOME>/video/`; no Qt.
 - **video_health.py** — Video feed health from frame arrivals: fps, jitter, capture→paint ("pipeline") latency, and freeze / no-signal detection. Placeholder frames never count as live.
 - **health.py** — Liveness and latency bookkeeping for background workers: heartbeats, measured rate, p95 latency, and stall detection against a declared deadline. Wired into the OFFBOARD setpoint pump (whose 500 ms limit is PX4's, not a UI preference) and the map listener, so a dead worker surfaces instead of silently freezing the last good value on screen.
@@ -304,6 +308,10 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **alarm_banner.py** — The standing alarm card under the header: severity bar, title, hint, running timer, `+N`, Acknowledge. Hidden when empty.
 - **battery_badge.py** — The header's battery indicator: a drawn cell with fill level, percentage and voltage.
 - **config_tab.py** — The Configuration workspace: section list + search, captions with unit suffixes, per-field modified dots, inline validation, restart-needed tags, per-section reset and Bench / Indoor presets; edits, validates and persists the station settings.
+- **preflight_panel.py** — The checklist drawn under the Parameters table: a rule, a READY / NOT READY line, three columns of checks, the manual *Heading fixed* box.
+- **preflight_control.py** — (controllers) Gathers the checklist facts once a second, gates the ARM button on it, runs the guarded *Save to flash*, and turns Radxa watchdog reports into alarms.
+- **radxa_status_worker.py** — (protocol) Polls the watchdog every 5 s on its own thread.
+- **radxa_watchdog.py / radxa_log_janitor.py / install_radxa_services.sh / deploy/*.service** — (scripts/radxa, run ON the Radxa) Watchdog + status endpoint, log cleanup, the installer and the systemd units. See guide.md §11.
 - **flight_detail.py** — Flight-detail dialog for the Logs tab (altitude / speed / battery / voltage charts, ground track, CSV export) and the cross-flight battery-health trend charts; QPainter only.
 - **fonts.py** — Registers the bundled Red Hat Display / Ubuntu fonts with Qt (idempotent; called from `build_stylesheet()`), and `resolved_family()` for tests.
 - **logs_tab.py** — The Flight Logs workspace: statistics, filters, table, Details… (flight detail), Trends panel, CSV export, the password-gated Reset Logs, and Export Bundle.
@@ -366,6 +374,8 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **test_link_range.py** — The range test engine: `iw`/`ping` parsers on captured output, the JPEG frame counter at every split point, packet formats, sequence-based loss, verdicts, the loss-free range, path-loss fit, reports, and loopback integration (UDP up/down attribution, a real HTTP stream). Hermetic.
 - **test_link_range_gui.py** — The range-test window: setup validation, prefill, connection checks, the whole walk → result flow against stand-ins. Runs on its own private Xvfb display; skipped without `tkinter`/Xvfb.
 - **test_map_eval.py** — Every SLAM metric against synthetic grids, plus the CLI's exit codes.
+- **test_preflight.py** — Checklist logic, the ARM gate and its overrides, vision-loss clearing the heading tick, Save to flash (guarded, disarmed only), parameter export format, the worker command, Radxa-status parsing end to end, and the map / screen-freeze / Radxa alarms.
+- **test_radxa_services.py** — Watchdog decisions through time with an injected clock (grace, restart, rate limit, give-up, stopped-on-purpose), its HTTP endpoint, the video check, and the log janitor on temporary folders. Hermetic.
 - **test_flight_logs.py** — Flight series recording (sampling, thinning, voltage, forward-compatible loading), the detail helpers/dialog/CSV export, and the Logs tab (ISO dates, Details, Trends).
 - **test_fpv_tools.py** — Recorder (playable AVI, resize, no-frame = no file), snapshots, placeholder frames never recorded, overlay off by default and never burned in, the 60 s graph.
 - **test_config_tab.py** — Captions for every field, restart rules, parsing, validation mapped to fields, change tracking, presets, search, save/reload, hidden fields preserved.

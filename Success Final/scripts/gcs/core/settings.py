@@ -110,11 +110,13 @@ class ConnectionConfig:
     udp_port: int = 14550
     tcp_port: int = 5760
     source_system: int = 255
+    # Where the Radxa watchdog (scripts/radxa/radxa_watchdog.py) serves its status.
+    watchdog_port: int = 8081
 
     def validate(self) -> None:
         if self.protocol not in ("udp", "tcp"):
             raise ValueError(f"connection.protocol={self.protocol!r} must be udp or tcp")
-        for name in ("udp_port", "tcp_port"):
+        for name in ("udp_port", "tcp_port", "watchdog_port"):
             port = getattr(self, name)
             if not 1 <= port <= 65535:
                 raise ValueError(f"connection.{name}={port} outside 1..65535")
@@ -160,6 +162,9 @@ class LimitsConfig:
     takeoff_alt_min_m: float = 0.2
     takeoff_alt_max_m: float = 3.0
     move_max_delta_m: float = 3.0
+    # The ARM button refuses while a required preflight check fails. `arm force`
+    # in the flight terminal is the explicit bench override and skips this too.
+    require_preflight: bool = True
 
     def validate(self) -> None:
         if self.takeoff_alt_min_m <= 0:

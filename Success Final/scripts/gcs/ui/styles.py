@@ -886,6 +886,8 @@ QCheckBox::indicator:hover   { border-color: $warn; }
 
 /* ── Configuration tab ───────────────────────────────────────────── */
 QLabel#cfgLabel { color: $text; font-size: 11px; }
+QLabel#preflightSummary { color: $warn; font-size: 11px; font-weight: 700; }
+QLabel#preflightSummary[ready="true"] { color: $text_bright; }
 QLabel#cfgUnit  { color: $text_muted; font-size: 10px; }
 QLabel#cfgDirty { color: $accent; font-size: 11px; font-weight: 700; }
 QLabel#cfgRestart { color: $text_dim; font-size: 9px; font-weight: 700; }

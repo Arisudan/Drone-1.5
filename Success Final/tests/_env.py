@@ -29,5 +29,6 @@ for _sub in ("scripts/gcs", "scripts/diagnostics"):
 
 # Must be set before any PyQt5 import anywhere in the process.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("DRONE_GCS_NO_RADXA_POLL", "1")   # no real sockets to a Radxa from the tests
 
 REPO_ROOT = _REPO

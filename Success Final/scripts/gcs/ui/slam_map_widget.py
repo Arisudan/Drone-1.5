@@ -2192,6 +2192,8 @@ class SLAMMapWidget(QWidget):
         self.canvas.map_raw_qimage = None
         self.canvas.map_thin_qimage = None
         self.canvas.occupancy_grid = None
+        # A deliberate reset is not a stalled map: restart the staleness clock.
+        self.canvas.last_map_time = 0.0
         self.canvas.trail.clear()
         self.canvas.trail_visible = False
         self.canvas.clear_goal()

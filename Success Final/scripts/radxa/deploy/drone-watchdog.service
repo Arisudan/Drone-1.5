@@ -1,0 +1,15 @@
+# Watches the pipeline and mavlink-router, restarts them when stuck, and serves
+# the status the GCS reads (http://<radxa>:8081/status).
+[Unit]
+Description=Drone pipeline watchdog
+After=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=/usr/bin/python3 @HOME@/Flop/scripts/radxa/radxa_watchdog.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

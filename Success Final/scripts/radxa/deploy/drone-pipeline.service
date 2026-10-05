@@ -1,0 +1,26 @@
+# The drone pipeline (camera, stereo odometry, RTAB-Map SLAM, video streamer,
+# PX4 vision bridge, map streamer) - what `camera.sh` starts by hand. Installed by
+# install_radxa_services.sh. @USER@ and @HOME@ are filled in at install time.
+[Unit]
+Description=Drone pipeline (camera, SLAM, video, map bridge)
+After=network-online.target mavlink-router.service
+Wants=network-online.target
+# Stop trying after 5 failed starts in 5 minutes instead of looping forever; the
+# watchdog then reports the pipeline as down.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@HOME@/Flop
+Environment=HOME=@HOME@
+Environment=PYTHONPATH=/usr/lib/aarch64-linux-gnu/python3.12/site-packages
+ExecStart=@HOME@/Flop/camera.sh
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

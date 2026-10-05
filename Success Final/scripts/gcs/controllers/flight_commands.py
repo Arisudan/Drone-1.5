@@ -30,6 +30,8 @@ class FlightCommandsMixin:
         action. Bench force-arm remains terminal-only (`arm force`)."""
         if not self._require_link("arm"):
             return
+        if not self._preflight_allows_arm():
+            return
         self.confirm_bar.request(
             "arm", "ARM MOTORS", danger=True,
             detail="Propellers will be live. Confirm the area is clear.",
@@ -152,6 +154,8 @@ class FlightCommandsMixin:
             self._cmd_change_altitude(value)
         elif action == "kill":
             self._cmd_kill()
+        elif action == "save_params":
+            self._cmd_save_params()
         elif action == "abort_path":
             self._on_abort_path_requested()
 

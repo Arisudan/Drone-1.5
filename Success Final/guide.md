@@ -24,7 +24,8 @@ A guide to the laptop-side Ground Control Station application (`drone_gcs.py`) �
 8. [Alarm Card & Video Health](#8-alarm-card--video-health)
 9. [Look & Feel: Colour, Fonts, Short Windows](#9-look--feel-colour-fonts-short-windows)
 10. [Range Test: How Far Does the Live Feed Run Without Packet Loss?](#10-range-test-how-far-does-the-live-feed-run-without-packet-loss)
-11. [Current Limitations](#11-current-limitations)
+11. [Radxa Services](#11-radxa-services-boot-start-watchdog-log-cleanup)
+12. [Current Limitations](#12-current-limitations)
 
 ---
 
@@ -211,9 +212,15 @@ A section list on the left (Drone profile, MAVLink connection, Video & map bridg
 ### Parameters
 *(Ctrl+9)* — a live PX4 parameter table: search box, sortable columns (Name / Value / Type / Index), populated via the standard MAVLink parameter protocol (`PARAM_REQUEST_LIST` / `PARAM_VALUE`). Values are decoded through the same IEEE-754 bit-cast logic used elsewhere in this project for reading typed PX4 parameters correctly (an int32 param read as a naive float produces nonsense like `1.4e-45`).
 
-**Read-only for now** — writing a parameter from this tab (with the same guarded-confirm treatment ARM/DISARM get, plus a mandatory readback) is a planned later phase, not yet built.
+- **Export…** saves the parameters shown to a `.params` file (same layout as `Drone_1.5.params`, sorted by name) — use it to take a fresh backup after any change, so the file in the repo does not go stale.
+- **Save to flash** asks the flight controller to write its *current* parameters to flash so they survive a power cycle (`MAV_CMD_PREFLIGHT_STORAGE`). It needs a link, refuses while armed, and sits behind the slide-to-confirm bar. It changes no value — it stores what is there.
+- **Still read-only for values** — writing a single parameter from this tab (with a readback and the same guarded-confirm as ARM) is not built.
 
-![The Parameters tab, rendered offscreen with 30 synthetic parameters](docs/images/params_tab_phase1.png)
+**Preflight checklist** (under a horizontal rule below the table). One line per check, three to a row: Link, Battery, Vision tracking, Position feed, Camera feed, Map, **Heading fixed** (a tick box *you* tick after turning the drone once; it clears itself whenever vision tracking is lost, because the heading has to be fixed again after every restart), Radxa services, Parameters read. `✓` quiet grey = fine, `✕` red = a required check failed, `–` amber = cannot tell (never counted as fine). The heading line reads **READY TO ARM** or **NOT READY – 2 to fix: …**.
+
+**It blocks ARM.** While any *required* check is not fine, the ARM button refuses and says which ones (toast + console); details are in this tab. Not required (shown for information): Radxa services, Parameters read. Two ways round it, both deliberate: type `arm force` in the flight terminal (the bench override, as before), or untick *Configuration → Command limits → Block ARM until the preflight checklist passes*.
+
+![The Parameters tab with Export / Save to flash and the preflight checklist under the table (synthetic data, vision tracking failing)](docs/images/params_tab_preflight.png)
 
 ---
 
@@ -246,10 +253,16 @@ A slim card under the header that is **hidden while nothing is wrong**, so it co
 | Vision lost | CRITICAL | no VIO / vision fusion **while airborne** |
 | Position feed lost | CRITICAL | no local position **while airborne** |
 | Video feed frozen / no signal | WARN | the camera stream stopped delivering frames |
+| Map stalled | WARN | the map was arriving and has stopped for longer than *Map stalled after* (Configuration → Alert thresholds). Not raised before the first map or after a deliberate Reset Map |
+| Screen froze | WARN | the 30 Hz UI tick overran by 0.5 s or more; held for 10 s |
+| Radxa pipeline down | CRITICAL | the Radxa watchdog reports the camera/SLAM pipeline failed, or it gave up restarting it |
+| Radxa pipeline is stopped | WARN | the pipeline is stopped (e.g. on purpose, or not started yet) |
+| Radxa pipeline was restarted | WARN | the watchdog had to restart it in the last 5 minutes (the reason is in the detail line) |
+| Radxa disk almost full | WARN | under 10 % free on the Radxa |
 
 - Red = unacknowledged CRITICAL, amber = unacknowledged WARN, neutral grey once acknowledged (with an `ACKNOWLEDGED` tag). **Acknowledging does not clear an alarm** — only the condition going away does; an acknowledged alarm that gets worse becomes unacknowledged again.
 - Alarms are *level-triggered*: each condition holds its alarm for exactly as long as it is true, so the card always answers "what is wrong right now". A new or escalated alarm also writes a console line (and a toast for CRITICAL). It adds no sound of its own — the audio alerts already cover link, battery and vision.
-- The video row comes from the FPV health monitor (§4). Map-stalled and UI-stall alarms are not wired yet.
+- The video row comes from the FPV health monitor (§4). Map and screen-freeze alarms are the station's own health; the Radxa rows come from the watchdog (§11) and simply do not appear if the Radxa is not running it.
 
 ---
 
@@ -296,11 +309,44 @@ test cannot tell you: [`docs/link_range_test.md`](docs/link_range_test.md).
 
 ---
 
-## 11. Current Limitations
+## 11. Radxa Services (boot start, watchdog, log cleanup)
 
-- The **Parameters tab** is read-only (no write-then-verify, no guided-confirm gate for reboot-required parameters yet), and has only been tested against a synthetic parameter burst, not a real vehicle's full 1000–1800+ entry set.
+Three small services on the Radxa, installed from `scripts/radxa/` (source of truth in this repo; copy with the normal Radxa update, then install once):
+
+| Service | What it does |
+|---|---|
+| `drone-pipeline` | starts the camera / SLAM / video / map pipeline (what `camera.sh` does by hand) **at boot**, and restarts it if it crashes — at most 5 failed starts in 5 minutes, then it stops trying |
+| `drone-watchdog` | every 5 s checks that the pipeline is running **and the video streamer is really serving frames**, that `mavlink-router` is running, and the disk; restarts what is stuck; serves a read-only status at `http://<radxa>:8081/status` which the GCS turns into alarms and the checklist row |
+| `drone-janitor` (daily timer) | stops the logs filling the disk (see below) |
+
+```
+# on the Radxa, once (needs sudo):
+sudo ~/Flop/scripts/radxa/install_radxa_services.sh            # enable at boot; the pipeline is NOT started now
+sudo ~/Flop/scripts/radxa/install_radxa_services.sh --start    # ...and start it now
+sudo ~/Flop/scripts/radxa/install_radxa_services.sh --uninstall
+
+# day to day
+systemctl status drone-pipeline drone-watchdog
+journalctl -u drone-pipeline -f            # the pipeline's own output (replaces watching camera.sh)
+curl localhost:8081/status                 # what the GCS sees
+sudo systemctl stop drone-pipeline         # stop it on purpose - the watchdog will NOT restart it
+python3 ~/Flop/scripts/radxa/radxa_log_janitor.py          # dry run: lists what the cleanup would remove
+```
+
+**Watchdog rules.** It restarts the pipeline if video has not been served for 20 s after the pipeline has been up for at least 90 s (a freshly started pipeline gets that long to bring SLAM and the camera up), or if the unit has *failed*. It never starts a pipeline you stopped yourself, and it gives up after 3 restarts in 10 minutes rather than looping (state `down`, which the GCS shows as a CRITICAL alarm). A pipeline you start by hand with `camera.sh` still counts as alive if it serves video.
+
+**Log cleanup (dry run unless `--apply`; the daily timer applies).** Removes ROS logs older than 14 days — dated folders under `~/.ros/log` *and* the per-node files such as `stereo_odometry_<pid>_<time>.log`, which are most of the space — but always keeps the newest 20 folders / 50 files and anything touched in the last 24 h; stricter (3 days) when under 15 % disk is free. `mav.tlog` / `mav.tlog.raw` over 50 MB are compressed to a dated `.gz` and emptied in place; old `.gz` beyond the newest 10 and 30 days go. It touches nothing else.
+
+**Not yet done:** the services have been installed and the unit started/stopped on the real Radxa, but with **no RealSense attached** at the time — so a *full* start with live video, a real crash/restart and a reboot have not been seen.
+
+---
+
+## 12. Current Limitations
+
+- The **Parameters tab** cannot change a value (no write-then-verify, no guided-confirm gate for reboot-required parameters yet) and has only been tested against a synthetic parameter burst. **Save to flash** has been tested against a mocked link only — it has never been sent to the real flight controller, so check afterwards (power-cycle and Refresh) that the values stuck.
+- The **preflight checklist** and the ARM gate have only been exercised on the bench with synthetic state; the exact checks (for example the battery threshold) are defaults to be tuned with real flights.
 - The **motor scale** (`PWM_MAIN_*`) is read with single parameter reads that have not been tried against the real vehicle; if they never arrive the default 1000–2000 µs range is used and the footer says so. Only outputs 1–4 are covered (all `SERVO_OUTPUT_RAW` carries here).
-- The **alarm card** covers link, battery, vision, position and video. There are no map-stalled or UI-stall alarms yet.
+- The **alarm card** covers link, battery, vision, position, video, map, screen freezes and the Radxa watchdog's report. The map-stalled trigger is the existing *Map stalled after* setting; no other thresholds were guessed.
 - The **servo** talks plain HTTP to the ESP32 with no authentication, and nothing stops it being pressed while the vehicle is flying.
 - The **range test** has been verified on this laptop's Wi-Fi card, on loopback and in its window on a virtual display — not yet against the real Radxa or on a real walk.
 - The **low-latency streaming changes** (small send buffer, one write per frame, newest-frame-only GUI hand-off) are tested on loopback only; whether they reduce freezes on the real Wi-Fi link has not been measured — run the range test before and after.

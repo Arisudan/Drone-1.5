@@ -144,6 +144,8 @@ ros2 launch rtabmap_drone_pkg drone_rtabmap_all.launch.py \
   launch_rviz:=true
 ```
 
+**Start at boot instead (recommended):** install the Radxa services once — `sudo ~/Flop/scripts/radxa/install_radxa_services.sh` — and the pipeline then starts by itself at boot, a watchdog restarts it when it gets stuck, and a daily job trims the logs. See [`guide.md` §11](guide.md#11-radxa-services-boot-start-watchdog-log-cleanup). Check it with `systemctl status drone-pipeline drone-watchdog` and `journalctl -u drone-pipeline -f`; `sudo systemctl stop drone-pipeline` stops it on purpose (the watchdog will not restart it).
+
 **One-command headless launcher** — `./camera.sh` at the repo root wraps the sourcing + launch commands above with `launch_rviz:=false` baked in as the default (safe for a Radxa mounted on the drone with no display attached). Override with `./camera.sh launch_rviz:=true` for bench debugging with a monitor attached.
 
 Defaults: `pixhawk_device` is `tcp:127.0.0.1:5760` (routed via `mavlink-router`), `cell_size` is `0.025` (2.5 cm high-definition grid), `launch_rviz` is `true`. This starts: camera (RGB + stereo IR, depth off), stereo odometry, 2.5cm RTAB-Map SLAM, PX4 vision bridge, map thinning node, wall boundary extraction, the TCP map streamer, and the D435i JPEG video streamer on port `8080`.

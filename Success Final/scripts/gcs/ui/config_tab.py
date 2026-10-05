@@ -57,7 +57,8 @@ FIELD_INFO = {
     "connection": ("MAVLink connection", {
         "default_network": ("Default network", ""), "host": ("Companion IP", ""),
         "protocol": ("Protocol", ""), "udp_port": ("UDP port (flight)", ""),
-        "tcp_port": ("TCP port (bench)", ""), "source_system": ("GCS system ID", "")}),
+        "tcp_port": ("TCP port (bench)", ""), "source_system": ("GCS system ID", ""),
+        "watchdog_port": ("Radxa watchdog port", "")}),
     "video": ("Video & map bridge", {
         "stream_url": ("FPV stream URL", ""),
         "map_bridge_host": ("Map bridge host", ""),
@@ -70,7 +71,8 @@ FIELD_INFO = {
         "rviz_config": ("RViz config file (blank = bundled)", "")}),
     "limits": ("Command limits", {
         "takeoff_alt_min_m": ("Takeoff minimum", "m"), "takeoff_alt_max_m": ("Takeoff maximum", "m"),
-        "move_max_delta_m": ("Largest single move", "m")}),
+        "move_max_delta_m": ("Largest single move", "m"),
+        "require_preflight": ("Block ARM until the preflight checklist passes", "")}),
     "alerts": ("Alert thresholds", {
         "batt_warn_pct": ("Battery warning", "%"), "batt_crit_pct": ("Battery critical", "%"),
         "vision_stale_s": ("Vision stale after", "s"),

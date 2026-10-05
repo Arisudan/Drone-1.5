@@ -207,6 +207,25 @@ class MAVLinkWorker(QThread):
             ok = self.request_param_read(n) and ok
         return ok
 
+    def save_params_to_flash(self) -> bool:
+        """MAV_CMD_PREFLIGHT_STORAGE, param1 = 1: write the vehicle's current
+        parameters to its flash. No value is changed - it stores what is there.
+        The caller (main window) only sends this while disarmed, behind the
+        slide-to-confirm gate. Returns False if nothing could be sent."""
+        if not self._connected or not self.master:
+            return False
+        try:
+            self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_PREFLIGHT_STORAGE)
+            self.master.mav.command_long_send(
+                self.target_system, self.target_component,
+                mavutil.mavlink.MAV_CMD_PREFLIGHT_STORAGE, 0,
+                1,          # param1: 1 = write all parameters to persistent storage
+                0, 0, 0, 0, 0, 0)
+            self.tx_count += 1
+            return True
+        except Exception:
+            return False
+
     def request_param_list(self) -> bool:
         """Ask the vehicle to stream every parameter it holds.
 

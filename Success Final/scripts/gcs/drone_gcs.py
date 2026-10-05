@@ -121,6 +121,8 @@ from ui.shortcuts import install_shortcuts, ShortcutHelpOverlay
 from controllers.flight_commands import FlightCommandsMixin
 from controllers.mission_control import MissionControlMixin
 from controllers.alarm_control import AlarmControlMixin
+from controllers.preflight_control import PreflightControlMixin
+from protocol.radxa_status_worker import RadxaStatusWorker
 from core.alarms import AlarmManager
 from ui.alarm_banner import AlarmBanner
 from core.flight_log import FlightLogger
@@ -142,7 +144,8 @@ PX4_MODES_LIST = [
 ]
 
 
-class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlMixin, QMainWindow):
+class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlMixin,
+                         PreflightControlMixin, QMainWindow):
     """Main application window for industrial-grade Drone-GCS Pilot Station."""
 
     def __init__(self, settings=None):
@@ -169,6 +172,14 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.settings = settings if settings is not None else apply_overrides(load_settings())
         self.flight_logger = FlightLogger()
         self.alarms = AlarmManager()
+        # Preflight checklist / Radxa watchdog state (controllers/preflight_control.py)
+        self._video_state = "IDLE"
+        self._preflight_vision_was_ok = False
+        self._preflight_checks = []
+        self._preflight_at = 0.0
+        self._radxa_status = None
+        self._radxa_status_at = 0.0
+        self._radxa_host = self.settings.connection.host
         self._ever_connected = False
 
         # Audio alerts. Constructed before the UI so the header's mute control
@@ -313,6 +324,16 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_fpv.health_changed.connect(self.sidebar.mini_feed.set_health)
         self.sidebar.mini_feed.fullscreen_requested.connect(self.fpv_fullscreen.open)
         self.hud.fullscreen_requested.connect(self.fpv_fullscreen.open)
+
+        # Radxa watchdog poller. Off under tests (DRONE_GCS_NO_RADXA_POLL=1): a
+        # real socket attempt per window would only slow them down.
+        self.radxa_poller = None
+        if os.environ.get("DRONE_GCS_NO_RADXA_POLL") != "1":
+            self.radxa_poller = RadxaStatusWorker(
+                lambda: self._radxa_host, lambda: self.settings.connection.watchdog_port, parent=self)
+            self.radxa_poller.status_received.connect(self._on_radxa_status)
+            self.radxa_poller.start()
+        self.page_params.save_flash_requested.connect(self._request_save_params)
 
         # Auto-connect to default autopilot endpoint on launch (UDP 14550)
         conn = self.settings.connection
@@ -1007,6 +1028,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         Connect/Disconnect, so the map bridge and FPV stream re-target immediately rather
         than waiting for a MAVLink (re)connect. Port/protocol are untouched: they're a
         property of the link, not of which Wi-Fi network is active."""
+        self._radxa_host = ip
         if hasattr(self, 'map_listener') and self.map_listener:
             self.map_listener.set_tcp_host(ip)
         if hasattr(self, 'page_fpv') and self.page_fpv:
@@ -1299,6 +1321,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
     def _on_ui_tick(self):
         gap = self.ui_stall.tick()
         if gap is not None:
+            self._note_ui_stall(gap)
             self.console.log_warning(
                 f"UI thread stalled {gap * 1000:.0f} ms (worst "
                 f"{self.ui_stall.stats.worst_gap_s * 1000:.0f} ms) - "
@@ -1527,6 +1550,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # 8. Audio alerts for state transitions.
         self._update_audio_alerts(t)
         self._update_alarms(t)
+        self._refresh_preflight()
 
     # -------------------------------------------------------------------------
     # Command Dispatch Helpers
@@ -1875,6 +1899,9 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         listener = getattr(self, "map_listener", None)
         if listener is not None:
             listener.stop()
+        poller = getattr(self, "radxa_poller", None)
+        if poller is not None:
+            poller.stop()
         audio = getattr(self, "audio", None)
         if audio is not None:
             audio.shutdown()

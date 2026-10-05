@@ -1,7 +1,8 @@
 """
 ================================================================================
 MODULE: params_tab.py
-PURPOSE: Live PX4 Parameter Table (Phase 1: read-only list, search, refresh)
+PURPOSE: Live PX4 Parameter Table (read-only list, search, refresh, export, save-to-flash)
+         and the preflight checklist underneath it
 ================================================================================
 
 ARCHITECTURE & CONTEXT:
@@ -40,13 +41,16 @@ KEY LOGIC:
 
 from __future__ import annotations
 
+import time
 from typing import Dict, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QFileDialog,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
+
+from ui.preflight_panel import ChecklistPanel
 
 from ui.scaling import px
 from core.param_codec import format_param_value, param_type_name
@@ -54,11 +58,29 @@ from core.param_codec import format_param_value, param_type_name
 COLUMNS = ["NAME", "VALUE", "TYPE", "INDEX"]
 
 
+def params_file_text(params: Dict[str, tuple], stamp: Optional[str] = None) -> str:
+    """The parameters in the QGroundControl / Mission Planner .params layout
+    (tab-separated: vehicle id, component id, name, value, MAV_PARAM_TYPE), sorted
+    by name, so the file can be diffed against Drone_1.5.params or loaded elsewhere."""
+    stamp = stamp or time.strftime("%Y-%m-%dT%H:%M:%S")
+    lines = ["# Onboard parameters for Vehicle 1", "#", "# Stack: PX4 Pro",
+             f"# Exported from the Drone-GCS Parameters tab {stamp}",
+             "#", "# Vehicle-Id Component-Id Name Value Type"]
+    for name in sorted(params):
+        value, ptype, _ = params[name]
+        lines.append(f"1\t1\t{name}\t{format_param_value(value, ptype)}\t{ptype}")
+    return "\n".join(lines) + "\n"
+
+
 class ParamsTabWidget(QWidget):
-    """Read-only live parameter list: connect, fetch, search. Nothing writes
-    to the vehicle from this widget."""
+    """Live parameter list: connect, fetch, search, export - and, under it, the
+    preflight checklist. The only thing that can reach the vehicle from here is
+    the guarded 'Save to flash' request; no parameter is ever written."""
 
     refresh_requested = pyqtSignal()
+    # The operator asked to store the vehicle's current parameters in its flash.
+    # The main window puts it behind the slide-to-confirm gate.
+    save_flash_requested = pyqtSignal()
 
     FLUSH_INTERVAL_MS = 200
 
@@ -98,6 +120,19 @@ class ParamsTabWidget(QWidget):
             "(PARAM_REQUEST_LIST - read-only)")
         self.btn_refresh.clicked.connect(self.refresh_requested)
         head.addWidget(self.btn_refresh)
+
+        self.btn_export = QPushButton("Export…", self)
+        self.btn_export.setToolTip("Save the parameters shown here to a .params file "
+                                   "(same layout as Drone_1.5.params).")
+        self.btn_export.clicked.connect(self._on_export)
+        head.addWidget(self.btn_export)
+
+        self.btn_save_flash = QPushButton("Save to flash", self)
+        self.btn_save_flash.setToolTip(
+            "Tell the flight controller to write its CURRENT parameters to flash so they "
+            "survive a power cycle. Needs a link and a disarmed vehicle; asks you to confirm.")
+        self.btn_save_flash.clicked.connect(self.save_flash_requested)
+        head.addWidget(self.btn_save_flash)
         root.addLayout(head)
 
         self.lbl_status = QLabel("Not connected", self)
@@ -118,11 +153,44 @@ class ParamsTabWidget(QWidget):
             header.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         root.addWidget(self.table, 1)
 
+        # Preflight checklist, under a horizontal rule (see ui/preflight_panel.py).
+        self.checklist = ChecklistPanel(self)
+        root.addWidget(self.checklist)
+
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(self.FLUSH_INTERVAL_MS)
         self._flush_timer.timeout.connect(self._flush)
 
     # ── public API (driven by drone_gcs.py) ──────────────────────────
+
+    def export_params(self, path: str) -> int:
+        """Write the table to `path`. Returns the number of parameters written."""
+        snapshot = dict(self._params)
+        snapshot.update(self._pending)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(params_file_text(snapshot))
+        return len(snapshot)
+
+    def _on_export(self) -> None:
+        if not (self._params or self._pending):
+            self.lbl_status.setText("Nothing to export yet - connect and refresh first.")
+            return
+        default = time.strftime("params_%Y%m%d_%H%M%S.params")
+        path, _ = QFileDialog.getSaveFileName(self, "Export parameters", default,
+                                              "Parameter files (*.params);;All files (*)")
+        if not path:
+            return
+        try:
+            n = self.export_params(path)
+        except OSError as exc:
+            self.lbl_status.setText(f"Could not export: {exc}")
+            return
+        self.lbl_status.setText(f"Exported {n} parameters to {path}")
+
+    def set_save_flash_enabled(self, enabled: bool, why: str = "") -> None:
+        self.btn_save_flash.setEnabled(enabled)
+        if why:
+            self.btn_save_flash.setToolTip(why)
 
     def has_data(self) -> bool:
         return bool(self._params) or bool(self._pending)

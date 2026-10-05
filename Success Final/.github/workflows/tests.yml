@@ -53,6 +53,10 @@ jobs:
         working-directory: tests
         run: python -m unittest test_link_range test_link_range_walk -v
 
+      - name: Radxa services (watchdog logic, status endpoint, log janitor)
+        working-directory: tests
+        run: python -m unittest test_radxa_services -v
+
 
   gui:
     # PyQt5 is installable on the runner, so the import-level smoke tests run
@@ -162,4 +166,5 @@ jobs:
             scripts/diagnostics/link_range_gui.py \
             scripts/diagnostics/link_range_walk.py \
             scripts/diagnostics/link_probe_server.py \
+            scripts/radxa \
             tests
