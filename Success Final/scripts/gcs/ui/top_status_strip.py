@@ -49,6 +49,7 @@ from ui.battery_badge import BatteryBadge
 # The networks this rig is actually deployed on. Picking one here just fills in the
 # IP - port and protocol are independent axes (same MAVLink/map/video ports apply on
 # any of these networks) and are left for the operator to choose separately.
+WFB_NETWORK = "wfb-ng"   # short: the header has no spare width (tests/test_gui_layout.py)
 KNOWN_NETWORKS = [
     ("HTIC_RND", "172.16.101.89"),
     ("DroneBridge5", "192.168.1.2"),
@@ -56,6 +57,11 @@ KNOWN_NETWORKS = [
     # shared-connection gateway at 10.42.0.1 (the laptop gets a lease like 10.42.0.200,
     # but that's not needed here since the GCS only ever connects out to the Radxa).
     ("DroneNet", "10.42.0.1"),
+    # wfb-ng radio: the ground side of the radio runs on this laptop and hands the air
+    # unit's MAVLink to 127.0.0.1:14550 and its video to udp 5600, so the GCS listens
+    # locally (protocol udpin) instead of connecting out. Picking it also selects the
+    # matching protocol and the wfb-ng video source - see _on_network_selected.
+    (WFB_NETWORK, "127.0.0.1"),
 ]
 
 
@@ -169,7 +175,10 @@ class TopStatusStrip(QFrame):
         self.proto_combo = QComboBox(self)
         self.proto_combo.addItem("UDP", "udp")
         self.proto_combo.addItem("TCP", "tcp")
-        self.proto_combo.setToolTip("Protocol: UDP for real-time flight (port 14550); TCP for bench fallback (port 5760)")
+        self.proto_combo.addItem("WFB", "udpin")
+        self.proto_combo.setToolTip(
+            "Protocol: UDP for real-time flight over Wi-Fi (port 14550); TCP for bench fallback (port 5760);\n"
+            "WFB for the wfb-ng radio link - the GCS listens on 14550 where wfb-ng delivers MAVLink")
         self.proto_combo.currentIndexChanged.connect(self._on_protocol_changed)
         conn_box.addWidget(self.proto_combo)
 
@@ -561,7 +570,23 @@ class TopStatusStrip(QFrame):
         if ip is None:  # "Custom..." - leave whatever is already typed in ip_input alone
             return
         self.ip_input.setText(ip)
+        # wfb-ng is the one preset that also fixes the protocol: the radio's ground side
+        # delivers MAVLink to this machine, so the GCS must listen rather than connect out.
+        # Leaving it puts plain UDP back, since udpin means nothing on a Wi-Fi network.
+        proto = self.proto_combo.currentData()
+        if self.is_wfb_selected():
+            self._set_protocol("udpin")
+        elif proto == "udpin":
+            self._set_protocol("udp")
         self.network_changed.emit(ip)
+
+    def is_wfb_selected(self) -> bool:
+        return self.network_combo.currentText() == WFB_NETWORK
+
+    def _set_protocol(self, proto: str) -> None:
+        idx = self.proto_combo.findData(proto)
+        if idx >= 0:
+            self.proto_combo.setCurrentIndex(idx)   # _on_protocol_changed fixes the port
 
     def _on_ip_hand_edited(self, _text: str):
         """Typing directly into the IP field means the active preset no longer matches -
@@ -574,7 +599,7 @@ class TopStatusStrip(QFrame):
     def _on_protocol_changed(self, idx: int):
         proto = self.proto_combo.currentData()
         current_port = self.port_input.text().strip()
-        if proto == "udp" and current_port in ("5760", ""):
+        if proto in ("udp", "udpin") and current_port in ("5760", ""):
             self.port_input.setText("14550")
         elif proto == "tcp" and current_port in ("14550", ""):
             self.port_input.setText("5760")

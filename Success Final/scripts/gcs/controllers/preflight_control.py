@@ -4,12 +4,12 @@ MODULE: controllers/preflight_control.py
 PURPOSE: Feeds the preflight checklist, gates ARM on it, and saves parameters
 ================================================================================
 
-Mixed into DroneGCSMainWindow. Three jobs:
+Mixed into DroneGCSMainWindow. Jobs:
   * once a second, gather the facts the station already holds and show the
-    checklist under the Parameters tab (core/preflight.py decides what passes);
-  * the ARM button asks _preflight_allows_arm() first - unless the operator has
-    turned the gate off in Configuration, or uses `arm force` in the terminal,
-    which has always been the explicit bench override;
+    checklist in the left rail under "Parameters" (core/preflight.py decides what
+    each line's colour is). THE CHECKLIST ONLY INFORMS: it never blocks, delays or
+    questions ARM, takeoff, or any other command. The flight controller's own
+    arming checks are the real safety; this is a status display;
   * 'Save to flash' on the Parameters tab: a guarded, disarmed-only request that
     tells the flight controller to store its current parameters.
 Radxa watchdog reports arrive here too and feed the alarm list and the checklist.
@@ -22,7 +22,7 @@ import time
 from typing import Optional
 
 from core.alarms import AlarmLevel
-from core.preflight import PreflightInputs, blockers, evaluate, summary
+from core.preflight import PreflightInputs, evaluate, summary
 from core.radxa_status import RadxaStatus
 
 PREFLIGHT_REFRESH_S = 1.0
@@ -47,7 +47,7 @@ class PreflightControlMixin:
             params_loaded=self.page_params.has_data(),
             radxa_state=None if radxa is None else radxa.state,
             radxa_detail="" if radxa is None else radxa.detail(),
-            heading_confirmed=self.page_params.checklist.heading_confirmed())
+            heading_confirmed=self.sidebar.checklist.heading_confirmed())
 
     def _refresh_preflight(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -57,31 +57,13 @@ class PreflightControlMixin:
         inp = self._preflight_inputs()
         # The heading has to be fixed again after every tracking reset.
         if self._preflight_vision_was_ok and not inp.vision_ok:
-            self.page_params.checklist.clear_heading()
+            self.sidebar.checklist.clear_heading()
             inp.heading_confirmed = False
         self._preflight_vision_was_ok = inp.vision_ok
         checks = evaluate(inp)
         ready, text = summary(checks, armed=inp.armed)
         self._preflight_checks = checks
-        self.page_params.checklist.update_checks(checks, ready, text)
-
-    def _preflight_allows_arm(self) -> bool:
-        """True if ARM may proceed. Logs and toasts the reasons when it may not."""
-        if not self.settings.limits.require_preflight:
-            return True
-        self._refresh_preflight(force=True)
-        bad = blockers(self._preflight_checks)
-        if not bad:
-            return True
-        names = ", ".join(c.label for c in bad)
-        self.console.log_error(f"ARM blocked by the preflight checklist: {names}")
-        for c in bad:
-            if c.detail:
-                self.console.log_warning(f"  {c.label}: {c.detail}")
-        self.console.log_info("Details are under the Parameters tab. Bench override: type `arm force` in "
-                              "the flight terminal, or switch the gate off in Configuration > Command limits.")
-        self.toast.show_message(f"ARM blocked - fix: {names}", "#da3633", 6000)
-        return False
+        self.sidebar.checklist.update_checks(checks, ready, text)
 
     # ── save parameters to flash ────────────────────────────────────
 

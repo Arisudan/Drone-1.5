@@ -31,11 +31,12 @@ USAGE:
 from __future__ import annotations
 from typing import Optional
 
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QButtonGroup
 )
 from ui.mini_feed import MiniFeed
+from ui.preflight_panel import ChecklistPanel
 from ui.scaling import px, scale_qss
 
 
@@ -138,6 +139,37 @@ class SidebarNav(QFrame):
                 letter-spacing: 0.6px;
                 padding: 4px 6px;
             }
+            QLabel#railCheckTitle {
+                color: #6e7681;
+                font-size: 9px;
+                font-weight: 800;
+                letter-spacing: 1px;
+            }
+            QLabel#railCheck {
+                font-size: 10px;
+            }
+            QLabel#railCheckValue {
+                font-size: 9px;
+                font-weight: 700;
+                letter-spacing: 0.4px;
+            }
+            QLabel#railCheckDetail {
+                color: #8b949e;
+                font-size: 9px;
+            }
+            QCheckBox#cfgToggle {
+                font-size: 10px;
+                spacing: 6px;
+            }
+            QCheckBox#cfgToggle::indicator {
+                width: 9px;
+                height: 9px;
+                border-radius: 5px;
+            }
+            QCheckBox#cfgToggle::indicator:unchecked {
+                border: 1px solid #d29922;
+                background-color: transparent;
+            }
             QLabel#navFooterDisarmed {
                 color: #f85149;
                 background-color: rgba(218, 54, 51, 0.13);
@@ -179,6 +211,16 @@ class SidebarNav(QFrame):
 
         self.btn_group.buttonClicked[int].connect(self._on_button_clicked)
 
+        # Preflight checklist: directly under the last workspace entry, behind a
+        # horizontal rule. Whether its lines fit is decided in _apply_checklist_level.
+        self.checklist = ChecklistPanel(self)
+        layout.addWidget(self.checklist)
+        # The lines do not exist until the first update; once they do, re-check
+        # what fits (a resize event alone would not come).
+        self.checklist.lines_built.connect(self._refit_after_checklist)
+        # Collapsed by default (heading + pill only); a click re-decides what fits.
+        self.checklist.expanded_changed.connect(lambda _e: self._apply_checklist_level())
+
         layout.addStretch()
 
         # Camera thumbnail in the rail's empty space (see ui/mini_feed.py). Shown
@@ -189,6 +231,8 @@ class SidebarNav(QFrame):
         self.mini_feed.setVisible(False)
         layout.addWidget(self.mini_feed)
         self._mini_wanted = False
+        self._fit_recheck_pending = False
+        self._fit_rechecks = 0
         self._compact = False
         self._need_normal = 0
 
@@ -285,18 +329,67 @@ class SidebarNav(QFrame):
 
     def set_mini_feed_wanted(self, wanted: bool) -> None:
         self._mini_wanted = wanted
-        self._apply_mini_feed()
+        self._apply_checklist_level()
+
+    def _apply_checklist_level(self) -> None:
+        """Decide, in this order, what the rail's spare height is used for:
+
+          1. the camera thumbnail - exactly as before the checklist existed;
+          2. the checklist card: the heading line, or - when the operator has opened
+             it - as much of the list as fits in what is left.
+
+        Both are measured against the rail's own minimum (buttons + footer) with
+        the checklist gone, so neither can push the window taller than its
+        supported minimum: at the smallest sizes the checklist is simply not shown."""
+        panel = self.checklist
+        self.mini_feed.setVisible(False)
+        panel.set_level(0)
+        base = self.layout().sizeHint().height()
+        feed_h = self.mini_feed.wanted_height() if getattr(self, "_mini_wanted", False) else 0
+        feed_fits = feed_h > 0 and self.height() >= base + feed_h
+        self.mini_feed.setVisible(feed_fits)
+        # Largest card whose real minimum height still fits. Checked against the
+        # layout's own minimum (not an estimate): a wrapped label's minimum can be a
+        # line taller than its size hint, which cost one pixel at 1280x760.
+        level = 0
+        # Collapsed: the heading line only, so the camera thumbnail keeps the height.
+        for lv in ((4, 3, 2, 1) if panel.is_expanded() else (1,)):
+            panel.set_level(lv)
+            # Qt recomputes a layout lazily (on a posted event). Force the card's own
+            # layout, then the rail's, to refresh now - otherwise the minimum measured
+            # here is still the previous level's and nothing ever seems to fit.
+            panel.layout().invalidate()
+            panel.layout().activate()
+            self.layout().invalidate()
+            if self.layout().minimumSize().height() <= self.height():
+                level = lv
+                break
+        panel.set_level(level)
+        self.layout().invalidate()
+        # The rail's real minimum can still grow a few pixels once Qt has finished
+        # laying out (density change, wrapped text). Re-check once it has settled and
+        # step the card down if it no longer fits - the rail must never be shorter
+        # than it needs.
+        if level > 0 and not self._fit_recheck_pending and self._fit_rechecks < 3:
+            self._fit_recheck_pending = True
+            QTimer.singleShot(0, self._recheck_checklist_fit)
+
+    def _recheck_checklist_fit(self) -> None:
+        self._fit_recheck_pending = False
+        if self.checklist.level() > 0 and self.layout().minimumSize().height() > self.height():
+            self._fit_rechecks += 1
+            self._apply_checklist_level()
+        else:
+            self._fit_rechecks = 0
+
+    def _refit_after_checklist(self) -> None:
+        self._apply_density()
+        self._apply_checklist_level()
 
     def _apply_mini_feed(self) -> None:
-        """Show the thumbnail only if wanted AND it fits. The fit test uses the
-        layout's size with the thumbnail hidden, which does not change when it
-        toggles - so there is no show/hide feedback loop."""
-        if not self._mini_wanted:
-            self.mini_feed.setVisible(False)
-            return
-        self.mini_feed.setVisible(False)
-        needed = self.layout().sizeHint().height() + self.mini_feed.wanted_height()
-        self.mini_feed.setVisible(self.height() >= needed)
+        """Kept for callers: the thumbnail and the checklist share the rail's spare
+        height, so they are decided together (see _apply_checklist_level)."""
+        self._apply_checklist_level()
 
     def _set_compact(self, compact: bool) -> None:
         if compact == self._compact:
@@ -318,15 +411,19 @@ class SidebarNav(QFrame):
         remembered, so the decision does not depend on the (smaller) compact
         measurement - that is what keeps it from flapping between the two.
         """
+        # Measured without the checklist (it is optional height, see
+        # _apply_checklist_level), so it can never decide the rail's density.
+        keep = self.checklist.level()
+        self.checklist.set_level(0)
         if not self._compact:
             self._need_normal = self.layout().minimumSize().height()
         self._set_compact(self.height() < self._need_normal)
+        self.checklist.set_level(keep)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._apply_density()
-        if getattr(self, "_mini_wanted", False):
-            self._apply_mini_feed()
+        self._apply_checklist_level()
 
     def _on_button_clicked(self, idx: int):
         self.view_changed.emit(idx)

@@ -16,6 +16,7 @@ from __future__ import annotations
 from PyQt5.QtCore import QTimer
 
 from core.audio import Severity
+from core.takeoff import takeoff_altitude_param
 
 
 
@@ -29,8 +30,6 @@ class FlightCommandsMixin:
         goes through the same slide-to-confirm gesture as every other guarded
         action. Bench force-arm remains terminal-only (`arm force`)."""
         if not self._require_link("arm"):
-            return
-        if not self._preflight_allows_arm():
             return
         self.confirm_bar.request(
             "arm", "ARM MOTORS", danger=True,
@@ -355,9 +354,15 @@ class FlightCommandsMixin:
             self.worker.move_to_waypoint(t.x, t.y, z=-abs(altitude))
             self.toast.show_message(f"Altitude hold: {altitude:.1f}m", "#1f6feb")
         else:
-            self.console.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
-            self.page_terminal.log_cmd(f"Initiating takeoff to {altitude:.1f}m...")
-            self.worker.takeoff(altitude)
+            amsl, age = t.amsl_reading()
+            param7, how = takeoff_altitude_param(altitude, amsl, age)
+            if how == "amsl":
+                detail = (f"target {param7:.1f} m above sea level = vehicle's {amsl:.1f} m + {altitude:.1f} m")
+            else:
+                detail = "vehicle reports no altitude above sea level; sending the height as it is"
+            self.console.log_cmd(f"Initiating takeoff to {altitude:.1f}m ({detail})...")
+            self.page_terminal.log_cmd(f"Initiating takeoff to {altitude:.1f}m ({detail})...")
+            self.worker.takeoff(altitude, target_amsl=param7 if how == "amsl" else None)
             self.toast.show_message(f"Takeoff Initiated ({altitude:.1f}m)", "#1f6feb")
 
         self.exec_tracker.start_tracking(

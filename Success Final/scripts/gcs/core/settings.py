@@ -106,7 +106,11 @@ class ProfileConfig:
 class ConnectionConfig:
     default_network: str = "HTIC_RND"
     host: str = "172.16.101.89"
-    protocol: str = "udp"           # udp | tcp
+    # udp   = send to host:udp_port (companion's mavlink-router listens)
+    # tcp   = connect to host:tcp_port (bench)
+    # udpin = listen on 0.0.0.0:udp_port - the wfb-ng radio link, whose ground
+    #         side delivers the air unit's MAVLink to 127.0.0.1:14550
+    protocol: str = "udp"
     udp_port: int = 14550
     tcp_port: int = 5760
     source_system: int = 255
@@ -114,8 +118,8 @@ class ConnectionConfig:
     watchdog_port: int = 8081
 
     def validate(self) -> None:
-        if self.protocol not in ("udp", "tcp"):
-            raise ValueError(f"connection.protocol={self.protocol!r} must be udp or tcp")
+        if self.protocol not in ("udp", "tcp", "udpin"):
+            raise ValueError(f"connection.protocol={self.protocol!r} must be udp, tcp or udpin")
         for name in ("udp_port", "tcp_port", "watchdog_port"):
             port = getattr(self, name)
             if not 1 <= port <= 65535:
@@ -130,10 +134,19 @@ class VideoConfig:
     map_bridge_host: str = "172.16.101.89"
     map_bridge_port: int = 5765
     jpeg_port: int = 8080
+    # wfb-ng radio video: RTP H.264 arrives on wfb_rtp_port (wfb-ng [gs_video]),
+    # core/wfb_video.py re-wraps it as MPEG-TS on wfb_ts_port for OpenCV.
+    wfb_rtp_port: int = 5600
+    wfb_ts_port: int = 5610
 
     def validate(self) -> None:
         if not self.stream_url:
             raise ValueError("video.stream_url must not be empty")
+        for name in ("wfb_rtp_port", "wfb_ts_port"):
+            if not 1 <= getattr(self, name) <= 65535:
+                raise ValueError(f"video.{name}={getattr(self, name)} outside 1..65535")
+        if self.wfb_rtp_port == self.wfb_ts_port:
+            raise ValueError("video.wfb_rtp_port and video.wfb_ts_port must differ")
 
 
 @dataclass
@@ -162,9 +175,6 @@ class LimitsConfig:
     takeoff_alt_min_m: float = 0.2
     takeoff_alt_max_m: float = 3.0
     move_max_delta_m: float = 3.0
-    # The ARM button refuses while a required preflight check fails. `arm force`
-    # in the flight terminal is the explicit bench override and skips this too.
-    require_preflight: bool = True
 
     def validate(self) -> None:
         if self.takeoff_alt_min_m <= 0:

@@ -180,6 +180,10 @@ class TelemetrySnapshot:
 
     # GPS / Global (if available)
     latitude: float = 0.0
+    # Altitude above mean sea level from GLOBAL_POSITION_INT (the EKF's global position),
+    # for the takeoff target - see core/takeoff.py. 0 / 0.0 until one arrives.
+    alt_amsl_m: float = 0.0
+    last_global_time: float = 0.0
     longitude: float = 0.0
     satellites: int = 0
     hdop: float = 1.0
@@ -396,6 +400,22 @@ class TelemetrySnapshot:
         fix = getattr(msg, "fix_type", 0)
         fix_map = {0: "NO_GPS", 1: "NO_FIX", 2: "2D_FIX", 3: "3D_FIX", 4: "DGPS", 5: "RTK_FLOAT", 6: "RTK_FIXED"}
         self.fix_type = fix_map.get(fix, f"FIX_{fix}")
+
+    def update_global_position(self, msg) -> None:
+        """GLOBAL_POSITION_INT: altitude above sea level in mm."""
+        self.alt_amsl_m = msg.alt / 1000.0
+        self.last_global_time = time.time()
+
+    def amsl_reading(self):
+        """(altitude above sea level in m, age in s) - (None, None) if never received.
+
+        Accuracy limit, measured in PX4 SITL: the vehicle's reported altitude above sea
+        level can sit ~0.5 m away from its local altitude origin, so a 1.5 m takeoff
+        request climbs to roughly 1.5-2.0 m there. Both the home-relative base and the
+        current altitude were tried and behave the same."""
+        if self.last_global_time <= 0.0:
+            return None, None
+        return self.alt_amsl_m, max(0.0, time.time() - self.last_global_time)
 
     def update_servo_output(self, msg) -> None:
         """Update live motor PWMs (Motors 1 to 4) from SERVO_OUTPUT_RAW."""

@@ -585,6 +585,8 @@ class MAVLinkWorker(QThread):
         elif msg_type in ("GPS_RAW_INT", "GLOBAL_POSITION_INT"):
             with self.telemetry_lock:
                 self.telemetry.update_gps(msg)
+                if msg_type == "GLOBAL_POSITION_INT":
+                    self.telemetry.update_global_position(msg)
             self._emit_telemetry()
 
         elif msg_type in ("ODOMETRY", "VISION_POSITION_ESTIMATE"):
@@ -891,20 +893,32 @@ class MAVLinkWorker(QThread):
             except Exception as e:
                 self.connection_changed.emit(False, f"Set mode transmit error: {e}")
 
-    def takeoff(self, altitude: float = 1.0):
-        """Initiate robust takeoff sequence using MAV_CMD_NAV_TAKEOFF."""
+    def takeoff(self, altitude: float = 1.0, target_amsl: Optional[float] = None):
+        """Initiate robust takeoff sequence using MAV_CMD_NAV_TAKEOFF.
+
+        `altitude` is the height the operator asked for (m above where the vehicle
+        is). NAV_TAKEOFF's param7 is ABSOLUTE (above sea level), so the caller passes
+        the absolute `target_amsl` (core/takeoff.py) when the vehicle reports an
+        altitude reference; None sends `altitude` unchanged, the old behaviour."""
         if not self._connected or not self.master:
             return
         try:
             # 1. Send PX4 standard takeoff command
             self._begin_command_dispatch(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF)
+            nan = float("nan")
+            # Yaw / latitude / longitude: NaN means "where the vehicle is now". Sending 0
+            # means yaw north and the point (0 deg N, 0 deg E) - which a vehicle with a
+            # global reference (PX4 SITL, any GPS vehicle) takes literally: it accepts
+            # the command and then never takes off. Found in SITL. The no-reference path
+            # keeps the zeros it was bench-verified with on the real vehicle.
+            yaw, lat, lon = (nan, nan, nan) if target_amsl is not None else (0, 0, 0)
             self.master.mav.command_long_send(
                 self.target_system,
                 self.target_component,
                 mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                 0,
-                0, 0, 0, 0, 0, 0,
-                altitude
+                0, 0, 0, yaw, lat, lon,
+                altitude if target_amsl is None else target_amsl
             )
             self.tx_count += 1
 

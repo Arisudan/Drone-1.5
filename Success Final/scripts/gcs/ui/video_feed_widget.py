@@ -86,6 +86,7 @@ NETWORK_CAPTURE_OPTIONS = (
 )
 from ui.scaling import px, fit_min_width
 from core.video_recorder import VideoRecorder, save_snapshot
+from core.wfb_video import WfbVideoBridge
 from core.video_health import VideoHealthMonitor, IDLE, CONNECTING, DEGRADED, FROZEN, NO_SIGNAL
 
 #: URL schemes that go through FFmpeg and therefore want the options above.
@@ -535,7 +536,9 @@ class VideoFeedWidget(QWidget):
     # bench aid, not a source anyone selects in flight. VideoCaptureThread
     # still understands the "TEST_PATTERN" source string, so it remains
     # available to tests and offline development.
-    SRC_DRONE_FPV, SRC_CAM0, SRC_CAM1, SRC_CUSTOM = range(4)
+    # SRC_WFB is appended last so the existing indices (and anything persisted
+    # against them) keep their meaning.
+    SRC_DRONE_FPV, SRC_CAM0, SRC_CAM1, SRC_CUSTOM, SRC_WFB = range(5)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -562,6 +565,7 @@ class VideoFeedWidget(QWidget):
         _source_items = [
             "Drone FPV (Wi-Fi MJPEG)",
             "Camera 0 (/dev/video0)", "Camera 1 (/dev/video1)", "Custom RTSP/HTTP URL",
+            "Drone FPV (wfb-ng radio)",
         ]
         self.combo_source.addItems(_source_items)
         fit_min_width(self.combo_source, _source_items, h_pad_px=46)
@@ -573,6 +577,9 @@ class VideoFeedWidget(QWidget):
         # survive a preset change.
         self._drone_url = DEFAULT_STREAM_URL
         self._custom_url = "rtsp://192.168.1.10:554/stream"
+        # wfb-ng radio feed: RTP H.264 from the radio's ground side, re-wrapped for
+        # OpenCV by a helper process that only runs while this source is selected.
+        self.wfb = WfbVideoBridge()
 
         self.txt_url = QLineEdit(self._drone_url, self)
         self.txt_url.setMinimumWidth(px(180))
@@ -716,7 +723,26 @@ class VideoFeedWidget(QWidget):
             return 0
         if idx == self.SRC_CAM1:
             return 1
+        if idx == self.SRC_WFB:
+            try:
+                return self.wfb.start()
+            except RuntimeError as e:
+                # Shown in the feed as "CAMERA NOT DETECTED (...)" - better than a silent black box.
+                return f"wfb-ng unavailable: {e}"
         return self.txt_url.text().strip() or self._custom_url
+
+    def select_source(self, idx: int) -> None:
+        """Switch the feed source programmatically (e.g. the wfb-ng network preset)."""
+        if self.combo_source.currentIndex() != idx:
+            self.combo_source.setCurrentIndex(idx)
+
+    def set_wfb_ports(self, rtp_port: int, ts_port: int) -> None:
+        """Apply video.wfb_rtp_port / wfb_ts_port; takes effect on the next start."""
+        if (rtp_port, ts_port) != (self.wfb.rtp_port, self.wfb.ts_port):
+            self.wfb.stop()
+            self.wfb.rtp_port, self.wfb.ts_port = rtp_port, ts_port
+            if self.combo_source.currentIndex() == self.SRC_WFB:
+                self.txt_url.setText(self.wfb.url)
 
     def _start_capture(self):
         src = self._resolve_source(self.combo_source.currentIndex())
@@ -731,6 +757,7 @@ class VideoFeedWidget(QWidget):
         if self.cap_thread and self.cap_thread.isRunning():
             self.cap_thread.stop()
             self.cap_thread = None
+            self.wfb.stop()
             self.health.stop()
             self._refresh_health()
             self.btn_capture.setText("Start Video")
@@ -744,12 +771,18 @@ class VideoFeedWidget(QWidget):
             self.txt_url.setText(self._drone_url)
         elif idx == self.SRC_CUSTOM:
             self.txt_url.setText(self._custom_url)
+        elif idx == self.SRC_WFB:
+            self.txt_url.setText(self.wfb.url)   # informational: the local re-wrapped stream
         self.txt_url.setEnabled(idx in (self.SRC_DRONE_FPV, self.SRC_CUSTOM))
 
         if self.cap_thread and self.cap_thread.isRunning():
             self.cap_thread.stop()
+            if idx != self.SRC_WFB:
+                self.wfb.stop()
             self.cap_thread.set_source(self._resolve_source(idx))
             self.cap_thread.start()
+        elif idx != self.SRC_WFB:
+            self.wfb.stop()
 
     def _on_url_edited(self):
         idx = self.combo_source.currentIndex()
@@ -903,4 +936,5 @@ class VideoFeedWidget(QWidget):
             self.recorder.stop()
         if self.cap_thread:
             self.cap_thread.stop()
+        self.wfb.stop()
         super().closeEvent(event)

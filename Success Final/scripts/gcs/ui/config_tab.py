@@ -63,7 +63,9 @@ FIELD_INFO = {
         "stream_url": ("FPV stream URL", ""),
         "map_bridge_host": ("Map bridge host", ""),
         "map_bridge_port": ("Map bridge port (TCP)", ""),
-        "jpeg_port": ("MJPEG port", "")}),
+        "jpeg_port": ("MJPEG port", ""),
+        "wfb_rtp_port": ("wfb-ng video RTP port", ""),
+        "wfb_ts_port": ("wfb-ng video local TS port", "")}),
     "slam": ("SLAM & navigation", {
         "cruise_altitude_m": ("Cruise altitude", "m"),
         "robot_radius_m": ("Robot radius", "m"), "cell_size_m": ("Grid cell size", "m"),
@@ -71,8 +73,7 @@ FIELD_INFO = {
         "rviz_config": ("RViz config file (blank = bundled)", "")}),
     "limits": ("Command limits", {
         "takeoff_alt_min_m": ("Takeoff minimum", "m"), "takeoff_alt_max_m": ("Takeoff maximum", "m"),
-        "move_max_delta_m": ("Largest single move", "m"),
-        "require_preflight": ("Block ARM until the preflight checklist passes", "")}),
+        "move_max_delta_m": ("Largest single move", "m")}),
     "alerts": ("Alert thresholds", {
         "batt_warn_pct": ("Battery warning", "%"), "batt_crit_pct": ("Battery critical", "%"),
         "vision_stale_s": ("Vision stale after", "s"),
@@ -105,8 +106,8 @@ HIDDEN_FIELDS = {
 }
 
 CHOICES = {
-    ("connection", "protocol"): ["udp", "tcp"],
-    ("connection", "default_network"): ["HTIC_RND", "DroneBridge5", "DroneNet"],
+    ("connection", "protocol"): ["udp", "tcp", "udpin"],
+    ("connection", "default_network"): ["HTIC_RND", "DroneBridge5", "DroneNet", "wfb-ng"],
     ("profile", "frame"): ["Quad X", "Quad +", "Hex X", "Hex +", "Y6", "Octo X"],
 }
 

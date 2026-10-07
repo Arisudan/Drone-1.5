@@ -13,15 +13,15 @@ WHY THIS EXISTS:
 
 HOW IT WORKS:
   evaluate() turns the facts the station already holds into a list of Check rows.
-  A row is PASS, FAIL, or UNKNOWN ("we cannot tell" is never reported as PASS).
-  Rows marked required must PASS before the ARM button is allowed; the others
-  are shown for information. One row is MANUAL: the operator ticks it. It is
-  cleared automatically when vision tracking is lost, because the heading has to
-  be fixed again after every tracking reset.
+  A row is PASS, FAIL, or UNKNOWN ("we cannot tell" is never reported as PASS),
+  and the card shows it as a colour. One row is MANUAL: the operator ticks it. It
+  is cleared automatically when vision tracking is lost, because the heading has
+  to be fixed again after every tracking reset.
 
-  This module decides nothing about flight - the ARM button asks it, and the
-  bench override (typing `arm force` in the flight terminal) deliberately skips
-  it, exactly as it already skips PX4's own pre-arm checks.
+  THIS IS A DISPLAY ONLY. Nothing in the station asks it for permission: ARM,
+  takeoff, path execution and every other command ignore it completely. The
+  flight controller's own arming checks are the safety; a second gate in the
+  ground station could only add a way to be stopped when the vehicle is fine.
 ================================================================================
 """
 
@@ -46,6 +46,7 @@ class Check:
     detail: str = ""
     required: bool = True
     manual: bool = False
+    value: str = ""          # a few characters for the right-hand side of the row ("88%", "LIVE")
 
     @property
     def ok(self) -> bool:
@@ -78,39 +79,44 @@ def evaluate(i: PreflightInputs) -> List[Check]:
 
     link_ok = i.connected and i.heartbeat_age_s < HEARTBEAT_MAX_AGE_S
     out.append(Check("link", "Link to the vehicle", PASS if link_ok else FAIL,
-                     "" if link_ok else "No recent telemetry from the vehicle."))
+                     "" if link_ok else "No recent telemetry from the vehicle.",
+                     value="OK" if link_ok else "LOST"))
 
     if not link_ok:
         # Everything below describes a vehicle we cannot hear.
-        batt = Check("battery", "Battery", UNKNOWN, "No link.")
+        batt = Check("battery", "Battery", UNKNOWN, "No link.", value="--")
     elif i.battery_pct <= 0:
-        batt = Check("battery", "Battery", UNKNOWN, "The vehicle is not reporting a battery level.")
+        batt = Check("battery", "Battery", UNKNOWN, "The vehicle is not reporting a battery level.", value="--")
     elif i.battery_pct <= i.batt_crit_pct:
-        batt = Check("battery", "Battery", FAIL, f"{i.battery_pct}% - critical. Charge before flying.")
+        batt = Check("battery", "Battery", FAIL, f"{i.battery_pct}% - critical. Charge before flying.",
+                     value=f"{i.battery_pct}%")
     elif i.battery_pct <= i.batt_warn_pct:
-        batt = Check("battery", "Battery", FAIL, f"{i.battery_pct}% - low. Charge before flying.")
+        batt = Check("battery", "Battery", FAIL, f"{i.battery_pct}% - low. Charge before flying.",
+                     value=f"{i.battery_pct}%")
     else:
-        batt = Check("battery", "Battery", PASS, f"{i.battery_pct}%")
+        batt = Check("battery", "Battery", PASS, f"{i.battery_pct}%", value=f"{i.battery_pct}%")
     out.append(batt)
 
     out.append(Check("vision", "Vision tracking", PASS if (link_ok and i.vision_ok) else (FAIL if link_ok else UNKNOWN),
                      "" if (link_ok and i.vision_ok) else
                      ("No visual-inertial odometry. Move the drone slowly in front of textured surfaces."
-                      if link_ok else "No link.")))
+                      if link_ok else "No link."),
+                     value="OK" if (link_ok and i.vision_ok) else ("LOST" if link_ok else "--")))
     out.append(Check("position", "Position feed", PASS if (link_ok and not i.position_stale) else (FAIL if link_ok else UNKNOWN),
                      "" if (link_ok and not i.position_stale) else
-                     ("No fresh local position from the vehicle." if link_ok else "No link.")))
+                     ("No fresh local position from the vehicle." if link_ok else "No link."),
+                     value="FRESH" if (link_ok and not i.position_stale) else ("STALE" if link_ok else "--")))
 
     live = i.video_state == "LIVE"
     out.append(Check("video", "Camera feed", PASS if live else FAIL,
-                     "" if live else f"Video is {i.video_state.lower()}."))
+                     "" if live else f"Video is {i.video_state.lower()}.", value=i.video_state))
 
     if not i.map_seen:
-        out.append(Check("map", "Map", FAIL, "No map has arrived from the Radxa yet."))
+        out.append(Check("map", "Map", FAIL, "No map has arrived from the Radxa yet.", value="NONE"))
     elif i.map_stale:
-        out.append(Check("map", "Map", FAIL, "The map stopped updating."))
+        out.append(Check("map", "Map", FAIL, "The map stopped updating.", value="STALE"))
     else:
-        out.append(Check("map", "Map", PASS))
+        out.append(Check("map", "Map", PASS, value="LIVE"))
 
     out.append(Check("heading", "Heading fixed", PASS if i.heading_confirmed else UNKNOWN,
                      "" if i.heading_confirmed else
@@ -118,15 +124,17 @@ def evaluate(i: PreflightInputs) -> List[Check]:
                      manual=True))
 
     if i.radxa_state is None:
-        out.append(Check("radxa", "Radxa services", UNKNOWN, "The Radxa watchdog is not reporting.", required=False))
+        out.append(Check("radxa", "Radxa services", UNKNOWN, "The Radxa watchdog is not reporting.",
+                         required=False, value="--"))
     elif i.radxa_state == "ok":
-        out.append(Check("radxa", "Radxa services", PASS, i.radxa_detail, required=False))
+        out.append(Check("radxa", "Radxa services", PASS, i.radxa_detail, required=False, value="OK"))
     else:
         out.append(Check("radxa", "Radxa services", FAIL, i.radxa_detail or f"Radxa pipeline is {i.radxa_state}.",
-                         required=False))
+                         required=False, value=i.radxa_state.upper()))
 
     out.append(Check("params", "Parameters read", PASS if i.params_loaded else UNKNOWN,
-                     "" if i.params_loaded else "Open this tab while connected to read them.", required=False))
+                     "" if i.params_loaded else "Open the Parameters tab while connected to read them.",
+                     required=False, value="LOADED" if i.params_loaded else "--"))
     return out
 
 

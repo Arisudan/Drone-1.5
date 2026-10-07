@@ -109,7 +109,7 @@ from ui.slam_map_widget import SLAMMapWidget
 from ui.cli_console import CLIConsoleWidget
 from ui.motor_widget import MotorWidget
 from ui.video_feed_widget import VideoFeedWidget, FloatingVideoWindow, FullscreenVideoWindow
-from ui.top_status_strip import TopStatusStrip
+from ui.top_status_strip import TopStatusStrip, WFB_NETWORK
 from ui.sidebar_nav import SidebarNav
 from ui.logs_tab import LogsTabWidget
 from ui.config_tab import ConfigTabWidget
@@ -335,9 +335,16 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             self.radxa_poller.start()
         self.page_params.save_flash_requested.connect(self._request_save_params)
 
-        # Auto-connect to default autopilot endpoint on launch (UDP 14550)
+        # A saved wfb-ng (udpin) link also means the wfb-ng network preset and video
+        # source - select them so the header and FPV tab match what is about to connect.
         conn = self.settings.connection
-        port = conn.udp_port if conn.protocol == "udp" else conn.tcp_port
+        if conn.protocol == "udpin":
+            wfb_idx = self.top_strip.network_combo.findText(WFB_NETWORK)
+            if wfb_idx >= 0:
+                self.top_strip.network_combo.setCurrentIndex(wfb_idx)
+
+        # Auto-connect to default autopilot endpoint on launch (UDP 14550)
+        port = conn.udp_port if conn.protocol in ("udp", "udpin") else conn.tcp_port
         self._connect_to_endpoint(conn.host, port, protocol=conn.protocol)
 
     @staticmethod
@@ -412,6 +419,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # Page 1: FPV Camera Feed
         self.page_fpv = VideoFeedWidget(self)
         self.page_fpv.txt_url.setText(self.settings.video.stream_url)
+        self.page_fpv.set_wfb_ports(self.settings.video.wfb_rtp_port, self.settings.video.wfb_ts_port)
         self.stack.addWidget(self.page_fpv)
 
         # Page 2: Tactical 2D SLAM & Waypoint Stager
@@ -1027,11 +1035,21 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         """Fired the moment a Network preset is picked in the top strip - independent of
         Connect/Disconnect, so the map bridge and FPV stream re-target immediately rather
         than waiting for a MAVLink (re)connect. Port/protocol are untouched: they're a
-        property of the link, not of which Wi-Fi network is active."""
+        property of the link, not of which Wi-Fi network is active.
+
+        The wfb-ng radio preset is the exception: telemetry and video both arrive on
+        this machine (the radio's ground side), so the FPV tab switches to the wfb-ng
+        source and the TCP map bridge is left alone - it has no host on the radio link."""
+        if self.top_strip.is_wfb_selected():
+            if hasattr(self, 'page_fpv') and self.page_fpv:
+                self.page_fpv.select_source(VideoFeedWidget.SRC_WFB)
+            return
         self._radxa_host = ip
         if hasattr(self, 'map_listener') and self.map_listener:
             self.map_listener.set_tcp_host(ip)
         if hasattr(self, 'page_fpv') and self.page_fpv:
+            if self.page_fpv.combo_source.currentIndex() == VideoFeedWidget.SRC_WFB:
+                self.page_fpv.select_source(VideoFeedWidget.SRC_DRONE_FPV)
             self.page_fpv.set_stream_host(ip)
 
     def _connect_to_endpoint(self, ip: str, port: int, protocol: str = "udp"):
@@ -1039,11 +1057,15 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             self._disconnect_from_endpoint()
 
         proto_str = protocol.lower().strip()
-        prefix = "udpout:" if proto_str == "udp" else "tcp:"
-        self.console.log_info(f"Connecting to {prefix}{ip}:{port} (SysID 255)...")
-        self.page_terminal.log_info(f"Connecting to {prefix}{ip}:{port} (SysID 255)...")
+        if proto_str == "udpin":
+            # wfb-ng radio: listen locally; the radio's ground side sends MAVLink here.
+            target = f"udpin:0.0.0.0:{port} (wfb-ng radio)"
+        else:
+            target = f"{'udpout:' if proto_str == 'udp' else 'tcp:'}{ip}:{port}"
+        self.console.log_info(f"Connecting to {target} (SysID 255)...")
+        self.page_terminal.log_info(f"Connecting to {target} (SysID 255)...")
 
-        if hasattr(self, 'map_listener') and self.map_listener:
+        if proto_str != "udpin" and hasattr(self, 'map_listener') and self.map_listener:
             self.map_listener.set_tcp_host(ip)
 
         self.worker = MAVLinkWorker(host=ip, port=port, protocol=proto_str, source_system=255)
@@ -1139,6 +1161,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.TAKEOFF_ALT_MAX_M = cfg.limits.takeoff_alt_max_m
         self.MOVE_MAX_DELTA_M = cfg.limits.move_max_delta_m
         self.page_fpv.txt_url.setText(cfg.video.stream_url)
+        self.page_fpv.set_wfb_ports(cfg.video.wfb_rtp_port, cfg.video.wfb_ts_port)
         self.audio.set_config(cfg.audio)
         self.actuator.set_endpoint(cfg.actuator.host, cfg.actuator.port)
         msg = ("Settings saved. Command limits, audio, stream URL and actuator IP applied "
@@ -1781,7 +1804,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             self._disconnect_from_endpoint()
         else:
             conn = self.settings.connection
-            port = conn.udp_port if conn.protocol == "udp" else conn.tcp_port
+            port = conn.udp_port if conn.protocol in ("udp", "udpin") else conn.tcp_port
             self._connect_to_endpoint(conn.host, port, protocol=conn.protocol)
 
     def _shortcut_execute_path(self) -> None:
@@ -1939,8 +1962,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Drone-GCS - PyQt5 ground control station for PX4 + ROS 2.")
     ap.add_argument("--host", help="autopilot / companion host (env GCS_HOST)")
     ap.add_argument("--port", help="MAVLink port (env GCS_PORT)")
-    ap.add_argument("--protocol", choices=("udp", "tcp"),
-                    help="MAVLink transport (env GCS_PROTOCOL)")
+    ap.add_argument("--protocol", choices=("udp", "tcp", "udpin"),
+                    help="MAVLink transport (env GCS_PROTOCOL); udpin = listen on --port for "
+                         "the wfb-ng radio link")
     ap.add_argument("--map-host", help="TCP map bridge host (env GCS_MAP_HOST)")
     ap.add_argument("--map-port", help="TCP map bridge port (env GCS_MAP_PORT)")
     ap.add_argument("--video-url", help="FPV stream URL (env GCS_VIDEO_URL)")

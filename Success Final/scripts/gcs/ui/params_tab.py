@@ -2,7 +2,7 @@
 ================================================================================
 MODULE: params_tab.py
 PURPOSE: Live PX4 Parameter Table (read-only list, search, refresh, export, save-to-flash)
-         and the preflight checklist underneath it
+
 ================================================================================
 
 ARCHITECTURE & CONTEXT:
@@ -50,7 +50,6 @@ from PyQt5.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 
-from ui.preflight_panel import ChecklistPanel
 
 from ui.scaling import px
 from core.param_codec import format_param_value, param_type_name
@@ -73,9 +72,9 @@ def params_file_text(params: Dict[str, tuple], stamp: Optional[str] = None) -> s
 
 
 class ParamsTabWidget(QWidget):
-    """Live parameter list: connect, fetch, search, export - and, under it, the
-    preflight checklist. The only thing that can reach the vehicle from here is
-    the guarded 'Save to flash' request; no parameter is ever written."""
+    """Live parameter list: connect, fetch, search, export. The only thing that can
+    reach the vehicle from here is the guarded 'Save to flash' request; no
+    parameter is ever written. (The preflight checklist lives in the left rail.)"""
 
     refresh_requested = pyqtSignal()
     # The operator asked to store the vehicle's current parameters in its flash.
@@ -152,10 +151,6 @@ class ParamsTabWidget(QWidget):
         for c in (1, 2, 3):
             header.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         root.addWidget(self.table, 1)
-
-        # Preflight checklist, under a horizontal rule (see ui/preflight_panel.py).
-        self.checklist = ChecklistPanel(self)
-        root.addWidget(self.checklist)
 
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(self.FLUSH_INTERVAL_MS)
