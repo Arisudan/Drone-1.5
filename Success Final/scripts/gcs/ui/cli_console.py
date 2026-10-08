@@ -37,8 +37,9 @@ from typing import Optional, List
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QLineEdit, QPushButton, QLabel
+    QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QSizePolicy
 )
+
 
 
 class CommandLineEdit(QLineEdit):
@@ -72,6 +73,9 @@ class CommandLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+LOG_LINES = 10          # visible lines in the locked log box
+
+
 class CLIConsoleWidget(QWidget):
     """Console widget hosting terminal output and cmd> input bar."""
 
@@ -88,6 +92,10 @@ class CLIConsoleWidget(QWidget):
         self.log_box.setReadOnly(True)
         self.log_box.setFont(QFont("Consolas", 10))
         self.log_box.setMaximumBlockCount(1000)
+        # A floor of LOG_LINES lines; above that the box takes whatever height the window has to spare. Its size
+        # follows the WINDOW only - arriving text never changes it. (Word-wrap and the scrollbars keep Qt's
+        # defaults - wrapping on, scrollbars only when needed.)
+        self.log_box.setMinimumHeight(self._locked_log_height())
         layout.addWidget(self.log_box)
 
         # Bottom Input Bar. This is the operator's primary text interface to the
@@ -114,14 +122,21 @@ class CLIConsoleWidget(QWidget):
         btn_send = QPushButton("Send")
         btn_send.setObjectName("btnCliSend")
         btn_send.clicked.connect(self._handle_send)
+        btn_send.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)   # exactly its natural size, always
         input_bar.addWidget(btn_send)
 
         btn_clear = QPushButton("Clear")
         btn_clear.setObjectName("btnCliClear")
         btn_clear.clicked.connect(self.log_box.clear)
+        btn_clear.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         input_bar.addWidget(btn_clear)
 
         layout.addLayout(input_bar)
+
+    def _locked_log_height(self) -> int:
+        """Height of LOG_LINES text lines plus the frame."""
+        fm = self.log_box.fontMetrics()
+        return fm.lineSpacing() * LOG_LINES + 2 * self.log_box.frameWidth() + 8
 
     def _handle_send(self):
         text = self.cmd_input.text().strip()

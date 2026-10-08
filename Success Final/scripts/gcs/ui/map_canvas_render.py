@@ -30,7 +30,9 @@ from ui.styles import PALETTE
 # Drone glyph zoom behaviour. REF is the zoom (px per metre) at which the glyph
 # is drawn at its designed size - the canvas default; MIN/MAX bound how far it
 # follows zoom in either direction.
-DRONE_GLYPH_REF_SCALE = 36.0
+# The canvas opens at 150 px/m (about 9 m x 6 m on screen), the zoom RViz's top-down view is usually run at.
+DEFAULT_SCALE_PX_PER_M = 150.0
+DRONE_GLYPH_REF_SCALE = DEFAULT_SCALE_PX_PER_M
 DRONE_GLYPH_MIN_SCALE = 0.4
 DRONE_GLYPH_MAX_SCALE = 3.0
 
@@ -487,7 +489,7 @@ class CanvasRenderMixin:
         # pixels, so zooming in left a thumbnail-sized icon on a huge room and
         # zooming out left a large icon covering the walls around it - the one
         # symbol whose size the operator reads against the map told them
-        # nothing. It is now proportional to zoom (1.0 at the default 36 px/m,
+        # nothing. It is now proportional to zoom (1.0 at the default 150 px/m,
         # so the default view looks exactly as before) and clamped: below the
         # floor it becomes an unreadable dot, above the ceiling it hides the
         # cells the operator zoomed in to inspect. Pens scale with it, so line
@@ -643,8 +645,9 @@ class CanvasRenderMixin:
             p.setPen(QColor(210, 153, 34, 230))
         else:
             hint = ("Left Click: Set Goal | Right-Click: Menu | "
-                    "Right-Drag: Pan | Scroll: Zoom")
-        p.drawText(20, int(h - 12), hint)
+                    "Right-Drag: Pan | Alt+Drag: Rotate | Scroll: Zoom")
+        if self.ruler_active or getattr(self, "show_controls_hint", True):
+            p.drawText(20, int(h - 12), hint)
 
         # 3. Pose and position-uncertainty text moved to the status strip under
         # the map (SLAMMapWidget._build_status_strip): here they covered the map.

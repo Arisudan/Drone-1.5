@@ -206,13 +206,13 @@ class SystemCardTest(_Qt):
         self.assertEqual(card.health, 0)
         g.update_values(live(battery_percent=30))
         self.assertEqual(card.health, 1)
-        self.assertIn(vg.WARN, card.led.styleSheet())
+        self.assertEqual(card.led.colour(), vg.WARN)
         g.update_values(live(battery_percent=10))
         self.assertEqual(card.health, 2)
-        self.assertIn(vg.BAD, card.led.styleSheet())
+        self.assertEqual(card.led.colour(), vg.BAD)
         g.update_values(live(battery_percent=80))
         self.assertEqual(card.health, 0)
-        self.assertIn(vg._LED_IDLE, card.led.styleSheet())
+        self.assertEqual(card.led.colour(), vg._LED_IDLE)
 
     def test_the_tooltip_names_what_is_wrong(self):
         g = self._grid(fields=["volt", "pct"])

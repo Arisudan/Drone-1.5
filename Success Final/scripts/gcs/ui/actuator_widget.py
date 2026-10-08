@@ -41,6 +41,7 @@ from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
+from ui.status_dot import StatusDot
 from ui.scaling import fit_min_width, px
 
 POLL_MS = 1000
@@ -72,8 +73,7 @@ class ActuatorPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(px(8))
 
-        self.dot = QLabel(self)
-        self.dot.setFixedSize(px(10), px(10))
+        self.dot = StatusDot(10, parent=self)
         lay.addWidget(self.dot, 0, Qt.AlignVCenter)
 
         self.btn_toggle = QPushButton("SERVO", self)
@@ -187,4 +187,4 @@ class ActuatorPanel(QWidget):
         self._set_dot("#d29922" if self._busy else "#6e7681")
 
     def _set_dot(self, colour: str) -> None:
-        self.dot.setStyleSheet(f"background: {colour}; border-radius: {px(5)}px;")
+        self.dot.set_colour(colour)

@@ -29,7 +29,7 @@ class ActuatorButtonTest(unittest.TestCase):
     def test_offline_text_and_red_dot(self):
         self._set(False)
         self.assertEqual(self.p.btn_toggle.text(), "SERVO OFFLINE")
-        self.assertIn("#f85149", self.p.dot.styleSheet())
+        self.assertEqual(self.p.dot.colour(), "#f85149")
         self.assertIn("192.0.2.1", self.p.btn_toggle.toolTip())
 
     def test_idle_shows_position_and_next_angle(self):
@@ -37,7 +37,7 @@ class ActuatorButtonTest(unittest.TestCase):
         self.assertEqual(self.p.btn_toggle.text(), "SERVO 0° → 90°")
         self._set(True, angle=90)
         self.assertEqual(self.p.btn_toggle.text(), "SERVO 90° → 0°")
-        self.assertIn("#6e7681", self.p.dot.styleSheet())
+        self.assertEqual(self.p.dot.colour(), "#6e7681")
 
     def test_unknown_position_first_press_goes_to_zero(self):
         self._set(True, angle=-1)
@@ -45,7 +45,7 @@ class ActuatorButtonTest(unittest.TestCase):
 
     def test_moving_is_amber(self):
         self._set(True, angle=0, busy=True)
-        self.assertIn("#d29922", self.p.dot.styleSheet())
+        self.assertEqual(self.p.dot.colour(), "#d29922")
 
     def test_widest_label_fits_the_button(self):
         self.p.show()

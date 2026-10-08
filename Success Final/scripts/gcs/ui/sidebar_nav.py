@@ -49,7 +49,8 @@ class SidebarNav(QFrame):
         super().__init__(parent)
         # 176, not 162: adding units pushed "ALT 0.00 m" flush against the
         # rail's right edge, which would elide at a higher DPI.
-        self.setFixedWidth(px(176))
+        self._wide = True
+        self.setFixedWidth(px(self.WIDE_PX))
         # Scoped to the rail itself. As a bare `QFrame` rule this also matched
         # every descendant - QLabel derives from QFrame - so each label in the
         # rail painted its own right-hand border, scattering stray vertical
@@ -73,7 +74,8 @@ class SidebarNav(QFrame):
                 border-left: 3px solid transparent;
                 border-radius: 0px;
                 text-align: left;
-                padding: 6px 14px;
+                padding: 4px 14px;
+                min-height: 21px;
                 font-size: 11px;
                 font-weight: 600;
             }
@@ -82,6 +84,7 @@ class SidebarNav(QFrame):
                less vertical padding - nothing is hidden or overlapped. */
             QPushButton[compact="true"] {
                 padding: 2px 14px;
+                min-height: 17px;
             }
             QPushButton:hover {
                 background-color: #161b22;
@@ -151,20 +154,24 @@ class SidebarNav(QFrame):
             QLabel#railCheckValue {
                 font-size: 9px;
                 font-weight: 700;
-                letter-spacing: 0.4px;
+                letter-spacing: 0.3px;
             }
             QLabel#railCheckDetail {
-                color: #8b949e;
-                font-size: 9px;
+                font-size: 10px;
+                font-weight: 600;
+            }
+            QLabel#railSummary {
+                font-size: 10px;
+                font-weight: 700;
             }
             QCheckBox#cfgToggle {
                 font-size: 10px;
-                spacing: 6px;
+                spacing: 7px;
             }
             QCheckBox#cfgToggle::indicator {
-                width: 9px;
-                height: 9px;
-                border-radius: 5px;
+                width: 10px;
+                height: 10px;
+                border-radius: 6px;
             }
             QCheckBox#cfgToggle::indicator:unchecked {
                 border: 1px solid #d29922;
@@ -213,6 +220,7 @@ class SidebarNav(QFrame):
 
         # Preflight checklist: directly under the last workspace entry, behind a
         # horizontal rule. Whether its lines fit is decided in _apply_checklist_level.
+        layout.addSpacing(px(10))       # air between the last workspace entry and the checklist
         self.checklist = ChecklistPanel(self)
         layout.addWidget(self.checklist)
         # The lines do not exist until the first update; once they do, re-check
@@ -222,6 +230,7 @@ class SidebarNav(QFrame):
         self.checklist.expanded_changed.connect(lambda _e: self._apply_checklist_level())
 
         layout.addStretch()
+        layout.addSpacing(px(12))       # a guaranteed gap between the checklist and the camera thumbnail
 
         # Camera thumbnail in the rail's empty space (see ui/mini_feed.py). Shown
         # only on the workspaces that have no camera of their own, and only when
@@ -322,6 +331,23 @@ class SidebarNav(QFrame):
                 # Qt caches style by objectName; re-polish or the colour sticks.
                 lbl.style().unpolish(lbl)
                 lbl.style().polish(lbl)
+
+    # The rail is wider (a bigger camera thumbnail, more room for the checklist) when the window can spare it, and
+    # a little narrower when it cannot: a small window or a large UI scale needs that width for the page itself.
+    WIDE_PX = 200
+    NARROW_PX = 184
+    WIDE_MIN_WINDOW_PX = 1280        # logical (pre-scale) window width from which the wide rail is used
+
+    def set_wide(self, wide: bool) -> None:
+        if bool(wide) == self._wide:
+            return
+        self._wide = bool(wide)
+        self.setFixedWidth(px(self.WIDE_PX if wide else self.NARROW_PX))
+        self.updateGeometry()
+        self._apply_checklist_level()
+
+    def is_wide(self) -> bool:
+        return self._wide
 
     # Workspaces with no camera of their own: Motor Actuators, Diagnostics,
     # Flight Terminal, Flight Logs, Configuration, Parameters.

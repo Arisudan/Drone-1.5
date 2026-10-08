@@ -64,6 +64,7 @@ from PyQt5.QtWidgets import (
 
 from core import motor_range as mr
 from ui.scaling import px, scaled_font
+from ui.status_dot import StatusDot
 
 # PX4 Quad X channel -> (label, unit-square position, rotation sense).
 # Position is (right+, forward+) in body axes, so the diagram is drawn from the
@@ -757,8 +758,7 @@ class _Check(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(px(5))
-        self.dot = QLabel(self)
-        self.dot.setFixedSize(px(8), px(8))
+        self.dot = StatusDot(8, parent=self)
         lay.addWidget(self.dot, 0, Qt.AlignVCenter)
         self.lbl = QLabel(text, self)
         lay.addWidget(self.lbl)
@@ -769,7 +769,7 @@ class _Check(QWidget):
         # Grey = not satisfied, green = satisfied, red only for a real hazard
         # (the vehicle is armed). Colour carries meaning here, not decoration.
         colour = "#3fb950" if ok else ("#f85149" if danger else "#6e7681")
-        self.dot.setStyleSheet(f"background: {colour}; border-radius: {px(4)}px;")
+        self.dot.set_colour(colour)
         self.lbl.setStyleSheet(
             f"color: {'#c9d1d9' if ok else '#8b949e'}; font-size: {px(11)}px;"
             " font-weight: 600; letter-spacing: 0.5px;")
@@ -830,6 +830,7 @@ class MotorTestPanel(QFrame):
         root = QVBoxLayout(self)
         root.setContentsMargins(px(12), px(6), px(12), px(4))
         root.setSpacing(px(4))
+        self._root = root
 
         head = QHBoxLayout()
         title = QLabel("BENCH MOTOR TEST", self)
@@ -846,6 +847,7 @@ class MotorTestPanel(QFrame):
         checks = QGridLayout()
         checks.setHorizontalSpacing(px(10))
         checks.setVerticalSpacing(px(0))
+        self._checks_grid = checks
         self.chk_link = _Check("LINK", self)
         self.chk_disarmed = _Check("DISARMED", self)
         self.chk_ground = _Check("ON GROUND", self)
@@ -894,6 +896,10 @@ class MotorTestPanel(QFrame):
             sel.addWidget(b, *cells[num])
         root.addLayout(sel)
 
+        # The label, the readout and the slider are one block, so they stay close to each other while the
+        # blocks around them are spaced apart (see _apply_spacing).
+        thr_block = QVBoxLayout()
+        self._thr_block = thr_block
         thr_head = QHBoxLayout()
         lbl_thr = QLabel("Throttle", self)
         lbl_thr.setObjectName("fieldLabel")
@@ -903,7 +909,7 @@ class MotorTestPanel(QFrame):
         self.lbl_throttle.setObjectName("valueMono")
         self.lbl_throttle.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         thr_head.addWidget(self.lbl_throttle)
-        root.addLayout(thr_head)
+        thr_block.addLayout(thr_head)
 
         thr = QHBoxLayout()
         thr.setSpacing(px(6))
@@ -920,10 +926,12 @@ class MotorTestPanel(QFrame):
         thr.addWidget(self.slider_throttle, 1)
         self.btn_thr_plus = self._step_button("+", +1)
         thr.addWidget(self.btn_thr_plus, 0, Qt.AlignTop)
-        root.addLayout(thr)
+        thr_block.addLayout(thr)
+        root.addLayout(thr_block)
 
         actions = QVBoxLayout()
         actions.setSpacing(px(4))
+        self._actions = actions
 
         self.btn_spin = QPushButton("HOLD TO SPIN", self)
         self.btn_spin.setObjectName("btnNav")
@@ -946,6 +954,7 @@ class MotorTestPanel(QFrame):
         self.btn_sequence.setFixedHeight(px(24))
         second_row = QHBoxLayout()
         second_row.setSpacing(px(6))
+        self._second_row = second_row
         second_row.addWidget(self.btn_sequence, 1)
 
         self.btn_stop = QPushButton("STOP ALL", self)
@@ -966,10 +975,36 @@ class MotorTestPanel(QFrame):
         # steps instead of drifting apart as the window grows.
         root.addStretch(1)
 
+        self._apply_spacing()
         self._update_output_label()
         self._refresh_enabled()
 
     # ── room ────────────────────────────────────────────────────────
+
+    def _apply_spacing(self) -> None:
+        """Breathing room between the blocks, tight again when the page is short.
+
+        Spacing only: nothing here changes what a control does or how it looks. When the page is short
+        (compact) the original tight numbers come back, so the controls are never squeezed into overlap."""
+        c = self._compact
+        self._root.setSpacing(px(4 if c else 16))                     # between blocks
+        self._checks_grid.setVerticalSpacing(px(0 if c else 8))      # between the interlock rows
+        self._sel_grid.setHorizontalSpacing(px(6 if c else 8))       # between motor buttons
+        self._sel_grid.setVerticalSpacing(px(4 if c else 8))
+        self._thr_block.setSpacing(px(2 if c else 6))                # label / readout / slider stay together
+        self._actions.setSpacing(px(4 if c else 8))                  # HOLD TO SPIN above SEQ / STOP ALL
+        self._second_row.setSpacing(px(6 if c else 8))
+        # Heights. The app-wide button style carries its own minimum height (22 + padding + border = 32), so a
+        # plain setFixedHeight() could never make these taller than 32; the roomy sizes therefore also set a
+        # matching style minimum. Short page: back to exactly what it was.
+        for btn, tight, roomy in ([(b, 24, 38) for b in self.motor_buttons.values()]
+                                  + [(self.btn_spin, 28, 40), (self.btn_sequence, 24, 36), (self.btn_stop, 24, 36)]):
+            btn.setFixedHeight(px(tight if c else roomy))
+            btn.setStyleSheet("" if c else f"min-height: {px(roomy) - 10}px;")
+        for btn in (self.btn_thr_minus, self.btn_thr_plus):
+            side = 30 if c else 36
+            btn.setFixedSize(px(side), px(side))
+            btn.setStyleSheet(f"font-size: {px(16)}px; font-weight: 700; padding: 0; min-height: {px(side) - 2}px;")
 
     def set_compact(self, compact: bool) -> None:
         """Short page: swap the four-dot checklist for the one-line reason, which
@@ -977,6 +1012,7 @@ class MotorTestPanel(QFrame):
         if compact == self._compact:
             return
         self._compact = compact
+        self._apply_spacing()
         for chk in (self.chk_link, self.chk_disarmed, self.chk_ground, self.chk_props):
             chk.setVisible(not compact)
         # The 2x2 motor selector (laid out like the aircraft) folds into one row of

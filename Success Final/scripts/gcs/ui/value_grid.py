@@ -58,6 +58,7 @@ from PyQt5.QtWidgets import (
 
 from ui.styles import PALETTE
 from ui.scaling import px, get_scale
+from ui.status_dot import StatusDot
 
 OK = PALETTE["ok"]
 WARN = PALETTE["warn"]
@@ -759,8 +760,7 @@ class SystemCard(QFrame):
         self.lbl_title.setObjectName("cardGroupTitle")
         head.addWidget(self.lbl_title)
         head.addStretch(1)
-        self.led = QLabel(self)
-        self.led.setFixedSize(px(9), px(9))
+        self.led = StatusDot(9, parent=self)
         head.addWidget(self.led, 0, Qt.AlignVCenter)
         lay.addLayout(head)
 
@@ -795,7 +795,7 @@ class SystemCard(QFrame):
             return
         self._health = h
         colour = {2: BAD, 1: WARN}.get(h, _LED_IDLE)
-        self.led.setStyleSheet(f"background: {colour}; border-radius: {px(4)}px;")
+        self.led.set_colour(colour)
         worst = [t._caption for t in self.tiles if t.severity == h and h > 0]
         self.led.setToolTip(
             {2: "Fault: ", 1: "Caution: "}.get(h, "") + ", ".join(worst)

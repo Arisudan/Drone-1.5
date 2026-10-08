@@ -24,6 +24,13 @@ from core.takeoff import takeoff_altitude_param
 class FlightCommandsMixin:
     """Flight command handlers: operator requests -> guided confirm -> MAVLink."""
 
+    def _flight_anchor(self, control_tab_btn, name: str):
+        """Anchor the confirm bar to the button the operator actually pressed: the SLAM header's own
+        ARM/DISARM when that tab is showing, the Control tab's otherwise."""
+        if self.stack.currentWidget() is self.page_slam:
+            return getattr(self.page_slam.flight_bar, name)
+        return control_tab_btn
+
     def _request_arm(self):
         """ARM used to dispatch on a single click, with no confirmation at all -
         despite this module's own docstring claiming a dual-stage modal. It now
@@ -34,7 +41,7 @@ class FlightCommandsMixin:
         self.confirm_bar.request(
             "arm", "ARM MOTORS", danger=True,
             detail="Propellers will be live. Confirm the area is clear.",
-            confirm_text="Slide to arm", anchor=self.btn_arm)
+            confirm_text="Slide to arm", anchor=self._flight_anchor(self.btn_arm, "btn_arm"))
 
     def _request_disarm(self):
         """Disarm. Airborne, this is redirected to AUTO.LAND by _cmd_disarm -
@@ -48,12 +55,12 @@ class FlightCommandsMixin:
                 detail="Vehicle is off the ground: this commands AUTO.LAND and "
                        "disarms on touchdown. Use EMERGENCY KILL for an "
                        "immediate cutoff.",
-                confirm_text="Slide to land and disarm", anchor=self.btn_disarm)
+                confirm_text="Slide to land and disarm", anchor=self._flight_anchor(self.btn_disarm, "btn_disarm"))
         else:
             self.confirm_bar.request(
                 "disarm", "DISARM", danger=True,
                 detail="Vehicle is on the ground.",
-                confirm_text="Slide to disarm", anchor=self.btn_disarm)
+                confirm_text="Slide to disarm", anchor=self._flight_anchor(self.btn_disarm, "btn_disarm"))
 
     def _request_takeoff(self):
         """Takeoff, with the altitude on a slider bounded by settings.limits."""

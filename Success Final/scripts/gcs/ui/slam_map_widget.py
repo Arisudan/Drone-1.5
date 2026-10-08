@@ -55,6 +55,8 @@ from PyQt5.QtWidgets import (
 )
 
 from core.path_planner import AStarPathPlanner
+from ui.docked_feed import FEED_W, DockedFeed
+from ui.header_flight_bar import HeaderFlightBar
 from ui.scaling import px, fit_min_width, grow_min_width
 from ui.mission_progress import MissionProgressBar
 from ui.styles import PALETTE
@@ -135,12 +137,14 @@ class SLAMMapCanvas(CanvasRenderMixin, QWidget):
         self.setMouseTracking(True)
 
         # View transform: scale (pixels per meter) and origin pan offsets (pixels)
-        self.scale: float = 36.0  # Wide overview scale: 36 px = 1 meter
+        self.scale: float = map_canvas_render.DEFAULT_SCALE_PX_PER_M  # default overview: 150 px = 1 meter
         self.pan_x: float = 0.0
         self.pan_y: float = 0.0
 
         # Planar Rotation Angle (0, 90, 180, 270 degrees)
         self.rotation_deg: float = 0.0
+        # Alt + left-drag rotation: (angle of the cursor at the press, rotation_deg at the press) while dragging.
+        self._rot_drag: Optional[Tuple[float, float]] = None
 
         # Auto-Follow Drone-Centric Tracking Mode (Default: OFF)
         self.auto_follow: bool = False
@@ -656,7 +660,7 @@ class SLAMMapCanvas(CanvasRenderMixin, QWidget):
     def reset_view(self):
         self.pan_x = 0.0
         self.pan_y = 0.0
-        self.scale = 36.0
+        self.scale = map_canvas_render.DEFAULT_SCALE_PX_PER_M
         self.update()
 
     def center_on_drone(self):
@@ -817,6 +821,12 @@ class SLAMMapCanvas(CanvasRenderMixin, QWidget):
         cx = self.width() / 2.0 + self.pan_x
         cy = self.height() / 2.0 + self.pan_y
 
+        if event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier:
+            # Alt + left-drag turns the map about its centre, like RViz's left-drag. Alt makes it
+            # deliberate: a plain left click still stages a goal, so rotating can never send the drone anywhere.
+            self._rot_drag = (self._cursor_angle_deg(event.pos(), cx, cy), self.rotation_deg)
+            self.setCursor(Qt.SizeAllCursor)
+            return
         if event.button() == Qt.LeftButton:
             wx, wy = self._screen_to_world(event.pos().x(), event.pos().y(), cx, cy)
             if self.ruler_active:
@@ -841,7 +851,25 @@ class SLAMMapCanvas(CanvasRenderMixin, QWidget):
                 self._right_press_pos = event.pos()
                 self._right_moved = False
 
+    @staticmethod
+    def _cursor_angle_deg(pos, cx: float, cy: float) -> float:
+        """Clockwise-positive screen angle of `pos` about (cx, cy) (screen y points down)."""
+        return math.degrees(math.atan2(pos.y() - cy, pos.x() - cx))
+
+    ROTATE_SNAP_DEG = 15.0   # held Shift while Alt-dragging
+
     def mouseMoveEvent(self, event: QMouseEvent):
+        if self._rot_drag is not None:
+            cx = self.width() / 2.0 + self.pan_x
+            cy = self.height() / 2.0 + self.pan_y
+            start_angle, start_rot = self._rot_drag
+            rot = start_rot + (self._cursor_angle_deg(event.pos(), cx, cy) - start_angle)
+            if event.modifiers() & Qt.ShiftModifier:
+                rot = round(rot / self.ROTATE_SNAP_DEG) * self.ROTATE_SNAP_DEG
+            self.rotation_deg = rot % 360.0
+            self.rotation_changed.emit(self.rotation_deg)
+            self.update()
+            return
         if self._keepout_press_px is not None:
             self._keepout_now_px = event.pos()
             self.update()
@@ -875,6 +903,10 @@ class SLAMMapCanvas(CanvasRenderMixin, QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton and self._rot_drag is not None:
+            self._rot_drag = None
+            self.unsetCursor()
+            return
         if event.button() == Qt.LeftButton and self._keepout_press_px is not None:
             a, b = self._keepout_press_px, event.pos()
             self._keepout_press_px = self._keepout_now_px = None
@@ -943,6 +975,10 @@ class SLAMMapCanvas(CanvasRenderMixin, QWidget):
 from ui.rviz_embed_widget import RVizEmbedWidget
 
 
+DEFAULT_FLIGHT_MODES = ["OFFBOARD", "POSCTL", "ALTCTL", "AUTO.LOITER", "AUTO.LAND", "AUTO.RTL",
+                        "MANUAL", "ACRO", "STABILIZED"]
+
+
 class SLAMMapWidget(QWidget):
     """
     Complete Tactical SLAM Workspace with dual-view navigation:
@@ -962,8 +998,10 @@ class SLAMMapWidget(QWidget):
     # through the safety logic.
     fly_here_requested = pyqtSignal(float, float)
 
-    def __init__(self, parent: Optional[QWidget] = None, rviz_config: str = ""):
+    def __init__(self, parent: Optional[QWidget] = None, rviz_config: str = "",
+                 flight_modes: Optional[list] = None):
         super().__init__(parent)
+        self._flight_modes = list(flight_modes) if flight_modes else list(DEFAULT_FLIGHT_MODES)
         # Empty falls back to the copy shipped with this checkout; the caller
         # passes whatever --rviz-config / GCS_RVIZ_CONFIG resolved to.
         self._rviz_config = rviz_config
@@ -973,6 +1011,8 @@ class SLAMMapWidget(QWidget):
         self._armed: bool = False
         self._map_ever_seen: bool = False
         self._panel_collapsed: bool = False
+        self._feed_docked: bool = True
+        self._feed_compact: bool = False
         self._actions_running: bool = False
         self._has_raw_map: bool = False
         self._has_thin_map: bool = False
@@ -1019,6 +1059,34 @@ class SLAMMapWidget(QWidget):
 
         r1.addSpacing(px(8))
 
+        # LAYERS (Raw / Thin / Both) live here: they change how the map is drawn, like the view switch.
+        # A real three-way control. The canvas has always supported raw / skeleton / both, and the README
+        # advertises all three; judging wall quality means looking at the skeleton alone
+        # (docs/slam_evaluation.md).
+        self.layers_section = QWidget(self)
+        self.layers_section.setObjectName("transparentRow")
+        seg = QHBoxLayout(self.layers_section)
+        seg.setContentsMargins(0, 0, 0, 0)
+        seg.setSpacing(px(2))
+        self.layer_group = QButtonGroup(self)
+        self.layer_group.setExclusive(True)
+        self.btn_layer_raw = self._seg_button(
+            "Raw", "RTAB-Map occupancy grid only (/map): free space and obstacle mass")
+        self.btn_layer_thin = self._seg_button(
+            "Thin", "Thinned single-pixel wall skeleton only (/map_thin)")
+        self.btn_layer_both = self._seg_button(
+            "Both", "Skeleton overlaid on the raw grid (default)")
+        self.btn_layer_both.setChecked(True)
+        for i, (btn, mode) in enumerate(((self.btn_layer_raw, "raw"),
+                                         (self.btn_layer_thin, "thin"),
+                                         (self.btn_layer_both, "both"))):
+            self.layer_group.addButton(btn, i)
+            btn.clicked.connect(lambda _c, m=mode: self.set_layer_mode(m))
+            seg.addWidget(btn)
+        # Backward-compatible alias for callers that knew the old single button.
+        self.btn_layer_map = self.btn_layer_both
+        r1.addWidget(self.layers_section)
+
         main_hl.addLayout(r1)
 
         # ── Row 2: context bar, swapped by view mode ─────────────────────
@@ -1031,14 +1099,12 @@ class SLAMMapWidget(QWidget):
         r2.setContentsMargins(0, 0, 0, 0)
         r2.setSpacing(px(4))
 
-        # VIEW cluster ---------------------------------------------------
-        r2.addWidget(self._cluster_caption("VIEW"))
-
-        self.btn_turn_left = self._map_tool("\u21ba 90\u00b0", "Rotate the map 90\u00b0 counter-clockwise")
+        # VIEW cluster: no caption - the buttons say what they are, and the width keeps the toolbar on one line.
+        self.btn_turn_left = self._map_tool("\u21ba", "Rotate the map 90\u00b0 counter-clockwise")
         self.btn_turn_left.clicked.connect(self._handle_turn_left)
         r2.addWidget(self.btn_turn_left)
 
-        self.btn_turn_right = self._map_tool("\u21bb 90\u00b0", "Rotate the map 90\u00b0 clockwise")
+        self.btn_turn_right = self._map_tool("\u21bb", "Rotate the map 90\u00b0 clockwise")
         self.btn_turn_right.clicked.connect(self._handle_turn_right)
         r2.addWidget(self.btn_turn_right)
 
@@ -1055,14 +1121,6 @@ class SLAMMapWidget(QWidget):
         self.btn_center = self._map_tool("Center", "Centre the view on the vehicle")
         self.btn_center.clicked.connect(lambda: self.canvas.center_on_drone())
         r2.addWidget(self.btn_center)
-
-        self.btn_zoom_in = self._map_tool("+", "Zoom in (Ctrl+=)")
-        self.btn_zoom_in.clicked.connect(lambda: self.canvas.zoom(1.25))
-        r2.addWidget(self.btn_zoom_in)
-
-        self.btn_zoom_out = self._map_tool("\u2212", "Zoom out (Ctrl+-)")
-        self.btn_zoom_out.clicked.connect(lambda: self.canvas.zoom(0.80))
-        r2.addWidget(self.btn_zoom_out)
 
         self.btn_fit_map = self._map_tool("Fit", "Fit the view to the whole map (Ctrl+F)")
         self.btn_fit_map.clicked.connect(lambda: self.canvas.fit_to_map())
@@ -1109,12 +1167,52 @@ class SLAMMapWidget(QWidget):
 
         lbl_desc = QLabel("PointCloud2 and camera TF viewer (software-rendered OpenGL)", self)
         lbl_desc.setObjectName("fieldSubLabel")
+        # Descriptive only: let it give way rather than force the header (and the window) wider.
+        lbl_desc.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         r3.addWidget(lbl_desc)
         r3.addStretch()
         self.context_stack.addWidget(self.row_3d_controls)
 
-        # One toolbar row: the view switch, then that view's own tools.
-        r1.addWidget(self.context_stack, 1)
+        # One toolbar row: the view switch, layers, then that view's own tools, then Reset Map.
+        r1.addWidget(self.context_stack, 0)
+
+        # Reset Map wipes the live SLAM database and restarts mapping from empty, on a vehicle with no
+        # display or keyboard of its own. In the toolbar it sits after a divider, in its own danger
+        # colour, so a slip on Fit / 1:1 can never land on it; it still asks for confirmation and is
+        # disabled while armed.
+        self._reset_wrap = QWidget(self)
+        self._reset_wrap.setObjectName("transparentRow")
+        rw = QHBoxLayout(self._reset_wrap)
+        rw.setContentsMargins(0, 0, 0, 0)
+        rw.setSpacing(px(8))
+        rw.addWidget(self._cluster_rule())
+        self.btn_reset_map = QPushButton("Reset Map", self)
+        self.btn_reset_map.setObjectName("mapDanger")
+        self.btn_reset_map.setToolTip(
+            "Wipe the live SLAM map and restart mapping from empty. Disabled while armed.")
+        self._fit_button_to_text(self.btn_reset_map)
+        self.btn_reset_map.clicked.connect(self._handle_reset_map_clicked)
+        rw.addWidget(self.btn_reset_map)
+        r1.addWidget(self._reset_wrap)
+        r1.addStretch(1)
+
+        # Top right, on the same line: mode / SET MODE / ARM / DISARM. Signals only; the main
+        # window wires them to the Control tab's own guarded handlers.
+        self.flight_bar = HeaderFlightBar(self._flight_modes, self)
+        r1.addWidget(self.flight_bar)
+        self._header_r1 = r1
+        self._header_card = header_card
+        self._header_state = 0      # 0 all inline; 1 flight bar on its own row; 2 bar + layers + Reset Map too
+        # Where the flight bar (and, if even that is not enough, the layers and Reset Map) go when the
+        # toolbar is too narrow to hold everything on one line (large UI scale, small window): a row of
+        # their own directly above, never clipped or off-screen.
+        self.flight_row_host = QWidget(header_card)
+        self.flight_row_host.setObjectName("transparentRow")
+        self._flight_row = QHBoxLayout(self.flight_row_host)
+        self._flight_row.setContentsMargins(0, 0, 0, 0)
+        self._flight_row.addStretch(1)
+        self.flight_row_host.setVisible(False)
+        main_hl.insertWidget(0, self.flight_row_host)
         layout.addWidget(header_card)
 
         # Route progress. Hidden until a path is staged - an empty progress bar
@@ -1193,6 +1291,7 @@ class SLAMMapWidget(QWidget):
         left_col.addWidget(self.view_stack, 1)
         left_col.addWidget(self._build_status_strip())
         view_row.addLayout(left_col, 1)
+        self._build_map_overlay()
         self.side_panel = self._build_side_panel()
         view_row.addWidget(self.side_panel)
         layout.addLayout(view_row, 1)
@@ -1466,115 +1565,21 @@ class SLAMMapWidget(QWidget):
         lbl.setObjectName("mapCaption")
         return lbl
 
-    def _build_side_panel(self) -> QFrame:
-        """Everything that is not "how the map is zoomed" or "which view".
+    def _build_map_overlay(self) -> None:
+        """Inflation / Keep-out / Measure, back on the map (small, top-left) where they used to live.
 
-        It used to be scattered: the map-state pill and Reset Map in the top
-        row, the layer switch in the second, Inflation/Keep-out on the canvas's
-        own left edge, Measure beside the zoom buttons and the path actions
-        in the first row with a chip nobody could read at a glance. One column
-        now, in the order the operator works: what the map is (MAP), what is
-        drawn on it (LAYERS), what route is staged (ROUTE), then the actions
-        that move the aircraft at the bottom, large and shown only when they
-        apply - EXECUTE while idle, PAUSE and ABORT while flying.
+        A compact translucent strip over the canvas's left edge: they only ever act on the map, so
+        they belong on it, and it frees the side panel for the route and the camera.
         """
-        panel = QFrame(self)
-        panel.setObjectName("sidePanel")
-        panel.setProperty("class", "cardFrame")
-        self._panel_expanded_w = px(206)
-        self._panel_collapsed_w = px(92)
-        panel.setFixedWidth(self._panel_expanded_w)
-        outer = QVBoxLayout(panel)
-        outer.setContentsMargins(px(8), px(6), px(8), px(8))
-        outer.setSpacing(px(4))
-        # Status, layers and route scroll if the window is too short to hold
-        # them; the path actions below stay pinned and always fully visible.
-        scroll = QScrollArea(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setObjectName("transparentRow")
-        scroll.viewport().setAutoFillBackground(False)
-        body = QWidget()
-        body.setObjectName("transparentRow")
-        v = QVBoxLayout(body)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(px(4))
-
-        # MAP ------------------------------------------------------------
-        # The header stays outside the scroll area so the collapse button is
-        # always reachable.
-        head = QHBoxLayout()
-        head.setSpacing(px(4))
-        self.lbl_map_caption = self._section_caption("MAP")
-        head.addWidget(self.lbl_map_caption)
-        self.pill_status = QLabel("NO DATA", self)
-        self.pill_status.setObjectName("mapPill")
-        self.pill_status.setMinimumHeight(px(24))
-        self.pill_status.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        self.pill_status.setAlignment(Qt.AlignCenter)
-        # Floored on today's text only, then grown further in _refresh_map_pill()
-        # as wider states are actually seen.
-        self._fit_button_to_text(self.pill_status)
-        self.badge_source = self.pill_status  # Backward-compatible alias
-        head.addWidget(self.pill_status)
-        head.addStretch(1)
-        self.btn_collapse_panel = QPushButton("\u203a", self)
-        self.btn_collapse_panel.setObjectName("mapTool")
-        self.btn_collapse_panel.setToolTip("Hide the side panel (keeps the path actions)")
-        self.btn_collapse_panel.setFixedWidth(px(26))
-        self.btn_collapse_panel.clicked.connect(lambda: self.set_panel_collapsed(not self._panel_collapsed))
-        head.addWidget(self.btn_collapse_panel)
-        outer.addLayout(head)
-        self._panel_head_row = head
-
-        # Reset Map wipes the live SLAM database and restarts mapping from
-        # empty, on a vehicle with no display or keyboard of its own. It keeps
-        # its own colour and never sits inline among the view tools.
-        self.btn_reset_map = QPushButton("Reset Map", self)
-        self.btn_reset_map.setObjectName("mapDanger")
-        self.btn_reset_map.setToolTip(
-            "Wipe the live SLAM map and restart mapping from empty. Disabled while armed.")
-        self._fit_button_to_text(self.btn_reset_map)
-        self.btn_reset_map.clicked.connect(self._handle_reset_map_clicked)
-        v.addWidget(self.btn_reset_map)
-
-        # LAYERS ---------------------------------------------------------
-        self.layers_section = QWidget(self)
-        self.layers_section.setObjectName("transparentRow")
-        lv = QVBoxLayout(self.layers_section)
-        lv.setContentsMargins(0, 0, 0, 0)
-        lv.setSpacing(px(6))
-        lv.addWidget(self._cluster_rule_h())
-        lv.addWidget(self._section_caption("LAYERS"))
-
-        # A real three-way control. The canvas has always supported raw /
-        # skeleton / both, and the README advertises all three; judging wall
-        # quality means looking at the skeleton alone (docs/slam_evaluation.md).
-        self.layer_group = QButtonGroup(self)
-        self.layer_group.setExclusive(True)
-        self.btn_layer_raw = self._seg_button(
-            "Raw", "RTAB-Map occupancy grid only (/map): free space and obstacle mass")
-        self.btn_layer_thin = self._seg_button(
-            "Thin", "Thinned single-pixel wall skeleton only (/map_thin)")
-        self.btn_layer_both = self._seg_button(
-            "Both", "Skeleton overlaid on the raw grid (default)")
-        self.btn_layer_both.setChecked(True)
-        seg = QHBoxLayout()
-        seg.setSpacing(px(2))
-        for i, (btn, mode) in enumerate(((self.btn_layer_raw, "raw"),
-                                         (self.btn_layer_thin, "thin"),
-                                         (self.btn_layer_both, "both"))):
-            self.layer_group.addButton(btn, i)
-            btn.clicked.connect(lambda _c, m=mode: self.set_layer_mode(m))
-            seg.addWidget(btn)
-        lv.addLayout(seg)
-        # Backward-compatible alias for callers that knew the old single button.
-        self.btn_layer_map = self.btn_layer_both
-
-        tools = QGridLayout()
-        tools.setHorizontalSpacing(px(4))
-        tools.setVerticalSpacing(px(4))
+        self.map_overlay = QFrame(self.canvas)
+        self.map_overlay.setObjectName("mapOverlay")
+        self.map_overlay.setStyleSheet(
+            "QFrame#mapOverlay { background-color: rgba(13, 17, 23, 175); border: 1px solid #30363d;"
+            " border-radius: 6px; }"
+            "QFrame#mapOverlay QPushButton { font-size: 10px; min-height: 0px; padding: 2px 8px; }")
+        ov = QVBoxLayout(self.map_overlay)
+        ov.setContentsMargins(px(4), px(4), px(4), px(4))
+        ov.setSpacing(px(3))
         self.btn_inflation = self._map_tool(
             "Inflation",
             "Show the planner's safety margin: cells the vehicle's centre cannot "
@@ -1598,19 +1603,106 @@ class SLAMMapWidget(QWidget):
         self.lbl_ruler = QLabel("", self)
         self.lbl_ruler.setObjectName("rulerTotal")
         self.lbl_ruler.setVisible(False)
-        tools.addWidget(self.btn_inflation, 0, 0)
-        tools.addWidget(self.btn_keepout, 0, 1)
-        tools.addWidget(self.btn_ruler, 1, 0)
-        tools.addWidget(self.lbl_ruler, 1, 1)
-        lv.addLayout(tools)
-        v.addWidget(self.layers_section)
+        for w in (self.btn_inflation, self.btn_keepout, self.btn_ruler, self.lbl_ruler):
+            ov.addWidget(w)
+        self.map_overlay.adjustSize()
+        self.map_overlay.move(px(8), px(8))
+        self.map_overlay.raise_()
+
+    def _build_side_panel(self) -> QFrame:
+        """Everything that is not "how the map is zoomed" or "which view".
+
+        It used to be scattered: the map-state pill and Reset Map in the top
+        row, the layer switch in the second, Inflation/Keep-out on the canvas's
+        own left edge, Measure beside the zoom buttons and the path actions
+        in the first row with a chip nobody could read at a glance. One column
+        now, in the order the operator works: what the map is (MAP), what is
+        drawn on it (LAYERS), what route is staged (ROUTE), then the actions
+        that move the aircraft at the bottom, large and shown only when they
+        apply - EXECUTE while idle, PAUSE and ABORT while flying.
+        """
+        panel = QFrame(self)
+        panel.setObjectName("sidePanel")
+        panel.setProperty("class", "cardFrame")
+        # The card style pads the frame by about 9 px a side, which pushed the 328 px camera tile off-centre
+        # and clipped its right edge; the layout margins below already provide the breathing room.
+        panel.setStyleSheet("QFrame#sidePanel { padding: 0px; }")
+        # Wide enough for the docked camera tile at its full size (it is not shrunk to fit the panel).
+        self._panel_expanded_w = FEED_W + px(16)
+        self._panel_collapsed_w = px(92)
+        panel.setFixedWidth(self._panel_expanded_w)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(px(8), px(6), px(8), px(8))
+        outer.setSpacing(px(4))
+        self.docked_feed = DockedFeed(panel)
+        outer.addWidget(self.docked_feed, 0, Qt.AlignHCenter)
+        # Status, layers and route scroll if the window is too short to hold
+        # them; the path actions below stay pinned and always fully visible.
+        scroll = QScrollArea(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("transparentRow")
+        scroll.viewport().setAutoFillBackground(False)
+        body = QWidget()
+        body.setObjectName("transparentRow")
+        v = QVBoxLayout(body)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(px(4))
+
+        # MAP ------------------------------------------------------------
+        # The header stays outside the scroll area so the collapse button is
+        # always reachable.
+        head = QHBoxLayout()
+        head.setSpacing(px(4))
+        self.lbl_map_caption = self._section_caption("MAP")
+        head.addWidget(self.lbl_map_caption)
+        self.pill_status = QLabel("NO DATA", self)
+        self.pill_status.setObjectName("mapPill")
+        self.pill_status.setMinimumHeight(px(18))
+        self.pill_status.setStyleSheet("QLabel#mapPill { font-size: 9px; padding: 0 6px; }")
+        self.pill_status.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.pill_status.setAlignment(Qt.AlignCenter)
+        # Floored on today's text only, then grown further in _refresh_map_pill()
+        # as wider states are actually seen.
+        self._fit_button_to_text(self.pill_status)
+        self.badge_source = self.pill_status  # Backward-compatible alias
+        head.addWidget(self.pill_status)
+        head.addStretch(1)
+        # The fold/unfold arrow lives in the camera tile's header (ui/docked_feed.py), left of "FPV".
+        self.btn_collapse_panel = self.docked_feed.btn_collapse
+        self.docked_feed.collapse_requested.connect(lambda: self.set_panel_collapsed(not self._panel_collapsed))
+        outer.addLayout(head)
+        self._panel_head_row = head
 
         # ROUTE ----------------------------------------------------------
-        v.addWidget(self._cluster_rule_h())
+        # Clear route lives in the MAP row at the top of the panel (added to that row below):
+        # a fixed spot, so the stops list growing under a Shift+click never pushes it around.
+        self.btn_clear_goal = QPushButton("Clear route", self)
+        self.btn_clear_goal.setObjectName("mapTool")
+        self.btn_clear_goal.setToolTip("Clear the staged goal and its planned path")
+        self._fit_button_to_text(self.btn_clear_goal)
+        self.btn_clear_goal.clicked.connect(self._handle_clear_goal)
+        # Red, so it is plainly there (it was shrunk to a faint small strip): red outline and text with a faint
+        # red wash, solid red on hover. Outlined rather than filled - it is still a secondary action next to
+        # EXECUTE.
+        self.btn_clear_goal.setStyleSheet(
+            f"QPushButton#mapTool {{ font-size: 12px; font-weight: 600; min-height: {px(22)}px; max-height: {px(22)}px;"
+            " padding: 3px 12px;"
+            " color: #f85149; border: 1px solid #f85149; border-radius: 4px;"
+            " background-color: rgba(248, 81, 73, 0.12); }"
+            "QPushButton#mapTool:hover:!disabled { background-color: #da3633; color: #ffffff; }"
+            "QPushButton#mapTool:disabled { color: #6e7681; border: 1px solid #30363d;"
+            " background-color: transparent; }")
+        head.addWidget(self.btn_clear_goal)
         v.addWidget(self._section_caption("ROUTE"))
-        self.lbl_route_idle = QLabel("Click the map to stage a goal.\nShift+click adds more stops.", self)
+
+        # Both tips on one line, divided by a dim "|".
+        self.lbl_route_idle = QLabel(
+            "Click: set goal <span style='color:#484f58'>&nbsp;|&nbsp;</span> Shift+click: add stop", self)
         self.lbl_route_idle.setObjectName("fieldSubLabel")
-        self.lbl_route_idle.setWordWrap(True)
+        self.lbl_route_idle.setTextFormat(Qt.RichText)
+        self.lbl_route_idle.setWordWrap(False)
         v.addWidget(self.lbl_route_idle)
 
         self.lbl_path_info = QLabel("", self)
@@ -1621,12 +1713,6 @@ class SLAMMapWidget(QWidget):
 
         self.mission_panel = self._build_mission_panel()
         v.addWidget(self.mission_panel)
-        self.btn_clear_goal = QPushButton("Clear route", self)
-        self.btn_clear_goal.setObjectName("mapTool")
-        self.btn_clear_goal.setToolTip("Clear the staged goal and its planned path")
-        self._fit_button_to_text(self.btn_clear_goal)
-        self.btn_clear_goal.clicked.connect(self._handle_clear_goal)
-        v.addWidget(self.btn_clear_goal)
         v.addStretch(1)
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
@@ -1681,7 +1767,9 @@ class SLAMMapWidget(QWidget):
         self.btn_abort_path.clicked.connect(self._handle_abort_path)
         run_row.addWidget(self.btn_abort_path)
         v.addLayout(run_row)
-        for b in (self.btn_execute_path, self.btn_pause_path, self.btn_abort_path):
+        # EXECUTE moves the aircraft, so it stays clearly visible, but no longer needs the full-height block.
+        self.btn_execute_path.setMinimumHeight(px(30))
+        for b in (self.btn_pause_path, self.btn_abort_path):
             b.setMinimumHeight(px(38))
 
         self._scroll_area = scroll
@@ -1700,7 +1788,7 @@ class SLAMMapWidget(QWidget):
         self.status_strip.setObjectName("mapStatusStrip")
         h = QHBoxLayout(self.status_strip)
         h.setContentsMargins(px(10), px(3), px(10), px(3))
-        h.setSpacing(px(16))
+        h.setSpacing(px(8))
         self.lbl_pose = QLabel("", self)
         self.lbl_pose.setObjectName("statusPose")
         h.addWidget(self.lbl_pose)
@@ -1708,6 +1796,15 @@ class SLAMMapWidget(QWidget):
         self.lbl_uncert = QLabel("", self)
         self.lbl_uncert.setObjectName("statusUncert")
         h.addWidget(self.lbl_uncert)
+        # The controls hint used to sit on the map permanently. It now shows for a few seconds on each visit
+        # to this tab (and while measuring); this "?" keeps it one hover away.
+        self.lbl_help = QLabel("?", self)
+        self.lbl_help.setObjectName("statusUncert")
+        self.lbl_help.setToolTip("Left click: set goal\nRight click: menu\nRight-drag: pan\nAlt + left-drag: rotate (Shift snaps to 15\u00b0)\nScroll: zoom")
+        h.addWidget(self.lbl_help)
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.timeout.connect(self._hide_controls_hint)
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_status_strip)
         self._status_timer.start(250)
@@ -1739,6 +1836,27 @@ class SLAMMapWidget(QWidget):
         rule.setFixedHeight(1)
         return rule
 
+    def set_feed_docked(self, docked: bool) -> None:
+        """Docked tile visible (unless the panel is folded away); False hands the feed to the floating window."""
+        self._feed_docked = bool(docked)
+        self.docked_feed.set_mode(self._feed_docked, self._panel_collapsed, self._feed_compact)
+        self._fit_feed()
+
+    def _fit_feed(self) -> None:
+        """Never squeeze the controls below the camera: when the side panel is too short for the full picture, the tile
+        folds down to its header strip (arrow, FPV, pop-out, fullscreen) and comes back when there is room again."""
+        feed = self.docked_feed
+        if not self._feed_docked or self._panel_collapsed or not hasattr(self, "side_panel"):
+            return
+        from ui.docked_feed import FEED_H
+        need = self.side_panel.layout().minimumSize().height()
+        if feed.is_compact():
+            need += FEED_H - feed.height()                 # what it needs with the picture back
+        compact = self.side_panel.height() < need
+        if compact != self._feed_compact:
+            self._feed_compact = compact
+            feed.set_mode(True, False, compact)
+
     def panel_collapsed(self) -> bool:
         return self._panel_collapsed
 
@@ -1751,10 +1869,9 @@ class SLAMMapWidget(QWidget):
         for w in (self._scroll_area, self.lbl_map_caption, self.pill_status,
                   self._lbl_alt_caption, self.combo_alt):
             w.setVisible(not c)
-        self._panel_outer.setStretch(2, 1 if c else 0)
+        self.set_feed_docked(self._feed_docked)
+        self._panel_outer.setStretch(3, 1 if c else 0)
         self._run_row.setDirection(QBoxLayout.TopToBottom if c else QBoxLayout.LeftToRight)
-        self.btn_collapse_panel.setText("\u2039" if c else "\u203a")
-        self.btn_collapse_panel.setToolTip("Show the side panel" if c else "Hide the side panel (keeps the path actions)")
         self._apply_action_visibility(running=self._actions_running)
         self.canvas.update()
 
@@ -1791,8 +1908,7 @@ class SLAMMapWidget(QWidget):
         for text, tip, fn in (
                 ("▲", "Move selected stop earlier", lambda: self._move_selected(-1)),
                 ("▼", "Move selected stop later", lambda: self._move_selected(+1)),
-                ("✕", "Remove selected stop", self._remove_selected),
-                ("Clear", "Clear the whole mission", self._handle_clear_goal)):
+                ("✕", "Remove selected stop", self._remove_selected)):
             b = QPushButton(text, panel)
             b.setObjectName("mapTool")
             b.setToolTip(tip)
@@ -1919,6 +2035,77 @@ class SLAMMapWidget(QWidget):
         "mapTool": 20, "segItem": 22, "mapDanger": 20, "mapPill": 22,
         "btnGo": 24, "btnHold": 24, "btnAbort": 24,
     }
+
+    def _place_flight_bar(self) -> None:
+        """Keep everything on the toolbar's one line when it fits.
+
+        Not enough width: the flight bar moves to a row of its own above. Still not enough: the layers
+        and Reset Map join it there. Nothing is ever clipped or pushed off-screen.
+        """
+        r1, bar, card = self._header_r1, self.flight_bar, self._header_card
+        m = card.layout().contentsMargins()
+        om = self.layout().contentsMargins()
+        avail = self.width() - om.left() - om.right() - m.left() - m.right()
+        gap = r1.spacing()
+        bar_w = bar.sizeHint().width() + gap
+        map_w = self._reset_wrap.sizeHint().width() + gap
+        if not self.layers_section.isHidden():
+            map_w += self.layers_section.sizeHint().width() + gap
+        cur = self._header_state
+        base = r1.minimumSize().width()
+        if cur == 0:
+            base -= bar_w + map_w
+        elif cur == 1:
+            base -= map_w
+        # A margin, not an exact fit: the layout's own minimum is a little optimistic and an exact fit left
+        # neighbouring buttons touching at large UI scale.
+        margin = px(12)
+        if avail >= base + bar_w + map_w + margin:
+            new = 0
+        elif avail >= base + map_w + margin:
+            new = 1
+        else:
+            new = 2
+        if new != cur:
+            self._apply_header_state(new)
+
+    def _apply_header_state(self, state: int) -> None:
+        r1, row = self._header_r1, self._flight_row
+        movers = (self.layers_section, self._reset_wrap, self.flight_bar)
+        for w in movers:
+            r1.removeWidget(w)
+            row.removeWidget(w)
+        if state == 0:
+            r1.insertWidget(r1.indexOf(self.context_stack), self.layers_section)
+            r1.insertWidget(r1.indexOf(self.context_stack) + 1, self._reset_wrap)
+            r1.addWidget(self.flight_bar)
+        elif state == 1:
+            r1.insertWidget(r1.indexOf(self.context_stack), self.layers_section)
+            r1.insertWidget(r1.indexOf(self.context_stack) + 1, self._reset_wrap)
+            row.addWidget(self.flight_bar)
+        else:
+            row.insertWidget(0, self.layers_section)
+            row.insertWidget(1, self._reset_wrap)
+            row.addWidget(self.flight_bar)
+        self._header_state = state
+        self.flight_row_host.setVisible(state > 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_flight_bar()
+        self._fit_feed()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._place_flight_bar()
+        self._fit_feed()
+        self.canvas.show_controls_hint = True
+        self.canvas.update()
+        self._hint_timer.start(12000)
+
+    def _hide_controls_hint(self) -> None:
+        self.canvas.show_controls_hint = False
+        self.canvas.update()
 
     def _fit_button_to_text(self, widget, extra_labels: tuple = ()) -> None:
         """Floor a button/label's width at what its text(s) actually need.
@@ -2138,6 +2325,7 @@ class SLAMMapWidget(QWidget):
             self.canvas.setFocus()
         else:
             self.lbl_ruler.setText("")
+        self.map_overlay.adjustSize()
 
     def _on_ruler_changed(self, total_m: float, point_count: int):
         segments = max(0, point_count - 1)
@@ -2147,6 +2335,7 @@ class SLAMMapWidget(QWidget):
             self.lbl_ruler.setText(f"{total_m:.2f} m")
         else:
             self.lbl_ruler.setText(f"{total_m:.2f} m  ({segments} segs)")
+        self.map_overlay.adjustSize()
 
     def _on_altitude_selected(self, text: str):
         val = self.get_cruise_altitude()

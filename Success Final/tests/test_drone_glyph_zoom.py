@@ -56,12 +56,12 @@ class DroneGlyphZoomTest(unittest.TestCase):
         cls.canvas.set_drone_pose(0.0, 0.0, 0.0)
 
     def test_glyph_grows_when_zooming_in(self):
-        self.assertGreater(_front_prop_span(self.canvas, 72.0),
-                           _front_prop_span(self.canvas, 36.0) * 1.6)
+        self.assertGreater(_front_prop_span(self.canvas, 260.0),
+                           _front_prop_span(self.canvas, 150.0) * 1.6)
 
     def test_glyph_shrinks_when_zooming_out(self):
-        self.assertLess(_front_prop_span(self.canvas, 18.0),
-                        _front_prop_span(self.canvas, 36.0) * 0.7)
+        self.assertLess(_front_prop_span(self.canvas, 75.0),
+                        _front_prop_span(self.canvas, 150.0) * 0.7)
 
     def test_glyph_never_vanishes_when_fully_zoomed_out(self):
         self.assertGreater(_front_prop_span(self.canvas, 4.0), 0)
@@ -75,7 +75,11 @@ class DroneGlyphZoomTest(unittest.TestCase):
                          _front_prop_span(self.canvas, cap * 2))
 
     def test_default_zoom_is_the_designed_size(self):
-        self.assertEqual(self.m.DRONE_GLYPH_REF_SCALE, 36.0)
+        self.assertEqual(self.m.DRONE_GLYPH_REF_SCALE, 150.0)
+        self.assertEqual(self.canvas.scale, self.m.DRONE_GLYPH_REF_SCALE)
+        self.canvas.scale = 33.0
+        self.canvas.reset_view()
+        self.assertEqual(self.canvas.scale, 150.0)
 
 
 if __name__ == "__main__":

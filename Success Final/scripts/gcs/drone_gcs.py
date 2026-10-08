@@ -102,9 +102,10 @@ from core.planner_worker import PlannerWorker
 from protocol.mavlink_worker import MAVLinkWorker
 from protocol.ros2_map_listener import ROS2MapListener, SlamMapResetWorker
 from ui.styles import build_stylesheet
-from ui.scaling import init_scale, enable_high_dpi, px
+from ui.scaling import init_scale, enable_high_dpi, px, fit_min_width
 from ui.toast import NotificationToast
 from ui.hud_widget import HUDWidget
+from ui.preflight_panel import ACTION_TAB
 from ui.slam_map_widget import SLAMMapWidget
 from ui.cli_console import CLIConsoleWidget
 from ui.motor_widget import MotorWidget
@@ -320,6 +321,14 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_fpv.frame_broadcast.connect(self.fpv_fullscreen.sink.on_frame)
         self.page_fpv.fullscreen_requested.connect(self.fpv_fullscreen.open)
         self.page_fpv.health_changed.connect(self._on_video_health)
+        self._fpv_popped_out = False       # the SLAM feed is docked in the side panel unless popped out
+        # Camera: docked at the top of the SLAM side panel (full floating-window size). The same
+        # single capture thread feeds it; POP OUT hands the feed to the floating window instead.
+        self.page_fpv.frame_broadcast.connect(self.page_slam.docked_feed.sink.on_frame)
+        self.page_slam.docked_feed.fullscreen_requested.connect(self.fpv_fullscreen.open)
+        self.page_slam.docked_feed.popout_requested.connect(lambda: self._set_fpv_popped_out(True))
+        self.page_slam.docked_feed.dock_requested.connect(lambda: self._set_fpv_popped_out(False))
+        self.fpv_float.closed.connect(lambda: self._set_fpv_popped_out(False))
         self.page_fpv.frame_broadcast.connect(self.sidebar.mini_feed.on_frame)
         self.page_fpv.health_changed.connect(self.sidebar.mini_feed.set_health)
         self.sidebar.mini_feed.fullscreen_requested.connect(self.fpv_fullscreen.open)
@@ -423,7 +432,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.stack.addWidget(self.page_fpv)
 
         # Page 2: Tactical 2D SLAM & Waypoint Stager
-        self.page_slam = SLAMMapWidget(self, rviz_config=resolve_rviz_config(self.settings))
+        self.page_slam = SLAMMapWidget(self, rviz_config=resolve_rviz_config(self.settings),
+                                    flight_modes=PX4_MODES_LIST)
         self.page_slam.execute_path_requested.connect(self._on_execute_path_requested)
         self.page_slam.pause_path_requested.connect(self._on_pause_path_requested)
         self.page_slam.resume_path_requested.connect(self._on_resume_path_requested)
@@ -435,6 +445,13 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_slam.altitude_changed.connect(self._on_cruise_altitude_changed)
         self.page_slam.reset_map_requested.connect(self._on_reset_map_requested)
         self.page_slam.fly_here_requested.connect(self._on_fly_here_requested)
+        # Header ARM / DISARM / MODE: the same handlers as the Control tab (ARM slides to confirm, DISARM is a single click).
+        self.page_slam.flight_bar.arm_requested.connect(self._request_arm)
+        self.page_slam.flight_bar.disarm_requested.connect(self._cmd_disarm)
+        self.page_slam.flight_bar.mode_requested.connect(self._cmd_mode)
+        # "Fix first" in the left rail's checklist jumps to the page that shows that check.
+        self.sidebar.checklist.action_requested.connect(
+            lambda key: self._switch_workspace(ACTION_TAB.get(key, 0)))
         self.page_slam.attach_planner_worker(self.planner_worker)
         self.page_slam.set_map_stale_after(self.settings.alerts.map_stall_s)
         self.stack.addWidget(self.page_slam)
@@ -756,6 +773,9 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             cell.addWidget(cap)
             val = QLabel("0.00" if key == "spd" else "+0.00", self)
             val.setObjectName("execReadout")
+            # Each value owns a slot wide enough for its widest reading, so a number gaining a digit or a
+            # sign never shunts its neighbours.
+            fit_min_width(val, ["-000.00", "+000.00", "00.00"], h_pad_px=6)
             val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             cell.addWidget(val)
             cell.addStretch()
@@ -788,9 +808,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # ---- Interactive Terminal / Console Bar ----
         self.console = CLIConsoleWidget(self)
         self.console.command_submitted.connect(self._execute_cli_command)
-        # A floor, because inside the scroll area a stretch factor alone would
-        # let the console collapse to nothing on a short window.
-        self.console.setMinimumHeight(px(150))
+        # Takes the column's spare height (no empty gap above it), with a floor of 10 log lines (see
+        # CLIConsoleWidget). Its size follows the window only; arriving text never resizes it.
         rl.addWidget(self.console, 1)
 
         # The command column scrolls rather than compressing. Every control in
@@ -961,6 +980,12 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
                       ("ON" if self.audio.available else "UNAVAILABLE")),
         }
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Wide rail only when the window can spare it (see SidebarNav.set_wide).
+        if hasattr(self, "sidebar"):
+            self.sidebar.set_wide(self.width() >= px(self.sidebar.WIDE_MIN_WINDOW_PX))
+
     def _on_view_changed(self, idx: int):
         self.stack.setCurrentIndex(idx)
         page = self.stack.widget(idx)
@@ -975,9 +1000,9 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         if mini or page in (self.page_fpv, self.page_cockpit, self.page_slam):
             self.page_fpv.ensure_started()
 
-        # The floating viewport belongs to the SLAM workspace: while flying a
-        # planned route you want the map full-size and the camera beside it.
-        if page is self.page_slam:
+        # On the SLAM workspace the camera is docked in the side panel; the floating
+        # window only appears when the operator pops it out.
+        if page is self.page_slam and self._fpv_popped_out:
             first = not self.fpv_float.isVisible()
             if first:
                 self._position_fpv_float()
@@ -999,6 +1024,18 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         if page is self.page_params and not self.page_params.has_data():
             self._request_param_refresh()
 
+    def _set_fpv_popped_out(self, popped: bool) -> None:
+        """Dock the SLAM camera in the side panel (False) or float it as a movable window (True)."""
+        self._fpv_popped_out = bool(popped)
+        self.page_slam.set_feed_docked(not popped)
+        on_slam = self.stack.currentWidget() is self.page_slam
+        if popped and on_slam:
+            self._position_fpv_float()
+            self.fpv_float.show()
+            self.fpv_float.raise_()
+        elif not popped:
+            self.fpv_float.hide()
+
     def _position_fpv_float(self):
         """Park the floating viewport over the map's top-left corner.
 
@@ -1010,6 +1047,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         canvas = self.page_slam.canvas
         margin = 12
         corner = canvas.mapToGlobal(canvas.rect().topLeft())
+        # Clear of the small Inflation / Keep-out / Measure strip on the map's top-left.
+        corner.setX(corner.x() + self.page_slam.map_overlay.width() + 8)
         if canvas.width() < 50:           # page not laid out yet: fall back to the window corner
             corner = self.mapToGlobal(self.rect().topLeft())
             margin = 160
@@ -1105,6 +1144,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
 
     def _on_connection_changed(self, connected: bool, message: str):
         self.top_strip.set_connection_state(connected, message)
+        if not connected:
+            self.page_slam.flight_bar.set_state(False, False)
         self.page_params.set_connected(connected)
         if connected:
             # A new link may be a different vehicle: forget the old motor scale,
@@ -1323,6 +1364,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_slam.canvas.set_position_uncertainty(
             t.pos_var_n, t.pos_var_e, t.pos_var_time)
         self.page_slam.set_armed_state(t.armed)
+        self.page_slam.flight_bar.set_state(t.connected, t.armed, t.flight_mode)
         t.check_motor_staleness()
         self.page_motors.update_pwms(t.motor_pwms, age_s=t.motor_age)
 

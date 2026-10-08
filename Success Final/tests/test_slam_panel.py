@@ -31,11 +31,97 @@ class PanelTest(unittest.TestCase):
         return widget.isVisibleTo(self.w)
 
     def test_map_state_layers_and_tools_live_in_the_side_panel(self):
-        for name in ("pill_status", "btn_reset_map", "btn_layer_raw", "btn_layer_thin", "btn_layer_both",
-                     "btn_inflation", "btn_keepout", "btn_ruler", "btn_execute_path", "btn_pause_path",
+        for name in ("pill_status", "btn_execute_path", "btn_pause_path",
                      "btn_abort_path", "btn_clear_goal", "lbl_path_info", "mission_panel"):
             self.assertTrue(getattr(self.w, name).parent() is not None, name)
             self.assertTrue(self.w.side_panel.isAncestorOf(getattr(self.w, name)), name)
+
+    def test_layers_and_reset_map_are_in_the_top_toolbar_and_map_tools_on_the_map(self):
+        for name in ("btn_layer_raw", "btn_layer_thin", "btn_layer_both", "btn_reset_map"):
+            self.assertFalse(self.w.side_panel.isAncestorOf(getattr(self.w, name)), name)
+        for name in ("btn_inflation", "btn_keepout", "btn_ruler"):
+            self.assertTrue(self.w.canvas.isAncestorOf(getattr(self.w, name)), name)
+            self.assertLess(getattr(self.w, name).height(), 30, name)
+
+    def test_clear_route_sits_in_the_map_row_and_never_moves(self):
+        self.w.resize(1400, 800)
+        self.w.show()
+        self.app.processEvents()
+        b = self.w.btn_clear_goal
+        y0 = b.mapTo(self.w, b.rect().topLeft())
+        for n in (1, 2, 4, 6):
+            self.w.canvas.mission_stops = [(float(i), 0.0) for i in range(n)]
+            self.w._on_mission_changed(self.w.canvas.mission_stops, [])
+            self.app.processEvents()
+            self.assertEqual(b.mapTo(self.w, b.rect().topLeft()), y0, f"moved with {n} stops")
+        # on the MAP row (same line as the map caption and its status pill), left of the collapse button
+        cy = lambda w: w.mapTo(self.w, w.rect().center()).y()
+        self.assertLess(abs(cy(b) - cy(self.w.lbl_map_caption)), 8)
+        self.assertLess(abs(cy(b) - cy(self.w.pill_status)), 8)
+        # and above the ROUTE heading, the hint and the stops list
+        route = [l for l in self.w.findChildren(type(self.w.lbl_map_caption)) if l.text() == "ROUTE"][0]
+        self.assertLess(y0.y(), route.mapTo(self.w, route.rect().topLeft()).y())
+        self.assertLess(y0.y(), self.w.lbl_route_idle.mapTo(self.w, self.w.lbl_route_idle.rect().topLeft()).y())
+        # still fully inside the panel
+        self.assertTrue(self.w.side_panel.rect().contains(
+            b.mapTo(self.w.side_panel, b.rect().bottomRight())))
+
+    def test_the_fold_arrow_is_top_left_in_the_camera_header_before_the_fpv_title(self):
+        self.w.resize(1400, 800)
+        self.w.show()
+        self.app.processEvents()
+        feed, arrow = self.w.docked_feed, self.w.btn_collapse_panel
+        self.assertTrue(feed.isAncestorOf(arrow))
+        self.assertLess(arrow.mapTo(self.w, arrow.rect().topLeft()).x(),
+                        feed.lbl_title.mapTo(self.w, feed.lbl_title.rect().topLeft()).x())
+        self.assertLess(abs(arrow.mapTo(self.w, arrow.rect().center()).y()
+                            - feed.lbl_title.mapTo(self.w, feed.lbl_title.rect().center()).y()), 6)
+        # small, and no longer in the MAP row
+        self.assertLessEqual(arrow.width(), 24)
+        self.assertFalse(self.w._panel_head_row.indexOf(arrow) >= 0)
+        # points the way the panel will go, and flips when folded
+        self.assertFalse(arrow.folded)
+        self.w.set_panel_collapsed(True)
+        self.assertTrue(arrow.folded)
+        self.assertIn("Show", arrow.toolTip())
+        self.w.set_panel_collapsed(False)
+        self.assertIn("Hide", arrow.toolTip())
+
+    def test_the_stops_box_has_no_second_clear_button(self):
+        texts = [b.text() for b in self.w.mission_panel.findChildren(type(self.w.btn_clear_goal))]
+        self.assertNotIn("Clear", texts)            # Clear route (MAP row) is the only one
+        self.assertEqual(texts, ["\u25b2", "\u25bc", "\u2715"])
+
+    def test_the_two_route_tips_share_one_line_with_a_divider(self):
+        self.w.resize(1400, 800)
+        self.w.show()
+        self.app.processEvents()
+        lbl = self.w.lbl_route_idle
+        self.assertIn("Click: set goal", lbl.text())
+        self.assertIn("Shift+click: add stop", lbl.text())
+        self.assertIn("|", lbl.text())
+        self.assertNotIn("\n", lbl.text())
+        self.assertLess(lbl.height(), lbl.fontMetrics().height() * 2)          # one line, not two
+        self.assertGreaterEqual(lbl.width(), lbl.sizeHint().width())          # and it fits in the panel
+
+    def test_camera_is_centred_in_the_panel(self):
+        self.w.resize(1400, 800)
+        self.w.show()
+        self.app.processEvents()
+        f, p = self.w.docked_feed, self.w.side_panel
+        left = f.mapTo(p, f.rect().topLeft()).x()
+        right = p.width() - (left + f.width())
+        self.assertLessEqual(abs(left - right), 2)
+
+    def test_clear_route_is_red_and_easy_to_see_and_execute_is_shorter_than_pause_abort(self):
+        self.w.resize(1400, 800)
+        self.w.show()
+        self.app.processEvents()
+        self.assertGreaterEqual(self.w.btn_clear_goal.height(), 28)
+        self.assertLessEqual(self.w.btn_clear_goal.height(), 36)
+        self.assertIn("#f85149", self.w.btn_clear_goal.styleSheet())     # red text and outline
+        self.assertLess(self.w.btn_execute_path.minimumHeight(), self.w.btn_abort_path.minimumHeight())
+        self.assertGreaterEqual(self.w.btn_execute_path.minimumHeight(), 28)
 
     def test_cruise_altitude_is_labelled_as_such(self):
         texts = [lbl.text() for lbl in self.w.findChildren(type(self.w.lbl_map_caption))]
@@ -70,8 +156,9 @@ class PanelTest(unittest.TestCase):
         self.assertFalse(self.vis(self.w.btn_abort_path))
 
     def test_action_buttons_are_large(self):
-        for b in (self.w.btn_execute_path, self.w.btn_pause_path, self.w.btn_abort_path):
+        for b in (self.w.btn_pause_path, self.w.btn_abort_path):
             self.assertGreaterEqual(b.minimumHeight(), 36)
+        self.assertGreaterEqual(self.w.btn_execute_path.minimumHeight(), 28)
 
     def test_route_summary_replaces_the_idle_hint(self):
         self.assertTrue(self.vis(self.w.lbl_route_idle))
@@ -130,7 +217,7 @@ class PanelTest(unittest.TestCase):
 
     def test_toolbar_is_one_row(self):
         top = self.w.btn_view_2d.mapTo(self.w, self.w.btn_view_2d.rect().center()).y()
-        for b in (self.w.btn_zoom_in, self.w.btn_fit_map, self.w.btn_center):
+        for b in (self.w.btn_fit_map, self.w.btn_center):
             y = b.mapTo(self.w, b.rect().center()).y()
             self.assertLess(abs(y - top), 8, b.text())
 
@@ -178,8 +265,12 @@ class PanelTest(unittest.TestCase):
 
     # ── third pass: narrower panel and the collapse button
 
-    def test_panel_is_narrower_than_before(self):
-        self.assertLessEqual(self.w.side_panel.width(), 215)
+    def test_panel_is_only_as_wide_as_the_docked_camera_tile_needs(self):
+        # It used to be capped at 215 px. The camera now docks here at its full 328 px, so the panel is
+        # that plus margins - and no wider.
+        from ui.docked_feed import FEED_W
+        self.assertGreaterEqual(self.w.side_panel.width(), FEED_W)
+        self.assertLessEqual(self.w.side_panel.width(), FEED_W + 30)
 
     def test_stop_rows_are_short(self):
         self.w.canvas.mission_stops = [(1.0, 1.0), (2.0, -1.0)]
@@ -193,11 +284,11 @@ class PanelTest(unittest.TestCase):
         self.assertTrue(self.w.panel_collapsed())
         self.assertLess(self.w.side_panel.width(), 110)
         self.assertGreater(self.w.canvas.width(), before + 80)
-        for hidden in (self.w.btn_reset_map, self.w.btn_inflation, self.w.combo_alt, self.w.pill_status):
+        for hidden in (self.w.combo_alt, self.w.pill_status):
             self.assertFalse(self.vis(hidden))
         self.assertTrue(self.vis(self.w.btn_execute_path))
         self.assertTrue(self.vis(self.w.btn_collapse_panel))
-        self.assertEqual(self.w.btn_collapse_panel.text(), "\u2039")
+        self.assertTrue(self.w.btn_collapse_panel.folded)
 
     def test_collapsed_panel_still_shows_pause_and_abort_stacked_when_flying(self):
         self.w.set_panel_collapsed(True)
@@ -214,7 +305,6 @@ class PanelTest(unittest.TestCase):
         self.w.set_panel_collapsed(False)
         self.app.processEvents()
         self.assertFalse(self.w.panel_collapsed())
-        self.assertTrue(self.vis(self.w.btn_reset_map))
         self.assertTrue(self.vis(self.w.combo_alt))
         self.assertTrue(self.vis(self.w.btn_clear_goal))
 

@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from core import preflight as P
 from core import radxa_status as R
+from ui.styles import PALETTE
 
 
 def good(**kw):
@@ -194,9 +195,16 @@ class UiTest(unittest.TestCase):
         self.assertEqual(p.row("vision").lbl_value.text(), "LOST")
         self.assertEqual(p.row("link").state, P.PASS)
         self.assertEqual(p.row("battery").lbl_value.text(), "90%")
-        self.assertEqual(p.lbl_summary.text(), "2 TO FIX")
+        self.assertEqual(p.lbl_summary.text(), "5 of 7 ready")
         self.assertIn("NOT READY - 2 to fix", p.lbl_summary.toolTip())
-        self.assertTrue(p.lbl_detail.text().startswith("Next: Vision tracking"))
+        self.assertEqual(p.lbl_detail.text(), "Fix first: Vision tracking")
+        self.assertTrue(p.lbl_detail.is_clickable())
+        keys = []
+        p.action_requested.connect(keys.append)
+        p.lbl_detail.clicked.emit()
+        self.assertEqual(keys, ["vision"])
+        self.assertEqual(p.row("link").icon.text(), "\u2713")
+        self.assertEqual(p.row("vision").icon.text(), "\u2715")
         got = []
         p.heading_toggled.connect(got.append)
         p.chk_heading.setChecked(True)
@@ -283,7 +291,7 @@ class WindowTest(unittest.TestCase):
     def test_arm_reaches_the_confirm_bar_even_when_every_line_is_red(self):
         w = self.win
         self.worst_case()
-        self.assertIn("TO FIX", w.sidebar.checklist.lbl_summary.text())     # it does show the problems
+        self.assertIn(" of ", w.sidebar.checklist.lbl_summary.text())     # it does show the problems
         with mock.patch.object(w, "_require_link", return_value=True):
             w._request_arm()
         self.assertEqual(w.confirm_bar.request.call_args[0][0], "arm")
@@ -364,7 +372,7 @@ class WindowTest(unittest.TestCase):
         self.assertEqual(w.sidebar.checklist.lbl_summary.toolTip(), "READY TO ARM")
         w._video_state = "NO SIGNAL"
         w._refresh_preflight(force=True)
-        self.assertEqual(w.sidebar.checklist.lbl_summary.text(), "1 TO FIX")
+        self.assertEqual(w.sidebar.checklist.lbl_summary.text(), "6 of 7 ready")
         self.assertIn("NOT READY", w.sidebar.checklist.lbl_summary.toolTip())
 
 
@@ -399,15 +407,16 @@ class WindowTest(unittest.TestCase):
         w._refresh_preflight(force=True)
         self.app.processEvents()
         panel = w.sidebar.checklist
-        self.assertEqual(panel.lbl_summary.text(), "1 TO FIX")
+        self.assertEqual(panel.lbl_summary.text(), "6 of 7 ready")
         self.assertIn("Camera feed", panel.lbl_summary.toolTip())
-        self.assertEqual(panel.lbl_detail.text(), "Next: Camera feed - Video is frozen.")
+        self.assertEqual(panel.lbl_detail.text(), "Fix first: Camera feed")
+        self.assertIn("Video is frozen.", panel.lbl_detail.toolTip())
         self.assertEqual(panel.row("video").lbl_value.text(), "FROZEN")
         self.assertEqual(panel.row("video").state, P.FAIL)
         self.assertEqual(panel.row("link").lbl_value.text(), "OK")
-        colours = panel.bar.segment_colours()
-        self.assertEqual(len(colours), 7)                               # one per required check
-        self.assertEqual(len(set(colours)), 2)                          # passing and the one failing
+        self.assertAlmostEqual(panel.bar.fraction(), 6 / 7)             # 6 of the 7 required checks pass
+        self.assertEqual(panel.bar.colour(), PALETTE["danger"])         # ONE colour: a required check failed
+        self.assertEqual(panel.row("video").icon.text(), "\u2715")
         for key, row in panel._labels.items():
             if row.isVisible():
                 self.assertLessEqual(row.sizeHint().width(), w.sidebar.width(), key)
@@ -418,7 +427,9 @@ class WindowTest(unittest.TestCase):
         panel = w.sidebar.checklist
         self.assertEqual(panel.lbl_summary.text(), "READY")
         self.assertEqual(panel.lbl_detail.text(), "All required checks passed.")
-        self.assertEqual(len(set(panel.bar.segment_colours())), 1)
+        self.assertEqual(panel.bar.fraction(), 1.0)
+        self.assertEqual(panel.bar.colour(), PALETTE["ok"])
+        self.assertFalse(panel.lbl_detail.is_clickable())
 
     def test_the_card_gives_up_height_in_steps_and_never_taxes_the_rail(self):
         w = self.win

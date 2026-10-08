@@ -525,6 +525,15 @@ QPushButton:disabled {
    buttons that actually command the aircraft, and a solid block separates
    them at a glance from the neutral controls that only change a view. White
    text on the fill keeps contrast high at every state colour. */
+/* Flight-state chip beside the SLAM header's mode box. Neutral unless something matters. */
+QLabel#flightStateChip {
+    background-color: transparent; color: $text_muted;
+    border: 1px solid $border; border-radius: 4px; padding: 0 8px;
+    font-weight: 600; letter-spacing: 0.6px;
+}
+QLabel#flightStateChip[state="armed"]   { color: $warn;   border: 1px solid $warn_dim; }
+QLabel#flightStateChip[state="offline"] { color: $danger; border: 1px solid $danger_dim; }
+
 QPushButton#btnArm {
     background-color: $ok_dim; color: #ffffff;
     border: 1px solid $ok; font-size: 12px;
