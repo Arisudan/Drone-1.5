@@ -76,7 +76,7 @@ class FlightCommandsMixin:
             vmin=self.TAKEOFF_ALT_MIN_M, vmax=self.TAKEOFF_ALT_MAX_M,
             vinit=seed, unit="m", step=0.1,
             detail="Vehicle must already be armed.",
-            confirm_text="Slide to take off", anchor=self.btn_takeoff)
+            confirm_text="Slide to take off", anchor=self._flight_anchor(self.btn_takeoff, "btn_takeoff"))
 
     def _request_yaw(self):
         if not self._require_link("rotate yaw"):

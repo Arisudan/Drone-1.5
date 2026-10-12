@@ -449,6 +449,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         self.page_slam.flight_bar.arm_requested.connect(self._request_arm)
         self.page_slam.flight_bar.disarm_requested.connect(self._cmd_disarm)
         self.page_slam.flight_bar.mode_requested.connect(self._cmd_mode)
+        self.page_slam.flight_bar.takeoff_requested.connect(self._request_takeoff)
         # "Fix first" in the left rail's checklist jumps to the page that shows that check.
         self.sidebar.checklist.action_requested.connect(
             lambda key: self._switch_workspace(ACTION_TAB.get(key, 0)))

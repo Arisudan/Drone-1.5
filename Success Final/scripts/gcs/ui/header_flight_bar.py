@@ -20,7 +20,8 @@ STATE CHIP: a small neutral label left of the mode box reads "DISARMED", "ARMED"
 thing here that changes with state, and it takes colour only when something matters: amber while ARMED, red text
 with NO LINK. Information only - it never gates a button.
 
-STATE: set_state(...) keeps the mode box on the vehicle's actual mode unless the operator has the list open.
+STATE: set_state(...) moves the mode box when the vehicle's mode changes, never while the operator is choosing one.
+TAKEOFF raises takeoff_requested; the main window routes it to the Control tab's slide-to-confirm altitude handler.
 ================================================================================
 """
 
@@ -40,6 +41,7 @@ class HeaderFlightBar(QWidget):
     arm_requested = pyqtSignal()
     disarm_requested = pyqtSignal()
     mode_requested = pyqtSignal(str)
+    takeoff_requested = pyqtSignal()
 
     HEIGHT_PX = 32
     FONT_PX = 12   # one size for all four controls (ARM used to be larger than the rest)
@@ -82,18 +84,25 @@ class HeaderFlightBar(QWidget):
         self.btn_disarm.clicked.connect(self.disarm_requested)
         row.addWidget(self.btn_disarm)
 
+        self.btn_takeoff = QPushButton("TAKEOFF", self)
+        self.btn_takeoff.setObjectName("btnNav")
+        self.btn_takeoff.setToolTip("Take off (vehicle must be armed) - same as the Control tab")
+        self.btn_takeoff.clicked.connect(self.takeoff_requested)
+        row.addWidget(self.btn_takeoff)
+        self._vehicle_mode = ""
+
         # One height and one font size for the whole row.
         h = px(self.HEIGHT_PX)
         self.setStyleSheet(f"QPushButton, QComboBox, QLabel#flightStateChip "
                            f"{{ font-size: {self.FONT_PX}px; min-height: 0px; }}")
-        for w in (self.lbl_state, self.combo_mode, self.btn_set_mode, self.btn_arm, self.btn_disarm):
+        for w in (self.lbl_state, self.combo_mode, self.btn_set_mode, self.btn_arm, self.btn_disarm, self.btn_takeoff):
             w.setFixedHeight(px(self.HEIGHT_PX))
         fit_min_width(self.lbl_state, ["DISARMED", "ARMED", "NO LINK"], h_pad_px=14)
-        for b, texts in ((self.btn_set_mode, ["SET MODE"]), (self.btn_arm, ["ARM"]), (self.btn_disarm, ["DISARM"])):
+        for b, texts in ((self.btn_set_mode, ["SET MODE"]), (self.btn_arm, ["ARM"]), (self.btn_disarm, ["DISARM"]), (self.btn_takeoff, ["TAKEOFF"])):
             fit_min_width(b, texts)
         # ARM and DISARM are a pair: same width, so the row reads as one even strip.
         # sizeHint included: the measured floor alone came out 3 px short of the real text at this font size.
-        for b in (self.btn_set_mode, self.btn_arm, self.btn_disarm):
+        for b in (self.btn_set_mode, self.btn_arm, self.btn_disarm, self.btn_takeoff):
             b.setMinimumWidth(max(b.minimumWidth(), b.sizeHint().width()))
         pair = max(self.btn_arm.minimumWidth(), self.btn_disarm.minimumWidth(),
                    self.btn_arm.sizeHint().width(), self.btn_disarm.sizeHint().width())
@@ -112,7 +121,12 @@ class HeaderFlightBar(QWidget):
             self.lbl_state.style().unpolish(self.lbl_state)
             self.lbl_state.style().polish(self.lbl_state)
         self.lbl_state.setText(text)
-        if mode and not self.combo_mode.view().isVisible():
+        # Follow the vehicle only when ITS mode changes. Re-syncing on every telemetry tick snapped the box
+        # back to the old mode before SET MODE could be clicked, so the operator's pick never took effect.
+        changed = bool(mode) and mode != self._vehicle_mode
+        if mode:
+            self._vehicle_mode = mode
+        if changed and not self.combo_mode.view().isVisible():
             i = self.combo_mode.findText(mode)
             if i >= 0 and i != self.combo_mode.currentIndex():
                 self.combo_mode.blockSignals(True)

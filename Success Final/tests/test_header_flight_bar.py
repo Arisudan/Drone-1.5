@@ -49,6 +49,22 @@ class HeaderFlightBarTests(unittest.TestCase):
         self.bar.set_state(True, False, "AUTO.LAND")
         self.assertEqual(self.bar.combo_mode.currentText(), "AUTO.LAND")
 
+    def test_operator_pick_survives_telemetry_ticks(self):
+        self.bar.set_state(True, False, "STABILIZED")
+        self.bar.combo_mode.setCurrentText("POSCTL")
+        for _ in range(5):
+            self.bar.set_state(True, False, "STABILIZED")
+        self.assertEqual(self.bar.combo_mode.currentText(), "POSCTL")
+        self.bar.set_state(True, False, "AUTO.LAND")      # vehicle really changed mode
+        self.assertEqual(self.bar.combo_mode.currentText(), "AUTO.LAND")
+
+    def test_takeoff_button_is_blue_and_signals(self):
+        self.assertEqual(self.bar.btn_takeoff.objectName(), "btnNav")
+        got = []
+        self.bar.takeoff_requested.connect(lambda: got.append(1))
+        self.bar.btn_takeoff.click()
+        self.assertEqual(got, [1])
+
     def test_signals(self):
         got = []
         self.bar.arm_requested.connect(lambda: got.append("arm"))
@@ -66,12 +82,12 @@ class HeaderFlightBarTests(unittest.TestCase):
 class HeaderPlacementTests(unittest.TestCase):
     def test_same_line_top_right_no_clipping(self):
         w = SLAMMapWidget(flight_modes=MODES)
-        w.resize(1400, 800)   # a typical SLAM page; narrower ones wrap the bar onto its own row (next test)
+        w.resize(1600, 900)   # a wide SLAM page; narrower ones wrap the bar onto its own row (next test)
         w.show()
         app.processEvents()
         self.assertEqual(w._header_state, 0)
         bar = w.flight_bar
-        parts = [bar.combo_mode, bar.btn_set_mode, bar.btn_arm, bar.btn_disarm]
+        parts = [bar.combo_mode, bar.btn_set_mode, bar.btn_arm, bar.btn_disarm, bar.btn_takeoff]
         ys = {(p.mapTo(w, p.rect().topLeft()).y(), p.height()) for p in parts}
         self.assertEqual(len(ys), 1, f"not on one line / one height: {ys}")
         xs = [p.mapTo(w, p.rect().topLeft()).x() for p in parts]
@@ -115,7 +131,7 @@ class NarrowHeaderTests(unittest.TestCase):
                     for _ in range(4):
                         app.processEvents()
                     bar = w.flight_bar
-                    parts = [bar.combo_mode, bar.btn_set_mode, bar.btn_arm, bar.btn_disarm]
+                    parts = [bar.combo_mode, bar.btn_set_mode, bar.btn_arm, bar.btn_disarm, bar.btn_takeoff]
                     ys = {p.mapTo(w, p.rect().topLeft()).y() for p in parts}
                     self.assertEqual(len(ys), 1, (scale, size))
                     for p in parts:
@@ -190,6 +206,14 @@ class MainWindowWiringTests(unittest.TestCase):
         bar.combo_mode.setCurrentText("AUTO.LOITER")
         bar.btn_set_mode.click()
         self.win.worker.set_mode.assert_called_once_with("AUTO.LOITER")
+
+    def test_takeoff_uses_confirm_bar_with_altitude(self):
+        self._telemetry(True)
+        bar = self.win.page_slam.flight_bar
+        self.win.worker.reset_mock()
+        bar.btn_takeoff.click()
+        self.assertTrue(self.win.confirm_bar.isVisible())
+        self.win.worker.takeoff.assert_not_called()
 
 
 if __name__ == "__main__":
