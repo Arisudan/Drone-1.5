@@ -285,6 +285,12 @@ class ChecklistPanel(QWidget):
         self.lbl_detail.setFixedHeight(px(16))
         self.lbl_detail.clicked.connect(self._on_action_clicked)
         sb.addWidget(self.lbl_detail)
+        # Off by default: the checklist only informs. On, ARM is refused until every required check passes.
+        self.chk_enforce = QCheckBox("Block ARM until ready", self.summary_block)
+        self.chk_enforce.setObjectName("cfgToggle")
+        self.chk_enforce.setToolTip("ON: ARM is refused until every required check passes.\n"
+                                    "OFF: the checklist is information only and never affects ARM / DISARM.")
+        sb.addWidget(self.chk_enforce)
         self._action_key = ""
         root.addWidget(self.summary_block)
 
@@ -320,6 +326,9 @@ class ChecklistPanel(QWidget):
 
     def row(self, key: str) -> CheckRow:
         return self._labels[key]
+
+    def enforce_enabled(self) -> bool:
+        return self.chk_enforce.isChecked()
 
     def heading_confirmed(self) -> bool:
         return self.chk_heading.isChecked()

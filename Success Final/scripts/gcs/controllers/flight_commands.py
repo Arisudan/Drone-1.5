@@ -38,6 +38,8 @@ class FlightCommandsMixin:
         action. Bench force-arm remains terminal-only (`arm force`)."""
         if not self._require_link("arm"):
             return
+        if self._arm_blocked_by_checklist():
+            return
         self.confirm_bar.request(
             "arm", "ARM MOTORS", danger=True,
             detail="Propellers will be live. Confirm the area is clear.",
@@ -217,6 +219,8 @@ class FlightCommandsMixin:
         if not self.worker or not self.worker.isRunning():
             self.console.log_error("Cannot arm: Not connected to vehicle")
             self.page_terminal.log_error("Cannot arm: Not connected to vehicle")
+            return
+        if self._arm_blocked_by_checklist():
             return
         self._last_arm_was_forced = force
         label = "FORCE ARM (BENCH, param2=21196)" if force else "ARM (NORMAL)"

@@ -22,7 +22,7 @@ import time
 from typing import Optional
 
 from core.alarms import AlarmLevel
-from core.preflight import PreflightInputs, evaluate, summary
+from core.preflight import PreflightInputs, blockers, evaluate, summary
 from core.radxa_status import RadxaStatus
 
 PREFLIGHT_REFRESH_S = 1.0
@@ -64,6 +64,23 @@ class PreflightControlMixin:
         ready, text = summary(checks, armed=inp.armed)
         self._preflight_checks = checks
         self.sidebar.checklist.update_checks(checks, ready, text)
+
+    def _arm_blocked_by_checklist(self) -> bool:
+        """True (after telling the operator why) when the checklist's "Block ARM until ready" switch is
+        ON and a required check is not passing. With the switch OFF this is always False: the checklist
+        is information only. DISARM and every other command never ask."""
+        if not self.sidebar.checklist.enforce_enabled():
+            return False
+        self._refresh_preflight(force=True)
+        bad = blockers(self._preflight_checks)
+        if not bad:
+            return False
+        names = ", ".join(c.label for c in bad[:3]) + (f" and {len(bad) - 3} more" if len(bad) > 3 else "")
+        msg = f"ARM blocked by the preflight checklist - not ready: {names}. Turn off 'Block ARM until ready' to override."
+        self.console.log_error(msg)
+        self.page_terminal.log_error(msg)
+        self.toast.show_message("ARM blocked: preflight checklist not complete", "#da3633", 4000)
+        return True
 
     # ── save parameters to flash ────────────────────────────────────
 
