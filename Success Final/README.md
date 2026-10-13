@@ -1,5 +1,17 @@
 # RTAB-Map Drone Pkg — 2026-09-15 Update
 
+## Quick start: GCS on a new laptop
+
+```bash
+git clone <this repo> && cd <this repo>
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+./scripts/gcs/run_drone_gcs.sh
+```
+Needs Python 3.10+ (tested on Ubuntu 24.04 / Python 3.12). Then pick the network preset in the header or choose **Custom…** and enter the Radxa's IP (the saved default may not be where your Radxa is). The ROS 2 / RealSense / rtabmap side lives on the Radxa — see [`setup.md`](setup.md). Before any real flight, work through [`docs/hardware_checklist.md`](docs/hardware_checklist.md).
+
+---
+
 **Video Streaming in GCS (with all /topics integrated) over WiFi Access Point (DroneBridge5)**
 
 Live RGB FPV video from the Intel RealSense D435i now streams from the Radxa to the
@@ -130,3 +142,19 @@ then guides a walk-away test and reports **how far the live camera feed runs wit
 [`guide.md`](guide.md#10-range-test-how-far-does-the-live-feed-run-without-packet-loss) and
 [`docs/link_range_test.md`](docs/link_range_test.md).
 
+
+---
+
+## 2026-10-13 Update
+
+GCS pass for the move to real-flight testing. Covered by the hermetic suite (`tests/run_tests.sh`, 973+ tests).
+⚠️ None of it has been flown or tried on the real vehicle — see [`Progress.md`](Progress.md)'s Known Issues.
+
+- **Tactical SLAM header** — MODE box, SET MODE (blue), ARM (green), DISARM (red, single click like the Control tab) and TAKEOFF (blue) in one row at the top right. They run the same handlers as the Control tab, including the slide-to-confirm bar for ARM and TAKEOFF.
+- **Mode box follows the vehicle** (both tabs): when the RC changes the mode, the box changes with it instead of staying on a stale value.
+- **RC first**: SET MODE within 3 s of an RC mode change asks "Override RC mode?" first; the console notes "Mode changed by RC: A -> B"; the GCS never switches back into OFFBOARD by itself, stops its setpoints the moment the vehicle leaves OFFBOARD, and ends a running route if the RC takes over.
+- **Preflight checklist** — new switch *Block ARM until ready* (off by default: information only). On: ARM is refused until every required check passes. DISARM and all other commands are never blocked.
+- **Tactical SLAM layout** — docked camera tile in the side panel (fullscreen / pop-out / dock back), layers and Reset Map in the top bar, Alt+drag map rotation, default zoom 150 px/m, one-line ROUTE heading with Clear route in the MAP row.
+- **Look** — painted status dots (live feed, servo, interlocks), a 200 px left rail, a locked-height command console, even motor-test spacing, a tidier preflight card.
+- **`requirements.txt`** now lists exactly what the GCS imports, so a fresh laptop installs with one command (see Quick start above).
+- **`docs/hardware_checklist.md`** — tick-box checklist for porting to real hardware.

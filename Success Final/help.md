@@ -100,7 +100,8 @@ Everything else in this guide is reference material for once those two are runni
 │   │   │   ├── alarm_control.py
 │   │   │   ├── flight_commands.py
 │   │   │   ├── __init__.py
-│   │   │   └── mission_control.py
+│   │   │   ├── mission_control.py
+│   │   │   └── preflight_control.py
 │   │   ├── core
 │   │   │   ├── alarms.py
 │   │   │   ├── audio.py
@@ -134,9 +135,11 @@ Everything else in this guide is reference material for once those two are runni
 │   │   │   ├── battery_badge.py
 │   │   │   ├── cli_console.py
 │   │   │   ├── config_tab.py
+│   │   │   ├── docked_feed.py
 │   │   │   ├── flight_detail.py
 │   │   │   ├── fonts.py
 │   │   │   ├── guided_confirm.py
+│   │   │   ├── header_flight_bar.py
 │   │   │   ├── hud_widget.py
 │   │   │   ├── __init__.py
 │   │   │   ├── logs_tab.py
@@ -150,6 +153,7 @@ Everything else in this guide is reference material for once those two are runni
 │   │   │   ├── shortcuts.py
 │   │   │   ├── sidebar_nav.py
 │   │   │   ├── slam_map_widget.py
+│   │   │   ├── status_dot.py
 │   │   │   ├── styles.py
 │   │   │   ├── toast.py
 │   │   │   ├── top_status_strip.py
@@ -237,6 +241,7 @@ Everything else in this guide is reference material for once those two are runni
 
 ### `docs/`
 - **images/** — Screenshots referenced from `Progress.md` and `guide.md` (motor frame heading arrow, Parameters tab, SLAM drone icon redesign) — evidence, not source.
+- **hardware_checklist.md** — Tick-box checklist for taking the GCS from simulation to the real vehicle: communication, sensors and SLAM, flight controller, commands, RC and GCS together, navigation, safety, video, peripherals, power.
 - **link_range_test.md** — Reference for the walk-away range test: setup, what is measured, how "loss-free up to N m" and every verdict are defined, how loss is counted from sequence numbers, output files, limits and troubleshooting.
 - **threading.md** — The GCS threading contract: which thread owns what, which Qt signals cross to the UI thread, and the rules (workers never touch widgets; tokens not flags; the UI-stall detector).
 - **slam_evaluation.md** — The map-quality acceptance protocol: what to measure on the 2.5 cm occupancy grid, how to capture a run, and the numeric pass/fail threshold for each metric. Read this before arguing about whether a map is "good".
@@ -300,7 +305,7 @@ Everything else in this guide is reference material for once those two are runni
 ### `scripts/gcs/controllers/`
 What the main window *does*, split out of `drone_gcs.py` as mixins (methods still read window state through `self`).
 - **alarm_control.py** — Turns telemetry and video health into the standing alarm list (link, battery, vision and position while airborne, video), and handles Acknowledge.
-- **flight_commands.py** — Arm, disarm, takeoff, yaw, change altitude, mode, kill: the operator-facing `_request_*` entry points (via the guided-confirm bar) and the `_cmd_*` executors that talk to the MAVLink worker.
+- **flight_commands.py** — Arm, disarm, takeoff, yaw, change altitude, mode (with the 3 s RC-override guard and RC-takeover handling), kill: the operator-facing `_request_*` entry points (via the guided-confirm bar) and the `_cmd_*` executors that talk to the MAVLink worker.
 - **mission_control.py** — Execute / pause / resume / abort path, collision verdicts, detours, the OFFBOARD setpoint pump, map reset, and mission progress.
 
 ### `scripts/gcs/ui/`
@@ -309,13 +314,16 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **battery_badge.py** — The header's battery indicator: a drawn cell with fill level, percentage and voltage.
 - **config_tab.py** — The Configuration workspace: section list + search, captions with unit suffixes, per-field modified dots, inline validation, restart-needed tags, per-section reset and Bench / Indoor presets; edits, validates and persists the station settings.
 - **preflight_panel.py** — The checklist card in the left navigation rail under "Parameters": a horizontal rule, a PREFLIGHT heading with a READY / N TO FIX pill, a segment bar, a "Next:" line, and one line per check with a status dot and value; the manual *Heading fixed* box. It is compact and ranks below the camera thumbnail: it only uses rail height the thumbnail does not need, shrinks in steps, and is hidden at the smallest window size.
-- **preflight_control.py** — (controllers) Gathers the checklist facts once a second for the display-only card (nothing consults it), runs the guarded *Save to flash*, and turns Radxa watchdog reports into alarms.
+- **preflight_control.py** — (controllers) Gathers the checklist facts once a second for the card, applies the optional *Block ARM until ready* switch (off by default: information only; on: ARM refused until ready, DISARM never blocked), runs the guarded *Save to flash*, and turns Radxa watchdog reports into alarms.
 - **radxa_status_worker.py** — (protocol) Polls the watchdog every 5 s on its own thread.
 - **radxa_watchdog.py / radxa_log_janitor.py / install_radxa_services.sh / deploy/*.service** — (scripts/radxa, run ON the Radxa) Watchdog + status endpoint, log cleanup, the installer and the systemd units. See guide.md §11.
 - **flight_detail.py** — Flight-detail dialog for the Logs tab (altitude / speed / battery / voltage charts, ground track, CSV export) and the cross-flight battery-health trend charts; QPainter only.
 - **fonts.py** — Registers the bundled Red Hat Display / Ubuntu fonts with Qt (idempotent; called from `build_stylesheet()`), and `resolved_family()` for tests.
 - **logs_tab.py** — The Flight Logs workspace: statistics, filters, table, Details… (flight detail), Trends panel, CSV export, the password-gated Reset Logs, and Export Bundle.
 - **map_canvas_render.py** — The Tactical map canvas's drawing code (grid, keep-outs, mission stops, trail, path, goal, drone glyph, ruler, uncertainty ring, overlay) as a mixin; `slam_map_widget.py` keeps the input and tool state.
+- **header_flight_bar.py** — The MODE / SET MODE / ARM / DISARM / TAKEOFF row at the top right of the Tactical SLAM header. It only raises signals; the main window routes them to the same handlers as the Control tab. The mode box follows the vehicle's mode when it changes, never while the operator is choosing.
+- **docked_feed.py** — The camera tile docked in the Tactical SLAM side panel (fullscreen, pop-out, dock back, fold arrow), with a compact form for short windows.
+- **status_dot.py** — A painted status dot (QSS circles render as squares on some screens): live feed, servo, motor-test interlocks.
 - **mini_feed.py** — The small live camera thumbnail in the navigation rail on the tabs without a camera of their own: ~10 fps, click for fullscreen, cleared to `NO VIDEO` when the feed freezes.
 - **params_tab.py** — The read-only live PX4 parameter table (search, sortable, batched redraws).
 - **cli_console.py** — Embedded terminal widget (command history, live scrolling log) for typing flight commands directly inside the GCS.
@@ -374,13 +382,14 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **test_link_range.py** — The range test engine: `iw`/`ping` parsers on captured output, the JPEG frame counter at every split point, packet formats, sequence-based loss, verdicts, the loss-free range, path-loss fit, reports, and loopback integration (UDP up/down attribution, a real HTTP stream). Hermetic.
 - **test_link_range_gui.py** — The range-test window: setup validation, prefill, connection checks, the whole walk → result flow against stand-ins. Runs on its own private Xvfb display; skipped without `tkinter`/Xvfb.
 - **test_map_eval.py** — Every SLAM metric against synthetic grids, plus the CLI's exit codes.
-- **test_preflight.py** — Checklist logic, proof that ARM / takeoff / Save to flash ignore the card entirely, vision-loss clearing the heading tick, Save to flash (guarded, disarmed only), parameter export format, the worker command, Radxa-status parsing end to end, and the map / screen-freeze / Radxa alarms.
+- **test_preflight.py** — Checklist logic, proof that ARM / takeoff / Save to flash ignore the card entirely while *Block ARM until ready* is off, vision-loss clearing the heading tick, Save to flash (guarded, disarmed only), parameter export format, the worker command, Radxa-status parsing end to end, and the map / screen-freeze / Radxa alarms.
 - **test_radxa_services.py** — Watchdog decisions through time with an injected clock (grace, restart, rate limit, give-up, stopped-on-purpose), its HTTP endpoint, the video check, and the log janitor on temporary folders. Hermetic.
 - **test_flight_logs.py** — Flight series recording (sampling, thinning, voltage, forward-compatible loading), the detail helpers/dialog/CSV export, and the Logs tab (ISO dates, Details, Trends).
 - **test_fpv_tools.py** — Recorder (playable AVI, resize, no-frame = no file), snapshots, placeholder frames never recorded, overlay off by default and never burned in, the 60 s graph.
 - **test_config_tab.py** — Captions for every field, restart rules, parsing, validation mapped to fields, change tracking, presets, search, save/reload, hidden fields preserved.
 - **test_slam_panel.py** — SLAM side panel, state-aware path actions (including RESUME for `paused=True`), route summary, grey-first quality strip.
 - **test_video_streaming.py** — Streamer socket tuning and one-buffer framing, a stalled loopback client receiving the newest frame rather than a backlog (fails without the tuning), and the capture thread's newest-frame-only hand-off to the GUI.
+- **test_header_flight_bar.py / test_rc_mode_guard.py / test_preflight_enforce.py** — The SLAM flight bar (colours, one line, signals, TAKEOFF through the confirm bar); the mode box following the vehicle, the 3 s RC-override prompt, the console note, and RC-first behaviour (no silent OFFBOARD, route stops on takeover); and the *Block ARM until ready* switch (off never blocks, on blocks ARM only).
 - **test_mini_feed.py** — The rail thumbnail: no work while hidden, ~10 fps thinning, cleared when frozen, click for fullscreen, shown only when the rail has room.
 - **test_motor_response.py** — The motor range model, per-motor response (low → idle → off, sweep, mapping swap), staleness, commanded vs live, parameter routing, the throttle slider, and the caption/arrow declutter.
 - **test_motor_test.py** — The bench test must use `MAV_CMD_ACTUATOR_TEST` (310), not `DO_MOTOR_TEST` (209), with the exact packet pinned.
@@ -411,6 +420,6 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **package.xml** — ROS 2 package manifest (name, maintainer, build type).
 - **Progress.md** — The project's single chronological engineering log: every real problem hit on hardware, why, and exactly what changed. Sensor → SLAM → EKF2 data flow, milestones, real-hardware findings, and a Known Issues & Roadmap section.
 - **README.md** — Dated project updates, newest last (the latest: 2026-10-01), pointing to `guide.md`/`Progress.md` for detail.
-- **requirements.txt** — Python pip dependencies for the whole pipeline + GCS app.
+- **requirements.txt** — The GCS laptop's pip dependencies (PyQt5, numpy, opencv-python, pymavlink, pyserial); `pip install -r requirements.txt` in a venv. Radxa-side ROS 2 packages are installed with apt (see `setup.md`).
 - **run_drone_slam.sh** — Launch script for the onboard SLAM pipeline (sources ROS 2 + workspace, runs `drone_rtabmap_all.launch.py`).
 - **setup.md** — Everything needed for a fresh install: prerequisites, `mavlink-router` setup, build/launch commands, published ROS 2 topics, and FAQ/troubleshooting. Pipeline-side only — no GUI content.

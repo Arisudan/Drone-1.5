@@ -483,6 +483,8 @@ class FlightCommandsMixin:
         (or PX4 itself): log it and remember when, so SET MODE can protect the pilot's choice."""
         prev = getattr(self, "_seen_mode", "")
         self._seen_mode = mode
+        if prev == "OFFBOARD" and mode and mode != "OFFBOARD":
+            self._on_left_offboard(mode)
         if not mode or mode == "UNKNOWN" or not prev or prev == "UNKNOWN" or mode == prev:
             return
         now = time.monotonic()
@@ -492,6 +494,27 @@ class FlightCommandsMixin:
         msg = f"Mode changed by RC: {prev} -> {mode}"
         self.console.log_info(msg)
         self.page_terminal.log_info(msg)
+
+    def _on_left_offboard(self, mode: str) -> None:
+        """The vehicle left OFFBOARD. The GCS stops commanding at once and never re-enters it by itself.
+        If a route was running and we did not ask for the change, the RC pilot took over: end the route."""
+        if self.worker:
+            self.worker.stop_setpoints()
+        ours = time.monotonic() - getattr(self, "_gcs_mode_cmd_at", -1e9) <= self.GCS_MODE_GRACE_S
+        if ours or not getattr(self, "path_in_progress", False) or getattr(self, "path_paused", False):
+            return
+        self.offboard_pump_timer.stop()
+        self.path_in_progress = False
+        self.path_awaiting_climb = False
+        self.active_waypoints = []
+        self.current_wpt_idx = 0
+        self.page_slam.set_executing_state(False, paused=False)
+        self.page_slam.canvas.clear_goal()
+        self.page_slam.progress.set_state("ABORTED")
+        msg = f"RC took control ({mode}): route stopped, GCS commands cancelled."
+        self.console.log_error(msg)
+        self.page_terminal.log_error(msg)
+        self.toast.show_message("RC took control - route stopped", "#d29922", 5000)
 
     def _sync_mode_box(self, combo, mode: str) -> None:
         """Keep a mode box on the vehicle's real mode when it changes, never while the list is open."""

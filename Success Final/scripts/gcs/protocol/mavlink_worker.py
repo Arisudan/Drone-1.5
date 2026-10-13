@@ -939,7 +939,7 @@ class MAVLinkWorker(QThread):
         if not self._connected or not self.master:
             return
         if self.telemetry.flight_mode != "OFFBOARD":
-            self.set_mode("OFFBOARD")
+            return   # OFFBOARD is never re-entered silently: the RC pilot's mode choice always wins
         with self.sp_lock:
             self.sp_x = self.telemetry.x + dx
             self.sp_y = self.telemetry.y + dy
@@ -949,12 +949,16 @@ class MAVLinkWorker(QThread):
         self.streaming_setpoints = True
         self.broadcast_cmd(f"move {dx:.2f} {dy:.2f} {dz:.2f}")
 
+    def stop_setpoints(self) -> None:
+        """Stop streaming OFFBOARD setpoints (the RC took the vehicle out of OFFBOARD)."""
+        self.streaming_setpoints = False
+
     def rotate_yaw(self, dyaw_deg: float):
         """Rotate heading relative to current heading and ensure OFFBOARD mode."""
         if not self._connected or not self.master:
             return
         if self.telemetry.flight_mode != "OFFBOARD":
-            self.set_mode("OFFBOARD")
+            return   # OFFBOARD is never re-entered silently: the RC pilot's mode choice always wins
         with self.sp_lock:
             self.sp_yaw = math.radians(self.telemetry.heading + dyaw_deg)
             self.sp_x = self.telemetry.x
@@ -969,7 +973,7 @@ class MAVLinkWorker(QThread):
         if not self._connected or not self.master:
             return
         if self.telemetry.flight_mode != "OFFBOARD":
-            self.set_mode("OFFBOARD")
+            return   # OFFBOARD is never re-entered silently: the RC pilot's mode choice always wins
         with self.sp_lock:
             self.sp_x = x
             self.sp_y = y

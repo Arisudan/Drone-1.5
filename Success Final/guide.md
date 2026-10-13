@@ -75,7 +75,9 @@ A companion app, `radxa_monitor.py`, is a separate zero-control passive monitor 
 ```bash
 ./scripts/gcs/run_drone_gcs.sh
 ```
-This sources ROS 2, forces the XCB Qt backend, and runs `drone_gcs.py`. No SSH or X11 forwarding is needed for real use — this runs directly on the laptop's own physical screen. See `setup.md` for getting the Radxa-side pipeline running first.
+On a new laptop, first install the Python packages once: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt` (Python 3.10+).
+
+This sources ROS 2 (if present), forces the XCB Qt backend, and runs `drone_gcs.py`. No SSH or X11 forwarding is needed for real use — this runs directly on the laptop's own physical screen. See `setup.md` for getting the Radxa-side pipeline running first.
 
 ---
 
@@ -119,6 +121,10 @@ The primary situational-awareness view, with two switchable layers:
 - **3D RViz2 Viewport** — a real embedded RViz2 window (X11 window swallowing) for the full point-cloud/SLAM 3D view, with **Launch / Reload / Close** controls.
 
 ![Redesigned drone icon: one arrow-shaped fuselage instead of a circle plus a separate floating chevron](docs/images/slam_drone_icon_redesign.png)
+
+**Flight bar (top right of the Tactical SLAM header).** `MODE ▾  SET MODE  ARM  DISARM  TAKEOFF` in one row, the same actions as the Control tab and through the same handlers: ARM and TAKEOFF open the slide-to-confirm bar (TAKEOFF with its altitude slider), DISARM is a single click, SET MODE sends the chosen mode. SET MODE blue, ARM green, DISARM red, TAKEOFF blue. A small chip shows `NO LINK` / `DISARMED` / `ARMED`. On a narrow window the bar wraps onto its own row.
+
+**RC pilot first.** The mode box follows the vehicle's real mode, so an RC mode change shows up in it. If the RC changed the mode in the last 3 seconds, SET MODE asks for a slide-to-confirm ("Override RC mode") before sending; the console logs `Mode changed by RC: A -> B`. The GCS never switches into OFFBOARD by itself: `move`, `yaw` and route waypoints are only sent while the vehicle is already in OFFBOARD, setpoints stop the moment it leaves OFFBOARD, and a running route ends with "RC took control" if the RC did it.
 
 **Layout.** The top bar is one row: the view switch (2D Map / 3D Cloud) followed by that view's tools (rotate, follow, centre, zoom, fit; Launch/Reload/Close for 3D). Under the map a thin **status strip** shows the vehicle's N/E position, heading, rotation, follow state and position uncertainty (it no longer sits on top of the map). Everything else is one narrow **side panel** on the right, top to bottom in the order you work:
 - **MAP** — the map-status pill and **Reset Map** (plain grey; red only on hover). The pill is grey `NO DATA` until a map has arrived, `LIVE` when it flows, and red `MAP LOST` only if a live map stops.
@@ -353,13 +359,14 @@ python3 ~/Flop/scripts/radxa/radxa_log_janitor.py          # dry run: lists what
 ## 12. Current Limitations
 
 - The **Parameters tab** cannot change a value (no write-then-verify, no guided-confirm gate for reboot-required parameters yet) and has only been tested against a synthetic parameter burst. **Save to flash** has been tested against a mocked link only — it has never been sent to the real flight controller, so check afterwards (power-cycle and Refresh) that the values stuck.
-- The **preflight checklist** is a display only and has been exercised in simulation and with synthetic state; the exact checks (for example the battery threshold, and the `Vision tracking` line, which shows green in the simulator even though there is no vision pipeline) are defaults to be tuned with real flights.
+- The **preflight checklist** is information only unless you turn on *Block ARM until ready* (then ARM is refused until every required check passes; DISARM is never blocked). It has been exercised in simulation and with synthetic state; the exact checks (for example the battery threshold, and the `Vision tracking` line, which shows green in the simulator even though there is no vision pipeline) are defaults to be tuned with real flights.
 - The **motor scale** (`PWM_MAIN_*`) is read with single parameter reads that have not been tried against the real vehicle; if they never arrive the default 1000–2000 µs range is used and the footer says so. Only outputs 1–4 are covered (all `SERVO_OUTPUT_RAW` carries here).
 - The **alarm card** covers link, battery, vision, position, video, map, screen freezes and the Radxa watchdog's report. The map-stalled trigger is the existing *Map stalled after* setting; no other thresholds were guessed.
 - The **servo** talks plain HTTP to the ESP32 with no authentication, and nothing stops it being pressed while the vehicle is flying.
 - The **range test** has been verified on this laptop's Wi-Fi card, on loopback and in its window on a virtual display — not yet against the real Radxa or on a real walk.
 - The **low-latency streaming changes** (small send buffer, one write per frame, newest-frame-only GUI hand-off) are tested on loopback only; whether they reduce freezes on the real Wi-Fi link has not been measured — run the range test before and after.
 - **Video recording / snapshots** and the **flight detail charts** were checked offscreen and with synthetic data only; recording has not been run against the live Radxa stream.
+- The **flight bar**, the RC-priority behaviour (mode box, override prompt, route stop on an RC takeover) and TAKEOFF from the SLAM header are tested against a mocked link only. `COM_RC_OVERRIDE` on the real Pixhawk has not been read, and `move` (North/East/Down, not body-forward) has not been flown.
 - No fullscreen support outside the video views (map/RViz remain windowed within their tab).
 - Everything above was checked offscreen / on the bench; no real flight has happened.
 

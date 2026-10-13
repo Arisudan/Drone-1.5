@@ -85,5 +85,40 @@ class RcModeGuardTests(unittest.TestCase):
         self.win.worker.set_mode.assert_called_once_with("OFFBOARD")
 
 
+class RcPriorityTests(RcModeGuardTests):
+    """The RC pilot always wins over OFFBOARD."""
+
+    def test_route_stops_when_rc_leaves_offboard(self):
+        w = self.win
+        self._tel("OFFBOARD")
+        w.path_in_progress, w.path_paused = True, False
+        w.active_waypoints, w.current_wpt_idx = [(1.0, 1.0)], 0
+        self.t[0] += 5.0
+        self._tel("POSCTL")
+        self.assertFalse(w.path_in_progress)
+        w.worker.stop_setpoints.assert_called()
+
+    def test_gcs_commanded_exit_is_not_a_takeover(self):
+        w = self.win
+        self._tel("OFFBOARD")
+        w.path_in_progress, w.path_paused = True, True      # paused = we sent AUTO.LOITER
+        w._cmd_mode("AUTO.LOITER")
+        self.t[0] += 0.5
+        self._tel("AUTO.LOITER")
+        self.assertTrue(w.path_in_progress)
+        w.path_in_progress = False
+
+    def test_worker_never_reenters_offboard_silently(self):
+        from protocol.mavlink_worker import MAVLinkWorker
+        wk = MAVLinkWorker.__new__(MAVLinkWorker)
+        wk._connected, wk.master = True, object()
+        wk.telemetry = mock.Mock(flight_mode="POSCTL", x=0, y=0, z=0, heading=0)
+        wk.set_mode = mock.Mock()
+        wk.move_delta(1, 0, 0)
+        wk.rotate_yaw(10)
+        wk.move_to_waypoint(1, 1)
+        wk.set_mode.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

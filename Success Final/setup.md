@@ -30,7 +30,14 @@ Everything needed to bring this project up on a fresh machine and fly the pipeli
   sudo apt update
   sudo apt install -y ros-jazzy-realsense2-camera ros-jazzy-rtabmap-ros python3-opencv python3-numpy
   ```
-- **On the GCS laptop** (not needed on the Radxa): PyQt5 for the GCS itself (`pip install -r requirements.txt`), plus, for the **range test** ([`docs/link_range_test.md`](docs/link_range_test.md)): `python3-tk` (its window), `iw` and `openssh-client` (`sudo apt install python3-tk iw openssh-client`). The GCS's heading fonts (Red Hat Display, Ubuntu) are bundled in `assets/fonts/` — there is nothing to install for them.
+- **On the GCS laptop** (not needed on the Radxa): Python 3.10+ and the GCS's pip packages, installed into a virtual environment:
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  ./scripts/gcs/run_drone_gcs.sh
+  ```
+  `requirements.txt` holds only what the GCS imports (PyQt5, numpy, opencv-python, pymavlink, pyserial); ROS 2, rtabmap, RealSense and mavlink-router are Radxa-side and installed with apt, not pip. On a laptop without a venv, use `pip install --break-system-packages -r requirements.txt`. Checked in a fresh venv: the install is clean and the GCS tests run from it. Also, for the GUI tests headless: `sudo apt install xvfb`. For the **range test** ([`docs/link_range_test.md`](docs/link_range_test.md)): `python3-tk` (its window), `iw` and `openssh-client` (`sudo apt install python3-tk iw openssh-client`). The GCS's heading fonts (Red Hat Display, Ubuntu) are bundled in `assets/fonts/` — there is nothing to install for them.
 
 ---
 
