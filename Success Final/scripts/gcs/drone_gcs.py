@@ -1657,7 +1657,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         if action == "help":
             help_msg = (
                 "Available Commands:\n"
-                "  move <dx> <dy> <dz>  - Relative NED displacement in meters\n"
+                "  move <x> <y> <z>    - Relative move in meters: forward, right, down (of the drone)\n"
+                "  moven <n> <e> <d>    - Same, but North / East / Down (world frame)\n"
                 "  takeoff <alt>        - Takeoff to altitude AGL (meters)\n"
                 "  arm [force]          - Arm drone (force for bench test)\n"
                 "  disarm               - Disarm motors\n"
@@ -1693,15 +1694,15 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
                 self._cmd_yaw(dyaw)
             except ValueError:
                 self.console.log_error("Yaw angle must be a number")
-        elif action == "move":
+        elif action in ("move", "moveb", "moven"):
             if len(parts) < 4:
-                self.console.log_error("Usage: move <dx> <dy> <dz> (e.g. move 1 0 0)")
+                self.console.log_error(f"Usage: {action} <x> <y> <z> (e.g. {action} 1 0 0)")
                 return
             try:
                 dx = float(parts[1])
                 dy = float(parts[2])
                 dz = float(parts[3])
-                self._cmd_move(dx, dy, dz)
+                self._cmd_move(dx, dy, dz, frame={"moveb": "body", "moven": "ned"}.get(action))
             except ValueError:
                 self.console.log_error("Coordinates must be floating point numbers")
         else:

@@ -73,7 +73,11 @@ FIELD_INFO = {
         "rviz_config": ("RViz config file (blank = bundled)", "")}),
     "limits": ("Command limits", {
         "takeoff_alt_min_m": ("Takeoff minimum", "m"), "takeoff_alt_max_m": ("Takeoff maximum", "m"),
-        "move_max_delta_m": ("Largest single move", "m")}),
+        "move_max_delta_m": ("Largest single move", "m"),
+        "move_frame": ("Move axes (body = forward/right, ned = North/East)", ""),
+        "move_yaw_offset_deg": ("Move heading correction", "\u00b0"),
+        "move_invert_forward": ("Reverse move forward/back", ""),
+        "move_invert_right": ("Reverse move right/left", "")}),
     "alerts": ("Alert thresholds", {
         "batt_warn_pct": ("Battery warning", "%"), "batt_crit_pct": ("Battery critical", "%"),
         "vision_stale_s": ("Vision stale after", "s"),
@@ -107,6 +111,7 @@ HIDDEN_FIELDS = {
 
 CHOICES = {
     ("connection", "protocol"): ["udp", "tcp", "udpin"],
+    ("limits", "move_frame"): ["body", "ned"],
     ("connection", "default_network"): ["HTIC_RND", "DroneBridge5", "DroneNet", "wfb-ng"],
     ("profile", "frame"): ["Quad X", "Quad +", "Hex X", "Hex +", "Y6", "Octo X"],
 }

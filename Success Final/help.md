@@ -324,6 +324,7 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **header_flight_bar.py** — The MODE / SET MODE / ARM / DISARM / TAKEOFF row at the top right of the Tactical SLAM header. It only raises signals; the main window routes them to the same handlers as the Control tab. The mode box follows the vehicle's mode when it changes, never while the operator is choosing.
 - **docked_feed.py** — The camera tile docked in the Tactical SLAM side panel (fullscreen, pop-out, dock back, fold arrow), with a compact form for short windows.
 - **status_dot.py** — A painted status dot (QSS circles render as squares on some screens): live feed, servo, motor-test interlocks.
+- **move_frame.py** — (core) Turns a body-relative move (forward / right) into North / East using the drone's heading, with optional heading offset and axis reversal. Used by the terminal `move` command.
 - **mini_feed.py** — The small live camera thumbnail in the navigation rail on the tabs without a camera of their own: ~10 fps, click for fullscreen, cleared to `NO VIDEO` when the feed freezes.
 - **params_tab.py** — The read-only live PX4 parameter table (search, sortable, batched redraws).
 - **cli_console.py** — Embedded terminal widget (command history, live scrolling log) for typing flight commands directly inside the GCS.
@@ -389,6 +390,7 @@ What the main window *does*, split out of `drone_gcs.py` as mixins (methods stil
 - **test_config_tab.py** — Captions for every field, restart rules, parsing, validation mapped to fields, change tracking, presets, search, save/reload, hidden fields preserved.
 - **test_slam_panel.py** — SLAM side panel, state-aware path actions (including RESUME for `paused=True`), route summary, grey-first quality strip.
 - **test_video_streaming.py** — Streamer socket tuning and one-buffer framing, a stalled loopback client receiving the newest frame rather than a backlog (fails without the tuning), and the capture thread's newest-frame-only hand-off to the GUI.
+- **test_move_frame.py** — Body-to-NED move maths, the `limits.move_*` settings, and `move` / `moven` / `moveb` dispatch.
 - **test_header_flight_bar.py / test_rc_mode_guard.py / test_preflight_enforce.py** — The SLAM flight bar (colours, one line, signals, TAKEOFF through the confirm bar); the mode box following the vehicle, the 3 s RC-override prompt, the console note, and RC-first behaviour (no silent OFFBOARD, route stops on takeover); and the *Block ARM until ready* switch (off never blocks, on blocks ARM only).
 - **test_mini_feed.py** — The rail thumbnail: no work while hidden, ~10 fps thinning, cleared when frozen, click for fullscreen, shown only when the rail has room.
 - **test_motor_response.py** — The motor range model, per-motor response (low → idle → off, sweep, mapping swap), staleness, commanded vs live, parameter routing, the throttle slider, and the caption/arrow declutter.

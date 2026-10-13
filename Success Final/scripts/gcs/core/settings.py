@@ -175,8 +175,17 @@ class LimitsConfig:
     takeoff_alt_min_m: float = 0.2
     takeoff_alt_max_m: float = 3.0
     move_max_delta_m: float = 3.0
+    # `move x y z`: "body" = forward / right / down of the drone, "ned" = North / East / Down.
+    move_frame: str = "body"
+    move_yaw_offset_deg: float = 0.0      # correction for a mounting / compass rotation (e.g. 180)
+    move_invert_forward: bool = False
+    move_invert_right: bool = False
 
     def validate(self) -> None:
+        if self.move_frame not in ("body", "ned"):
+            raise ValueError("limits.move_frame must be 'body' or 'ned'")
+        if not -180.0 <= self.move_yaw_offset_deg <= 180.0:
+            raise ValueError("limits.move_yaw_offset_deg outside -180..180")
         if self.takeoff_alt_min_m <= 0:
             raise ValueError("limits.takeoff_alt_min_m must be > 0")
         if self.takeoff_alt_max_m <= self.takeoff_alt_min_m:

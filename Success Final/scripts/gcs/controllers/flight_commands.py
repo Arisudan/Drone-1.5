@@ -14,10 +14,12 @@ unchanged - they read window state through ``self``.
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 from PyQt5.QtCore import QTimer
 
 from core.audio import Severity
+from core.move_frame import body_to_ned
 from core.takeoff import takeoff_altitude_param
 
 
@@ -386,7 +388,9 @@ class FlightCommandsMixin:
             cur_armed=t.armed, cur_mode=t.flight_mode
         )
 
-    def _cmd_move(self, dx: float, dy: float, dz: float):
+    def _cmd_move(self, dx: float, dy: float, dz: float, frame: Optional[str] = None):
+        """`move x y z`. In the "body" frame x = forward, y = right (of the drone's heading), z = down;
+        in "ned" they are North / East / Down. `frame` overrides the configured default (moveb / moven)."""
         if not self.worker or not self.worker.isRunning():
             self.console.log_error("Cannot move: Disconnected")
             self.page_terminal.log_error("Cannot move: Disconnected")
@@ -416,8 +420,19 @@ class FlightCommandsMixin:
             self.toast.show_message("Not in OFFBOARD - switch manually first", "#da3633", 4000)
             return
 
-        self.console.log_cmd(f"Dispatching translation: dx={dx:+.2f}m, dy={dy:+.2f}m, dz={dz:+.2f}m")
-        self.page_terminal.log_cmd(f"Dispatching translation: dx={dx:+.2f}m, dy={dy:+.2f}m, dz={dz:+.2f}m")
+        lim = self.settings.limits
+        frame = frame or lim.move_frame
+        if frame == "body":
+            north, east = body_to_ned(dx, dy, self.last_telemetry.heading, lim.move_yaw_offset_deg,
+                                      lim.move_invert_forward, lim.move_invert_right)
+            how = (f"body forward={dx:+.2f} right={dy:+.2f} down={dz:+.2f} (heading "
+                   f"{self.last_telemetry.heading:.0f}\u00b0) -> N={north:+.2f} E={east:+.2f}")
+        else:
+            north, east = dx, dy
+            how = f"NED N={dx:+.2f} E={dy:+.2f} D={dz:+.2f}"
+        self.console.log_cmd(f"Dispatching translation: {how} m")
+        self.page_terminal.log_cmd(f"Dispatching translation: {how} m")
+        dx, dy = north, east
         self.worker.move_delta(dx, dy, dz)
         self.toast.show_message(f"Move: ({dx:+.1f}, {dy:+.1f}, {dz:+.1f})m", "#1f6feb")
         self.exec_tracker.start_tracking(
