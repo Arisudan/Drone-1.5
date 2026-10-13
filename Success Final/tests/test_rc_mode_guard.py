@@ -120,5 +120,42 @@ class RcPriorityTests(RcModeGuardTests):
         wk.set_mode.assert_not_called()
 
 
+class OffboardEntryTests(unittest.TestCase):
+    """Entering OFFBOARD must never command zero thrust to a vehicle that is in the air."""
+
+    def _worker(self, airborne):
+        from protocol.mavlink_worker import MAVLinkWorker
+        wk = MAVLinkWorker.__new__(MAVLinkWorker)
+        import threading
+        wk._connected, wk.master = True, mock.Mock()
+        wk.sp_lock = threading.Lock()
+        wk.telemetry = mock.Mock(is_airborne=airborne, x=3.0, y=-2.0, z=-1.5, heading=90.0)
+        wk.sent = []
+        wk._send_setpoint = lambda: wk.sent.append(wk.setpoint_kind)
+        wk.set_message = None
+        wk.tx_count = 0
+        wk.broadcast_cmd = lambda *a, **k: None
+        return wk
+
+    def _enter(self, airborne):
+        wk = self._worker(airborne)
+        with mock.patch("protocol.mavlink_worker.time.sleep"):
+            try:
+                wk.set_mode("OFFBOARD")
+            except Exception:
+                pass          # only the primed setpoint matters here, not the mode command that follows
+        return wk
+
+    def test_airborne_holds_position(self):
+        wk = self._enter(True)
+        self.assertEqual(wk.setpoint_kind, "position")
+        self.assertEqual((wk.sp_x, wk.sp_y, wk.sp_z), (3.0, -2.0, -1.5))
+        self.assertTrue(wk.streaming_setpoints)
+
+    def test_on_ground_stays_idle_attitude(self):
+        wk = self._enter(False)
+        self.assertEqual(wk.setpoint_kind, "idle_attitude")
+
+
 if __name__ == "__main__":
     unittest.main()

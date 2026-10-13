@@ -833,9 +833,11 @@ class MAVLinkWorker(QThread):
                 self.sp_y = self.telemetry.y
                 self.sp_z = self.telemetry.z
                 self.sp_yaw = math.radians(self.telemetry.heading)
-            # Arm into idle attitude, not a position hold - see setpoint_kind's
+            # On the ground: idle attitude, not a position hold - see setpoint_kind's
             # docstring: entering OFFBOARD must not itself command a climb.
-            self.setpoint_kind = "idle_attitude"
+            # In the air: hold the current position. Zero thrust there would drop the vehicle,
+            # e.g. when OFFBOARD is re-entered after the RC pilot had taken over.
+            self.setpoint_kind = "position" if self.telemetry.is_airborne else "idle_attitude"
             self.streaming_setpoints = True
             # Pre-send 20 Hz setpoint frames for 500ms (Milestone 12 specification) so PX4 accepts OFFBOARD switch
             for _ in range(10):
