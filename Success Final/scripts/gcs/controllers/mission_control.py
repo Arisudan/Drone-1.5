@@ -217,6 +217,7 @@ class MissionControlMixin:
         self.offboard_pump_timer.stop()
         if not self.worker or not self.worker.isRunning():
             return
+        self._note_gcs_mode_cmd()
         self.worker.set_mode("AUTO.LOITER")
         self.path_in_progress = False
         self.path_paused = True
@@ -313,6 +314,7 @@ class MissionControlMixin:
         self.page_slam.canvas.clear_goal()
 
         if self.worker and self.worker.isRunning():
+            self._note_gcs_mode_cmd()
             self.worker.set_mode("AUTO.LAND")
             self.console.log_error("[ABORT] Emergency transition to AUTO.LAND initiated!")
             self.page_terminal.log_error("[ABORT] Emergency transition to AUTO.LAND initiated!")
@@ -340,6 +342,7 @@ class MissionControlMixin:
 
         now = time.time()
         t = self.last_telemetry
+        self._note_gcs_mode_cmd()
         self.worker.set_mode("AUTO.LOITER")
         self.path_in_progress = False
         self.path_paused = True

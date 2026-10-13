@@ -13,6 +13,8 @@ unchanged - they read window state through ``self``.
 
 from __future__ import annotations
 
+import time
+
 from PyQt5.QtCore import QTimer
 
 from core.audio import Severity
@@ -164,6 +166,8 @@ class FlightCommandsMixin:
             self._cmd_kill()
         elif action == "save_params":
             self._cmd_save_params()
+        elif action == "mode_override":
+            self._cmd_mode(getattr(self, "_pending_mode", ""))
         elif action == "abort_path":
             self._on_abort_path_requested()
 
@@ -269,6 +273,7 @@ class FlightCommandsMixin:
             self.console.log_warning(msg)
             self.page_terminal.log_warning(msg)
             self.toast.show_message("Airborne - landing safely, will disarm on touchdown", "#d29922", 5000)
+            self._note_gcs_mode_cmd()
             self.worker.set_mode("AUTO.LAND")
             self._pending_autodisarm_after_land = True
             self.exec_tracker.start_tracking(
@@ -463,9 +468,58 @@ class FlightCommandsMixin:
             cur_heading=self.last_telemetry.heading
         )
 
+    # ── who changed the mode ────────────────────────────────────────
+
+    #: SET MODE within this long after the RC changed the mode asks before overriding the pilot.
+    RC_MODE_GUARD_S = 3.0
+    #: A vehicle mode change this soon after a GCS mode command is ours, not the RC's.
+    GCS_MODE_GRACE_S = 2.0
+
+    def _note_gcs_mode_cmd(self) -> None:
+        self._gcs_mode_cmd_at = time.monotonic()
+
+    def _track_mode_source(self, mode: str) -> None:
+        """Called with every telemetry update. A mode change nobody here asked for came from the RC
+        (or PX4 itself): log it and remember when, so SET MODE can protect the pilot's choice."""
+        prev = getattr(self, "_seen_mode", "")
+        self._seen_mode = mode
+        if not mode or mode == "UNKNOWN" or not prev or prev == "UNKNOWN" or mode == prev:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_gcs_mode_cmd_at", -1e9) <= self.GCS_MODE_GRACE_S:
+            return
+        self._rc_mode_change_at = now
+        msg = f"Mode changed by RC: {prev} -> {mode}"
+        self.console.log_info(msg)
+        self.page_terminal.log_info(msg)
+
+    def _sync_mode_box(self, combo, mode: str) -> None:
+        """Keep a mode box on the vehicle's real mode when it changes, never while the list is open."""
+        seen = self.__dict__.setdefault("_synced_mode", {})
+        if not mode or seen.get(id(combo)) == mode:
+            return
+        seen[id(combo)] = mode
+        i = combo.findText(mode)
+        if i >= 0 and not combo.view().isVisible() and i != combo.currentIndex():
+            combo.blockSignals(True)
+            combo.setCurrentIndex(i)
+            combo.blockSignals(False)
+
+    def _request_mode(self, mode_name: str, anchor=None) -> None:
+        """SET MODE from either tab. Straight through, unless the RC changed the mode a moment ago."""
+        mode_name = mode_name.strip()
+        age = time.monotonic() - getattr(self, "_rc_mode_change_at", -1e9)
+        if age <= self.RC_MODE_GUARD_S:
+            self._pending_mode = mode_name
+            self.confirm_bar.request(
+                "mode_override", "OVERRIDE RC MODE", danger=True,
+                detail=f"The RC changed the mode {age:.0f} s ago. Setting {mode_name} takes it from the pilot.",
+                confirm_text=f"Slide to set {mode_name}", anchor=anchor)
+            return
+        self._cmd_mode(mode_name)
+
     def _cmd_set_mode_from_ui(self):
-        selected_mode = self.combo_modes.currentText().strip()
-        self._cmd_mode(selected_mode)
+        self._request_mode(self.combo_modes.currentText(), self._flight_anchor(self.btn_set_mode, "btn_set_mode"))
 
     def _cmd_mode(self, mode_name: str):
         if not self.worker or not self.worker.isRunning():
@@ -474,6 +528,7 @@ class FlightCommandsMixin:
             return
         self.console.log_cmd(f"Switching mode to {mode_name}...")
         self.page_terminal.log_cmd(f"Switching mode to {mode_name}...")
+        self._note_gcs_mode_cmd()
         self.worker.set_mode(mode_name)
         self.toast.show_message(f"Mode set: {mode_name}", "#1f6feb")
         if "LAND" in mode_name.upper():

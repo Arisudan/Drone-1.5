@@ -448,7 +448,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
         # Header ARM / DISARM / MODE: the same handlers as the Control tab (ARM slides to confirm, DISARM is a single click).
         self.page_slam.flight_bar.arm_requested.connect(self._request_arm)
         self.page_slam.flight_bar.disarm_requested.connect(self._cmd_disarm)
-        self.page_slam.flight_bar.mode_requested.connect(self._cmd_mode)
+        self.page_slam.flight_bar.mode_requested.connect(
+            lambda m: self._request_mode(m, self.page_slam.flight_bar.btn_set_mode))
         self.page_slam.flight_bar.takeoff_requested.connect(self._request_takeoff)
         # "Fix first" in the left rail's checklist jumps to the page that shows that check.
         self.sidebar.checklist.action_requested.connect(
@@ -1366,6 +1367,8 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
             t.pos_var_n, t.pos_var_e, t.pos_var_time)
         self.page_slam.set_armed_state(t.armed)
         self.page_slam.flight_bar.set_state(t.connected, t.armed, t.flight_mode)
+        self._track_mode_source(t.flight_mode)
+        self._sync_mode_box(self.combo_modes, t.flight_mode)
         t.check_motor_staleness()
         self.page_motors.update_pwms(t.motor_pwms, age_s=t.motor_age)
 
@@ -1500,6 +1503,7 @@ class DroneGCSMainWindow(FlightCommandsMixin, MissionControlMixin, AlarmControlM
                     self.climb_start_time = 0.0
                     self.path_in_progress = False
                     self.offboard_pump_timer.stop()
+                    self._note_gcs_mode_cmd()
                     self.worker.set_mode("AUTO.LOITER")
                     self.page_slam.set_executing_state(False, paused=False)
                     self.console.log_error(
