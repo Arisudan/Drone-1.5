@@ -1,0 +1,34 @@
+# ==============================================================================
+# Python dependencies for the Drone-GCS ground station (runs on the LAPTOP)
+# ==============================================================================
+# Install (Python 3.10+; tested on Ubuntu 24.04 / Python 3.12):
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#   ./scripts/gcs/run_drone_gcs.sh
+#
+# Without a venv on Ubuntu 24.04 (externally managed Python):
+#   pip install --break-system-packages -r requirements.txt
+#
+# These are the only third-party Python packages the GCS imports. Everything else
+# it uses ships with Python. Not installed by pip (see setup.md):
+#   - Radxa-only packages (ROS 2 Jazzy, rtabmap, realsense, mavlink-router): installed with apt
+#     on the Radxa; the GCS laptop does not need them (the map arrives over the TCP map bridge).
+#   - Link range test window only: sudo apt install python3-tk iw openssh-client
+#   - Running the GUI tests headless: sudo apt install xvfb
+# ==============================================================================
+
+# GUI framework (the whole station is PyQt5; QtNetwork/QtTest come with it)
+PyQt5>=5.15.10
+PyQt5-sip>=12.13.0
+
+# Maps, poses, paths and frames (numpy arrays everywhere)
+numpy>=1.24.0
+
+# Video feed, recording and image drawing (provides `cv2`; the plain build is enough here)
+opencv-python>=4.8.0
+
+# MAVLink protocol to the Pixhawk (arm, modes, takeoff, OFFBOARD setpoints, telemetry)
+pymavlink>=2.4.30
+# Needed by pymavlink for serial links, harmless for TCP/UDP
+pyserial>=3.5

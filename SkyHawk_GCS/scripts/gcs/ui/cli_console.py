@@ -1,0 +1,189 @@
+"""
+================================================================================
+MODULE: cli_console.py
+PURPOSE: Interactive Terminal Console Widget with Command History & Live Logging
+================================================================================
+
+ARCHITECTURE & CONTEXT:
+  * Runs On:       Laptop Ground Station (GCS UI Layer)
+  * Communicates:  drone_gcs.py command parser & execution tracker
+  * Upstream:      Keyboard inputs & MAVLink / ROS 2 event logging streams
+  * Downstream:    Operator terminal output & MAVLink command dispatcher
+
+DATA FLOW & INTERFACES:
+  * Inputs:        Raw command strings entered at the `cmd>` prompt.
+  * Outputs:       Timestamped formatted log messages ([HH:MM:SS] format).
+  * Qt Signals:    command_submitted(str) emitted when Enter is pressed.
+
+KEY LOGIC & FAILSAFES:
+  * Interactive Shell Navigation: Implements shell-like Up/Down arrow history recall
+    with circular navigation and duplicate entry suppression.
+  * Auto-Scrolling & Memory Buffering: Scrolls to the bottom on new log arrival
+    while capping buffer length to prevent memory bloat during multi-hour flights.
+  * Thread-Safe Log Appending: Exposes clean `append_log(msg)` API for invoking
+    from both UI events and background worker threads.
+
+USAGE:
+  console = CLIConsoleWidget()
+  console.command_submitted.connect(self.handle_command)
+  console.append_log("System initialized successfully")
+================================================================================
+"""
+
+from __future__ import annotations
+from datetime import datetime
+from typing import Optional, List
+
+from ui.scaling import px
+
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QFont, QTextCursor
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QSizePolicy, QFrame
+)
+
+
+
+class CommandLineEdit(QLineEdit):
+    """QLineEdit with Up/Down arrow history recall."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.history: List[str] = []
+        self.history_idx: int = -1
+
+    def add_history(self, cmd: str):
+        cmd = cmd.strip()
+        if cmd and (not self.history or self.history[-1] != cmd):
+            self.history.append(cmd)
+        self.history_idx = len(self.history)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Up:
+            if self.history and self.history_idx > 0:
+                self.history_idx -= 1
+                self.setText(self.history[self.history_idx])
+            return
+        elif event.key() == Qt.Key_Down:
+            if self.history and self.history_idx < len(self.history) - 1:
+                self.history_idx += 1
+                self.setText(self.history[self.history_idx])
+            else:
+                self.history_idx = len(self.history)
+                self.clear()
+            return
+        super().keyPressEvent(event)
+
+
+LOG_LINES = 3           # minimum visible lines; above that the box takes the height it is given
+
+
+class CLIConsoleWidget(QWidget):
+    """Console widget hosting terminal output and cmd> input bar."""
+
+    command_submitted = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.setObjectName("cliConsole")
+
+        # Log Text Box
+        self.log_box = QPlainTextEdit(self)
+        self.log_box.setReadOnly(True)
+        self.log_box.setFont(QFont("Ubuntu Mono", 12))
+        self.log_box.setFrameShape(QFrame.NoFrame)
+        self.log_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log_box.setMaximumBlockCount(1000)
+        # A floor of LOG_LINES lines; above that the box takes whatever height the window has to spare. Its size
+        # follows the WINDOW only - arriving text never changes it. (Word-wrap and the scrollbars keep Qt's
+        # defaults - wrapping on, scrollbars only when needed.)
+        self.log_box.setMinimumHeight(self._locked_log_height())
+        layout.addWidget(self.log_box, 1)
+
+        # Bottom Input Bar. This is the operator's primary text interface to the
+        # vehicle, so it is sized like one: a 30px-tall 14px monospaced field
+        # with real buttons, rather than the same dimensions as an incidental
+        # form control elsewhere in the app.
+        input_bar = QHBoxLayout()
+        input_bar.setContentsMargins(px(8), 0, px(8), 0)
+        input_bar.setSpacing(10)
+
+        prompt_lbl = QLabel("cmd\u203a")
+        prompt_lbl.setObjectName("cliPrompt")
+        input_bar.addWidget(prompt_lbl)
+
+        self.cmd_input = CommandLineEdit(self)
+        self.cmd_input.setObjectName("cliInput")
+        # Short enough to render in full at every UI scale. The long form was
+        # always elided mid-word, which made the examples unreadable - and an
+        # unreadable example is worse than a shorter one.
+        self.cmd_input.setPlaceholderText("move 1 0 0  |  takeoff 1.5  |  help")
+        self.cmd_input.returnPressed.connect(self._handle_send)
+        input_bar.addWidget(self.cmd_input, 1)
+
+        btn_send = QPushButton("SEND")
+        btn_send.setObjectName("btnCliSend")
+        btn_send.clicked.connect(self._handle_send)
+        btn_send.setProperty("role", "go")
+        btn_send.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)   # exactly its natural size, always
+        input_bar.addWidget(btn_send)
+
+        btn_clear = QPushButton("CLEAR")
+        btn_clear.setObjectName("btnCliClear")
+        btn_clear.clicked.connect(self.log_box.clear)
+        btn_clear.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        input_bar.addWidget(btn_clear)
+
+        layout.addLayout(input_bar)
+
+    def _locked_log_height(self) -> int:
+        """Height of LOG_LINES text lines plus the frame."""
+        fm = self.log_box.fontMetrics()
+        return fm.lineSpacing() * LOG_LINES + 2 * self.log_box.frameWidth() + 8
+
+    def _handle_send(self):
+        text = self.cmd_input.text().strip()
+        if not text:
+            return
+        self.cmd_input.add_history(text)
+        self.cmd_input.clear()
+        self.log_cmd(f"> {text}")
+        self.command_submitted.emit(text)
+
+    def _append_log(self, text: str, color_hex: str = "#a3aaa5"):
+        """Append one line and follow the tail.
+
+        moveCursor(End) alone moved the caret but left the viewport wherever it
+        was, so a busy console could scroll out from under the newest line.
+        This pins the scrollbar to the bottom - but only when it was already
+        there, so scrolling up to read an earlier message is not yanked away by
+        the next packet to arrive.
+        """
+        bar = self.log_box.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+
+        ts = datetime.now().strftime("%H:%M:%S")
+        html = f'<span style="color:#6f7772">[{ts}]</span> <span style="color:{color_hex}">{text}</span>'
+        self.log_box.appendHtml(html)
+
+        if follow:
+            self.log_box.moveCursor(QTextCursor.End)
+            bar.setValue(bar.maximum())
+
+    def log_info(self, msg: str):
+        self._append_log(msg, "#a3aaa5")
+
+    def log_success(self, msg: str):
+        self._append_log(msg, "#46d06a")
+
+    def log_warning(self, msg: str):
+        self._append_log(msg, "#ffb02e")
+
+    def log_error(self, msg: str):
+        self._append_log(msg, "#ff5a4f")
+
+    def log_cmd(self, msg: str):
+        self._append_log(msg, "#e9ece9")

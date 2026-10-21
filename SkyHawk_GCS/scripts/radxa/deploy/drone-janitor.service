@@ -1,0 +1,9 @@
+[Unit]
+Description=Drone log cleanup (ROS logs, telemetry logs)
+
+[Service]
+Type=oneshot
+User=@USER@
+Environment=HOME=@HOME@
+ExecStart=/usr/bin/python3 @HOME@/Flop/scripts/radxa/radxa_log_janitor.py --apply
+Nice=10

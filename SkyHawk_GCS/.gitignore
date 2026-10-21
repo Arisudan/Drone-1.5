@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# ROS 2 / colcon build artifacts
+build/
+install/
+log/
+
+# Generated at runtime, not source
+out_mapping/
+.gcs_launch.log
+
+# Operator-local state (lives in ~/.drone_gcs, but never commit a stray copy)
+settings.json
+flights.jsonl
+
+# OS / editor cruft
+.DS_Store
+*.swp
